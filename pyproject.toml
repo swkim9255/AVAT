@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "katri-video-investigator"
+version = "0.1.0"
+description = "Frame-accurate accident video review and investigation desktop tool"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "PySide6>=6.7,<7",
+    "opencv-python>=4.9,<5",
+    "numpy>=1.24,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.6,<1",
+]
+
+[project.gui-scripts]
+katri-investigator = "investigator.app:main"
+
+[tool.setuptools.packages.find]
+include = ["investigator*"]
+
+[tool.setuptools.package-data]
+investigator = ["assets/material_symbols/*", "assets/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
