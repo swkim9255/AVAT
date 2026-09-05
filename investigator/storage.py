@@ -13,6 +13,7 @@ from investigator.models import SCHEMA_VERSION, InvestigationCase
 from investigator.schema import csv_headers, values_to_csv
 
 DATABASE_FILENAME = "investigations.json"
+AUTO_IMPORT_EXCLUSIONS_KEY = "auto_import_exclusions"
 
 
 class WorkspaceError(RuntimeError):
@@ -20,7 +21,9 @@ class WorkspaceError(RuntimeError):
 
 
 def _safe_csv_text(value: Any) -> str:
-    text = "" if value is None else str(value)
+    text = str(value) if value is not None else ""
+    if not text.strip():
+        return "null"
     # Prevent spreadsheet applications from interpreting user text as formulae.
     if text.startswith(("=", "+", "-", "@")):
         return "'" + text
@@ -33,6 +36,7 @@ class CaseRepository:
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.database_path = self.workspace / DATABASE_FILENAME
+        self.auto_import_exclusions: set[str] = set()
 
     def ensure_workspace(self) -> None:
         try:
@@ -45,6 +49,7 @@ class CaseRepository:
     def load(self) -> list[InvestigationCase]:
         self.ensure_workspace()
         if not self.database_path.exists():
+            self.auto_import_exclusions = set()
             return []
         try:
             data = json.loads(self.database_path.read_text(encoding="utf-8"))
@@ -57,6 +62,21 @@ class CaseRepository:
         raw_cases = data.get("cases")
         if not isinstance(raw_cases, list):
             raise WorkspaceError("조사 데이터의 cases 항목이 올바르지 않습니다.")
+        raw_exclusions = data.get(AUTO_IMPORT_EXCLUSIONS_KEY, [])
+        if not isinstance(raw_exclusions, list) or any(
+            not isinstance(path, str) or not path.strip() for path in raw_exclusions
+        ):
+            raise WorkspaceError(
+                f"조사 데이터의 {AUTO_IMPORT_EXCLUSIONS_KEY} 항목이 올바르지 않습니다."
+            )
+        try:
+            exclusions = {
+                str(Path(path).expanduser().resolve()).casefold() for path in raw_exclusions
+            }
+        except (OSError, ValueError) as exc:
+            raise WorkspaceError(
+                f"조사 데이터의 {AUTO_IMPORT_EXCLUSIONS_KEY} 경로가 올바르지 않습니다."
+            ) from exc
         cases: list[InvestigationCase] = []
         for index, item in enumerate(raw_cases):
             if not isinstance(item, dict):
@@ -95,9 +115,16 @@ class CaseRepository:
                         raise WorkspaceError(
                             f"완료 상태인 사고의 마커 순서가 올바르지 않습니다: {case.display_id}"
                         )
+        self.auto_import_exclusions = exclusions
         return cases
 
-    def save(self, cases: list[InvestigationCase], *, active_case_uid: str | None = None) -> None:
+    def save(
+        self,
+        cases: list[InvestigationCase],
+        *,
+        active_case_uid: str | None = None,
+        auto_import_exclusions: set[str] | None = None,
+    ) -> None:
         self.ensure_workspace()
         seen: set[tuple[str, str]] = set()
         seen_uids: set[str] = set()
@@ -116,9 +143,21 @@ class CaseRepository:
                 raise WorkspaceError(
                     f"완료 조건을 충족하지 않은 사고는 완료 상태로 저장할 수 없습니다: {case.display_id}"
                 )
+        requested_exclusions = (
+            self.auto_import_exclusions
+            if auto_import_exclusions is None
+            else auto_import_exclusions
+        )
+        try:
+            normalized_exclusions = {
+                str(Path(path).expanduser().resolve()).casefold() for path in requested_exclusions
+            }
+        except (OSError, ValueError) as exc:
+            raise WorkspaceError("자동 영상 검색 제외 경로를 저장할 수 없습니다.") from exc
         payload = {
             "schema_version": SCHEMA_VERSION,
             "active_case_uid": active_case_uid,
+            AUTO_IMPORT_EXCLUSIONS_KEY: sorted(normalized_exclusions),
             "cases": [case.to_dict() for case in cases],
         }
         try:
@@ -142,6 +181,7 @@ class CaseRepository:
                 os.fsync(handle.fileno())
                 temporary_path = Path(handle.name)
             os.replace(temporary_path, self.database_path)
+            self.auto_import_exclusions = normalized_exclusions
         except OSError as exc:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -181,7 +221,12 @@ class CaseRepository:
                 dir=destination.parent,
                 delete=False,
             ) as handle:
-                writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=headers,
+                    restval="null",
+                    extrasaction="ignore",
+                )
                 writer.writeheader()
                 for case in cases:
                     row = {
@@ -193,15 +238,23 @@ class CaseRepository:
                         if case.trigger_frame is None
                         else str(case.trigger_frame),
                         "collision_frames": "|".join(map(str, case.collision_frames)),
-                        "video_markers": json.dumps(
-                            case.markers_by_video,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
+                        "video_markers": (
+                            json.dumps(
+                                case.markers_by_video,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
+                            if any(
+                                marker.get("trigger_frame") is not None
+                                or bool(marker.get("collision_frames"))
+                                for marker in case.markers_by_video.values()
+                            )
+                            else None
                         ),
                         **values_to_csv(case.values),
                     }
-                    writer.writerow({key: _safe_csv_text(value) for key, value in row.items()})
+                    writer.writerow({header: _safe_csv_text(row.get(header)) for header in headers})
                 handle.flush()
                 os.fsync(handle.fileno())
                 temporary_path = Path(handle.name)
@@ -213,4 +266,9 @@ class CaseRepository:
         return destination
 
 
-__all__ = ["CaseRepository", "DATABASE_FILENAME", "WorkspaceError"]
+__all__ = [
+    "AUTO_IMPORT_EXCLUSIONS_KEY",
+    "CaseRepository",
+    "DATABASE_FILENAME",
+    "WorkspaceError",
+]

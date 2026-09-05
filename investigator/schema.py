@@ -80,11 +80,44 @@ IDENTITY_FIELDS = (
         FieldKind.DIGITS,
         "accident_classification",
         required=True,
-        max_length=8,
-        placeholder="001",
-        helper="숫자만 입력하며 앞자리 0이 유지됩니다.",
+        max_length=13,
+        placeholder="사고 구분 번호",
+        helper="숫자 최대 13자리이며 앞자리 0이 유지됩니다.",
     ),
 )
+
+
+DRIVER_AGE_CHOICES = choices(*(f"{start}-{start + 4}세" for start in range(20, 100, 5)))
+
+
+def normalize_driver_age(value: Any) -> str | None:
+    """Map a legacy numeric age to the corresponding five-year range."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    allowed = {choice.value for choice in DRIVER_AGE_CHOICES}
+    if text in allowed:
+        return text
+    if text.isdigit():
+        age = int(text)
+        if 20 <= age <= 99:
+            start = 20 + ((age - 20) // 5) * 5
+            return f"{start}-{start + 4}세"
+    return None
+
+
+def incident_day_for_date(value: Any) -> str | None:
+    """Return the Korean weekday for a valid YYYYMMDD value."""
+
+    text = str(value).strip() if value is not None else ""
+    if len(text) != 8 or not text.isdigit():
+        return None
+    try:
+        parsed = datetime.strptime(text, "%Y%m%d")
+    except ValueError:
+        return None
+    return ("월", "화", "수", "목", "금", "토", "일")[parsed.weekday()]
 
 
 DRIVER = SectionSpec(
@@ -114,13 +147,11 @@ DRIVER = SectionSpec(
         FieldSpec(
             "driver_age",
             "운전 연령",
-            FieldKind.DIGITS,
+            FieldKind.SINGLE,
             "driver_age",
+            choices=DRIVER_AGE_CHOICES,
             required=True,
-            max_length=2,
-            placeholder="00",
-            helper="0~99, 최대 2자리",
-            unit="세",
+            placeholder="연령대 선택",
         ),
     ),
 )
@@ -212,9 +243,8 @@ VEHICLE = SectionSpec(
             FieldKind.DIGITS,
             "vehicle_milege",
             required=True,
-            max_length=6,
             placeholder="12345",
-            helper="최대 6자리",
+            helper="숫자 입력",
             unit="km",
         ),
     ),
@@ -524,7 +554,6 @@ ENVIRONMENT = SectionSpec(
             FieldKind.SINGLE,
             "incident_day",
             choices("월", "화", "수", "목", "금", "토", "일"),
-            required=True,
         ),
         FieldSpec(
             "incident_date",
@@ -886,21 +915,9 @@ def values_to_csv(values: dict[str, Any]) -> dict[str, str]:
             selected = set(
                 value if isinstance(value, list) else ([] if is_blank(value) else [value])
             )
-            if field.group == "obstacle_detail" and obstacle_answer in {"유", "무"}:
-                selected = set() if obstacle_answer == "무" else selected
-                answered = True
-            elif field.key == "site_types" and any(
-                not is_blank(values.get(key))
-                for key in ("site_types", "site_special_areas", "site_manual_input")
-            ):
-                answered = True
-            else:
-                answered = value is not None
             for choice in field.choices:
                 if choice.csv_column:
-                    row[choice.csv_column] = (
-                        ("1" if choice.value in selected else "0") if answered else ""
-                    )
+                    row[choice.csv_column] = "1" if choice.value in selected else ""
             continue
         if not field.csv_column or is_blank(value):
             continue
@@ -919,6 +936,7 @@ def values_to_csv(values: dict[str, Any]) -> dict[str, str]:
 
 __all__ = [
     "ALL_FIELDS",
+    "DRIVER_AGE_CHOICES",
     "EVIDENCE",
     "FIELD_BY_KEY",
     "FieldKind",
@@ -931,7 +949,9 @@ __all__ = [
     "VEHICLE_MANUFACTURER_CHOICES",
     "csv_headers",
     "field_label",
+    "incident_day_for_date",
     "missing_questions",
+    "normalize_driver_age",
     "validation_errors",
     "values_to_csv",
 ]

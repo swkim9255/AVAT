@@ -9,8 +9,7 @@ from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QPainter,
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from investigator.theme import MUTED, VIDEO_BACKGROUND, material_icon
-
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv", ".webm"}
+from investigator.video_import import VIDEO_EXTENSIONS
 
 
 class VideoCanvas(QWidget):

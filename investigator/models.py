@@ -11,7 +11,9 @@ from uuid import uuid4
 from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
     MISSING_VALUE_MESSAGE,
+    incident_day_for_date,
     missing_questions,
+    normalize_driver_age,
     validation_errors,
 )
 
@@ -51,6 +53,14 @@ class InvestigationCase:
 
     def __post_init__(self) -> None:
         self.values = normalize_json_value(self.values)
+        normalized_age = normalize_driver_age(self.values.get("driver_age"))
+        if normalized_age is not None:
+            self.values["driver_age"] = normalized_age
+        normalized_day = incident_day_for_date(self.values.get("incident_date"))
+        if normalized_day is None:
+            self.values.pop("incident_day", None)
+        else:
+            self.values["incident_day"] = normalized_day
         self.videos = [str(Path(path)) for path in self.videos]
         self.active_video_index = max(0, int(self.active_video_index))
         if self.videos:
@@ -157,17 +167,57 @@ class InvestigationCase:
             self.status = "draft"
             self.completed_at = None
 
-    def attach_videos(self, paths: list[str | Path]) -> None:
-        case_markers = self.markers_by_video.pop("__case__", None) if not self.videos else None
+    def attach_videos(self, paths: list[str | Path]) -> int:
+        was_empty = not self.videos
         known = {str(Path(path).expanduser().resolve()).casefold() for path in self.videos}
+        added: list[str] = []
         for path in paths:
             resolved = str(Path(path).expanduser().resolve())
             if resolved.casefold() not in known:
-                self.videos.append(resolved)
+                added.append(resolved)
                 known.add(resolved.casefold())
-        if case_markers is not None and self.videos:
+
+        # A repeated folder import must be a true no-op. In particular, do not
+        # reopen a completed investigation merely because all paths were
+        # already attached.
+        if not added:
+            return 0
+
+        case_markers = self.markers_by_video.pop("__case__", None) if was_empty else None
+        self.videos.extend(added)
+        if case_markers is not None:
             self.markers_by_video[self.videos[0]] = case_markers
         self.mark_edited()
+        return len(added)
+
+    def remove_video(self, index: int) -> str:
+        """Remove one video link and its markers without touching the source file."""
+
+        if not 0 <= index < len(self.videos):
+            raise IndexError("영상 인덱스가 범위를 벗어났습니다.")
+
+        previous_active = self.active_video_index
+        removed = self.videos.pop(index)
+        removed_key = str(Path(removed).expanduser().resolve()).casefold()
+        for marker_key in list(self.markers_by_video):
+            if marker_key == "__case__":
+                continue
+            if str(Path(marker_key).expanduser().resolve()).casefold() == removed_key:
+                self.markers_by_video.pop(marker_key, None)
+
+        if not self.videos:
+            self.active_video_index = 0
+            self.markers_by_video.clear()
+        elif index < previous_active:
+            self.active_video_index = previous_active - 1
+        elif index == previous_active:
+            # Prefer the next item, or the previous item when the removed video
+            # was the last one in the list.
+            self.active_video_index = min(index, len(self.videos) - 1)
+        else:
+            self.active_video_index = min(previous_active, len(self.videos) - 1)
+        self.mark_edited()
+        return removed
 
     def set_trigger(self, frame: int | None) -> None:
         marker = self._current_markers()

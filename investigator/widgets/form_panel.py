@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QRegularExpression, Qt, Signal
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtCore import QDate, QLocale, QRegularExpression, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPalette, QRegularExpressionValidator, QTextCharFormat
 from PySide6.QtWidgets import (
+    QCalendarWidget,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -16,16 +16,25 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
-from investigator.schema import IDENTITY_FIELDS, SECTIONS, FieldKind, FieldSpec
-from investigator.theme import MUTED, PRIMARY, material_icon
+from investigator.schema import (
+    IDENTITY_FIELDS,
+    SECTIONS,
+    FieldKind,
+    FieldSpec,
+    incident_day_for_date,
+)
+from investigator.theme import BORDER, MUTED, PRIMARY, SURFACE, TEXT, material_icon
 
 
 class FieldEditor(QWidget):
@@ -57,6 +66,25 @@ class FieldEditor(QWidget):
 
     def _make_control(self) -> QWidget:
         spec = self.spec
+        if spec.key == "incident_day":
+            display = QLineEdit(self)
+            display.setObjectName("field_incident_day")
+            display.setReadOnly(True)
+            display.setPlaceholderText("사고일자 선택 시 자동 계산")
+            display.setToolTip("사고일자를 선택하거나 입력하면 자동으로 계산됩니다.")
+            display.setAccessibleDescription("사고일자에서 자동으로 계산되는 읽기 전용 값")
+            display.setStyleSheet(
+                "QLineEdit#field_incident_day {"
+                " background: #F1F5F9; color: #475569; border-color: #CBD5E1;"
+                "}"
+                "QLineEdit#field_incident_day:focus { border: 1px solid #CBD5E1; }"
+                "QLineEdit#field_incident_day[invalid=true] {"
+                " background: #FEF2F2; border: 1px solid #DC2626;"
+                "}"
+            )
+            self.line_edit = display
+            return display
+
         if spec.kind is FieldKind.SINGLE:
             combo = QComboBox(self)
             combo.setObjectName(f"field_{spec.key}")
@@ -105,10 +133,8 @@ class FieldEditor(QWidget):
         if spec.max_length:
             edit.setMaxLength(spec.max_length)
         if spec.kind is FieldKind.DIGITS:
-            maximum = spec.max_length or 12
-            edit.setValidator(
-                QRegularExpressionValidator(QRegularExpression(rf"\d{{0,{maximum}}}"), edit)
-            )
+            digit_pattern = rf"\d{{0,{spec.max_length}}}" if spec.max_length is not None else r"\d*"
+            edit.setValidator(QRegularExpressionValidator(QRegularExpression(digit_pattern), edit))
             edit.setInputMethodHints(Qt.InputMethodHint.ImhDigitsOnly)
         elif spec.kind is FieldKind.DECIMAL:
             edit.setValidator(
@@ -118,11 +144,87 @@ class FieldEditor(QWidget):
         edit.textEdited.connect(lambda text: self._emit(text.strip()))
         self.line_edit = edit
         layout.addWidget(edit, 1)
+        if spec.key == "incident_date":
+            self.calendar_button = QToolButton(row)
+            self.calendar_button.setObjectName("incidentDateCalendarButton")
+            self.calendar_button.setIcon(material_icon("calendar_month", PRIMARY))
+            self.calendar_button.setIconSize(QSize(20, 20))
+            self.calendar_button.setFixedSize(36, 36)
+            self.calendar_button.setToolTip("사고일자 선택")
+            self.calendar_button.setAccessibleName("사고일자 선택")
+            self.calendar_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+            self.calendar_menu = QMenu(self.calendar_button)
+            self.calendar_widget = QCalendarWidget(self.calendar_menu)
+            self.calendar_widget.setObjectName("incidentDateCalendar")
+            self.calendar_widget.setLocale(
+                QLocale(QLocale.Language.Korean, QLocale.Country.SouthKorea)
+            )
+            self.calendar_widget.setGridVisible(True)
+            self.calendar_widget.setFirstDayOfWeek(Qt.DayOfWeek.Sunday)
+            self.calendar_widget.setVerticalHeaderFormat(
+                QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader
+            )
+            calendar_palette = self.calendar_widget.palette()
+            calendar_palette.setColor(QPalette.ColorRole.Highlight, QColor(BORDER))
+            calendar_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT))
+            self.calendar_widget.setPalette(calendar_palette)
+            header_format = QTextCharFormat()
+            header_format.setBackground(QColor("#F8FAFC"))
+            header_format.setForeground(QColor(MUTED))
+            self.calendar_widget.setHeaderTextFormat(header_format)
+            self.calendar_widget.setStyleSheet(
+                f"""
+                QCalendarWidget QWidget#qt_calendar_navigationbar {{
+                    background: #F8FAFC;
+                    border-bottom: 1px solid {BORDER};
+                }}
+                QCalendarWidget QToolButton {{
+                    color: {TEXT};
+                    background: transparent;
+                    border: 0;
+                    border-radius: 4px;
+                    padding: 4px;
+                }}
+                QCalendarWidget QToolButton:hover {{ background: {BORDER}; }}
+                QCalendarWidget QToolButton::menu-indicator {{ image: none; }}
+                QCalendarWidget QAbstractItemView:enabled {{
+                    color: {TEXT};
+                    background: {SURFACE};
+                    selection-background-color: {BORDER};
+                    selection-color: {TEXT};
+                }}
+                """
+            )
+            calendar_action = QWidgetAction(self.calendar_menu)
+            calendar_action.setDefaultWidget(self.calendar_widget)
+            self.calendar_menu.addAction(calendar_action)
+            self.calendar_button.setMenu(self.calendar_menu)
+            self.calendar_menu.aboutToShow.connect(self._prepare_incident_calendar)
+            self.calendar_widget.clicked.connect(self._select_incident_date)
+            self.calendar_widget.activated.connect(self._select_incident_date)
+            layout.addWidget(self.calendar_button)
         if spec.unit:
             unit = QLabel(spec.unit, row)
             unit.setStyleSheet(f"color: {MUTED};")
             layout.addWidget(unit)
         return row
+
+    def _prepare_incident_calendar(self) -> None:
+        selected = QDate.fromString(self.line_edit.text().strip(), "yyyyMMdd")
+        if not selected.isValid():
+            selected = QDate.currentDate()
+        self.calendar_widget.setSelectedDate(selected)
+        self.calendar_widget.setCurrentPage(selected.year(), selected.month())
+
+    def _select_incident_date(self, selected: QDate) -> None:
+        if not selected.isValid():
+            return
+        text = selected.toString("yyyyMMdd")
+        self.line_edit.setText(text)
+        self._emit(text)
+        self.calendar_menu.close()
+        self.line_edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _combo_changed(self, text: str) -> None:
         if self._loading:
@@ -165,6 +267,8 @@ class FieldEditor(QWidget):
             self.value_changed.emit(self.spec.key, value)
 
     def value(self) -> Any:
+        if self.spec.key == "incident_day":
+            return self.line_edit.text().strip() or None
         if self.spec.kind is FieldKind.SINGLE:
             combo = self.control
             assert isinstance(combo, QComboBox)
@@ -188,7 +292,9 @@ class FieldEditor(QWidget):
     def set_value(self, value: Any) -> None:
         self._loading = True
         try:
-            if self.spec.kind is FieldKind.SINGLE:
+            if self.spec.key == "incident_day":
+                self.line_edit.setText("" if value is None else str(value))
+            elif self.spec.kind is FieldKind.SINGLE:
                 combo = self.control
                 assert isinstance(combo, QComboBox)
                 if self.spec.key == "institution" and isinstance(value, str):
@@ -221,7 +327,10 @@ class FieldEditor(QWidget):
             else getattr(self, "line_edit", self.control)
         )
         target.setProperty("invalid", bool(message))
-        target.setToolTip(message or "")
+        if self.spec.key == "incident_day" and not message:
+            target.setToolTip("사고일자를 선택하거나 입력하면 자동으로 계산됩니다.")
+        else:
+            target.setToolTip(message or "")
         target.style().unpolish(target)
         target.style().polish(target)
 
@@ -240,6 +349,7 @@ class InvestigationPanel(QWidget):
         self.setObjectName("panel")
         self.setMinimumWidth(448)
         self.editors: dict[str, FieldEditor] = {}
+        self.section_field_grids: dict[str, QGridLayout] = {}
         self._loading = False
 
         root = QVBoxLayout(self)
@@ -289,8 +399,37 @@ class InvestigationPanel(QWidget):
             section_label = QLabel(section.title, page)
             section_label.setStyleSheet("font-size: 15px; font-weight: 700; padding: 8px 0;")
             page_layout.addWidget(section_label)
-            for spec in section.fields:
-                page_layout.addWidget(self._add_editor(spec, page))
+            section_fields = list(section.fields)
+            if section.key == "environment":
+                day_index = next(
+                    index
+                    for index, field in enumerate(section_fields)
+                    if field.key == "incident_day"
+                )
+                date_index = next(
+                    index
+                    for index, field in enumerate(section_fields)
+                    if field.key == "incident_date"
+                )
+                section_fields[day_index], section_fields[date_index] = (
+                    section_fields[date_index],
+                    section_fields[day_index],
+                )
+            if section.key == "trigger":
+                field_grid = QGridLayout()
+                field_grid.setObjectName("triggerFieldsGrid")
+                field_grid.setContentsMargins(0, 0, 0, 0)
+                field_grid.setHorizontalSpacing(12)
+                field_grid.setVerticalSpacing(0)
+                field_grid.setColumnStretch(0, 1)
+                field_grid.setColumnStretch(1, 1)
+                for index, spec in enumerate(section_fields):
+                    field_grid.addWidget(self._add_editor(spec, page), index // 2, index % 2)
+                self.section_field_grids[section.key] = field_grid
+                page_layout.addLayout(field_grid)
+            else:
+                for spec in section_fields:
+                    page_layout.addWidget(self._add_editor(spec, page))
             page_layout.addStretch(1)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, section.short_title)
@@ -351,8 +490,8 @@ class InvestigationPanel(QWidget):
             self._update_conditional_states(values)
         if key in {"collision_dist_value", "obstacle_dist_value"} and value not in (None, ""):
             self._apply_distance_range(key, str(value))
-        if key == "incident_date" and isinstance(value, str) and len(value) == 8:
-            self._apply_incident_day(value)
+        if key == "incident_date":
+            self._apply_incident_day(str(value or ""))
 
     def _apply_distance_range(self, key: str, text: str) -> None:
         try:
@@ -371,11 +510,7 @@ class InvestigationPanel(QWidget):
             self.value_changed.emit(target_key, target)
 
     def _apply_incident_day(self, text: str) -> None:
-        try:
-            parsed = datetime.strptime(text, "%Y%m%d")
-        except ValueError:
-            return
-        day = ("월", "화", "수", "목", "금", "토", "일")[parsed.weekday()]
+        day = incident_day_for_date(text)
         editor = self.editors["incident_day"]
         if editor.value() != day:
             editor.set_value(day)
