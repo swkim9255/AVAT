@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTabWidget,
+    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -122,6 +123,15 @@ class FieldEditor(QWidget):
                 self.checkboxes.append((checkbox, choice.value))
                 grid.addWidget(checkbox, index // columns, index % columns)
             return container
+
+        if spec.kind is FieldKind.LONG_TEXT:
+            text_edit = QTextEdit(self)
+            text_edit.setObjectName(f"field_{spec.key}")
+            text_edit.setPlaceholderText(spec.placeholder)
+            text_edit.setAcceptRichText(False)
+            text_edit.setMinimumHeight(240)
+            text_edit.textChanged.connect(lambda: self._emit(text_edit.toPlainText().strip()))
+            return text_edit
 
         row = QWidget(self)
         layout = QHBoxLayout(row)
@@ -287,6 +297,10 @@ class FieldEditor(QWidget):
             return value
         if self.spec.kind is FieldKind.MULTI:
             return [value for checkbox, value in self.checkboxes if checkbox.isChecked()]
+        if self.spec.kind is FieldKind.LONG_TEXT:
+            text_edit = self.control
+            assert isinstance(text_edit, QTextEdit)
+            return text_edit.toPlainText().strip()
         return self.line_edit.text().strip()
 
     def set_value(self, value: Any) -> None:
@@ -315,6 +329,10 @@ class FieldEditor(QWidget):
                 selected = set(value if isinstance(value, list) else [])
                 for checkbox, choice_value in self.checkboxes:
                     checkbox.setChecked(choice_value in selected)
+            elif self.spec.kind is FieldKind.LONG_TEXT:
+                text_edit = self.control
+                assert isinstance(text_edit, QTextEdit)
+                text_edit.setPlainText("" if value is None else str(value))
             else:
                 self.line_edit.setText("" if value is None else str(value))
         finally:
@@ -571,7 +589,7 @@ class InvestigationPanel(QWidget):
             scroll.ensureWidgetVisible(editor, 0, 16)
         if editor.spec.kind is FieldKind.MULTI and editor.checkboxes:
             focus_target = editor.checkboxes[0][0]
-        elif editor.spec.kind is FieldKind.SINGLE:
+        elif editor.spec.kind in {FieldKind.SINGLE, FieldKind.LONG_TEXT}:
             focus_target = editor.control
         else:
             focus_target = editor.line_edit

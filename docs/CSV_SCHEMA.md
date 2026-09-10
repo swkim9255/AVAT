@@ -22,6 +22,7 @@ CSV는 조사 사고 1건당 1행입니다. 앞의 7개 워크플로 메타데�
 - 장애물 `무`: 장애물 객체 하위 칼럼은 `null`. 최초장애물 거리 3개 칼럼은 선택 입력값을 보존
 - 블랙박스 근거: 기존 `data_list_Front_cam`, `data_list_Rear_cam`은 각각 자차 전방·후방에 사용하고, 타차 전방·후방은 `data_list_Other_Front_cam`, `data_list_Other_Rear_cam`에 기록
 - 피해 `확인불가`: `incident_damage_Unknown=1`, 네 피해 수치 칼럼은 `null`
+- 비고 탭의 사고 추가정보: `remarks` 칼럼에 글자 수 제한 없이 기록
 
 CSV 파일에 기록되기 직전 모든 빈 셀은 소문자 문자열 `null`로 변환됩니다. 명시적으로 입력되거나 단일 이진 판정에서 계산된 `0`은 `null`로 바꾸지 않습니다.
 

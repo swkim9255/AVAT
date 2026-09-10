@@ -15,6 +15,7 @@ INVALID_FORMAT_MESSAGE = "형식이 잘못되었습니다"
 
 class FieldKind(StrEnum):
     TEXT = "text"
+    LONG_TEXT = "long_text"
     DIGITS = "digits"
     DECIMAL = "decimal"
     SINGLE = "single"
@@ -720,6 +721,21 @@ EVIDENCE = SectionSpec(
     ),
 )
 
+NOTES = SectionSpec(
+    "notes",
+    "비고",
+    "비고",
+    (
+        FieldSpec(
+            "remarks",
+            "사고 추가정보",
+            FieldKind.LONG_TEXT,
+            "remarks",
+            placeholder="사고에 대한 추가정보를 입력하세요.",
+        ),
+    ),
+)
+
 SECTIONS = (
     DRIVER,
     VEHICLE,
@@ -729,6 +745,7 @@ SECTIONS = (
     ENVIRONMENT,
     COLLISION_OBJECTS,
     EVIDENCE,
+    NOTES,
 )
 ALL_FIELDS = IDENTITY_FIELDS + tuple(field for section in SECTIONS for field in section.fields)
 FIELD_BY_KEY = {field.key: field for field in ALL_FIELDS}
@@ -965,6 +982,7 @@ __all__ = [
     "IDENTITY_FIELDS",
     "INVALID_FORMAT_MESSAGE",
     "MISSING_VALUE_MESSAGE",
+    "NOTES",
     "SECTIONS",
     "SectionSpec",
     "VEHICLE_MANUFACTURER_CHOICES",

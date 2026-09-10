@@ -169,12 +169,13 @@ def apply_theme(app: QApplication) -> None:
             color: {SUCCESS}; background: #ECFDF5; border: 1px solid #A7F3D0;
             border-radius: 10px; padding: 3px 9px; font-size: 11px; font-weight: 700;
         }}
-        QLineEdit, QComboBox, QSpinBox {{
+        QLineEdit, QComboBox, QSpinBox, QTextEdit {{
             min-height: 34px; background: {SURFACE}; border: 1px solid #CBD5E1;
             border-radius: 7px; padding: 0 10px; selection-background-color: {PRIMARY};
         }}
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 2px solid {PRIMARY}; }}
-        QLineEdit[invalid="true"], QComboBox[invalid="true"] {{ border: 1px solid #DC2626; background: #FEF2F2; }}
+        QTextEdit {{ padding: 8px 10px; }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus {{ border: 2px solid {PRIMARY}; }}
+        QLineEdit[invalid="true"], QComboBox[invalid="true"], QTextEdit[invalid="true"] {{ border: 1px solid #DC2626; background: #FEF2F2; }}
         QComboBox::drop-down {{ border: 0; width: 28px; }}
         QComboBox QAbstractItemView {{ background: {SURFACE}; border: 1px solid {BORDER}; selection-background-color: {PRIMARY_SUBTLE}; selection-color: {TEXT}; padding: 4px; }}
         QPushButton, QToolButton {{
