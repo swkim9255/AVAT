@@ -876,9 +876,6 @@ class MainWindow(QMainWindow):
                 "obstacle_building_landscape",
                 "obstacle_other",
                 "obstacle_state",
-                "obstacle_dist_source",
-                "obstacle_dist_value",
-                "obstacle_dist_range",
             ):
                 case.values.pop(detail_key, None)
         if key == "incident_damage_unknown" and value == "확인불가":

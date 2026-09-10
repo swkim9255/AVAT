@@ -479,7 +479,7 @@ class InvestigationPanel(QWidget):
         self.value_changed.emit(key, value)
         if key == "obstacle_exists" and value == "무":
             for editor in self.editors.values():
-                if editor.spec.group in {"obstacle_detail", "obstacle_distance"}:
+                if editor.spec.group == "obstacle_detail":
                     editor.set_value(None)
         if key == "incident_damage_unknown" and value == "확인불가":
             for editor in self.editors.values():
@@ -523,7 +523,7 @@ class InvestigationPanel(QWidget):
             if editor.spec.group == "obstacle_detail":
                 editor.setEnabled(obstacle_enabled)
             elif editor.spec.group == "obstacle_distance":
-                editor.setEnabled(values.get("obstacle_exists") != "무")
+                editor.setEnabled(True)
             elif editor.spec.group == "damage_counts":
                 editor.setEnabled(damage_enabled)
 

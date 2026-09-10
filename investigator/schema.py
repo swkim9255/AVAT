@@ -89,6 +89,27 @@ IDENTITY_FIELDS = (
 
 DRIVER_AGE_CHOICES = choices(*(f"{start}-{start + 4}세" for start in range(20, 100, 5)))
 
+TRIGGER_VEHICLE_SPEED_CHOICES = choices(
+    "정차(0kph)",
+    "크립(0-10kph)",
+    "저속(10-30kph)",
+    "중속(30-60kph)",
+    "고속(60kph이상)",
+)
+
+LEGACY_TRIGGER_VEHICLE_SPEED_VALUES = {
+    "정차": "정차(0kph)",
+    "크립": "크립(0-10kph)",
+    "저속": "저속(10-30kph)",
+    "중속": "중속(30-60kph)",
+    "고속": "고속(60kph이상)",
+}
+
+LEGACY_AVAILABLE_DATA_VALUES = {
+    "전방블랙박스": "자차전방블랙박스",
+    "후방블랙박스": "자차후방블랙박스",
+}
+
 
 def normalize_driver_age(value: Any) -> str | None:
     """Map a legacy numeric age to the corresponding five-year range."""
@@ -268,9 +289,8 @@ TRIGGER = SectionSpec(
             "차량 속도 (추정)",
             FieldKind.SINGLE,
             "trigger_vehicle_speed",
-            choices("정차", "크립", "저속", "중속", "고속"),
+            TRIGGER_VEHICLE_SPEED_CHOICES,
             required=True,
-            helper="정차 0 · 크립 0~10 · 저속 10~30 · 중속 30~60 · 고속 60km/h 이상",
         ),
         FieldSpec(
             "trigger_vehicle_driving_state",
@@ -675,8 +695,10 @@ COLLISION_OBJECTS = SectionSpec(
 
 AVAILABLE_DATA_CHOICES = (
     Choice("EDR", "EDR", "data_list_EDR"),
-    Choice("전방블랙박스", "전방블랙박스", "data_list_Front_cam"),
-    Choice("후방블랙박스", "후방블랙박스", "data_list_Rear_cam"),
+    Choice("자차전방블랙박스", "자차전방블랙박스", "data_list_Front_cam"),
+    Choice("자차후방블랙박스", "자차후방블랙박스", "data_list_Rear_cam"),
+    Choice("타차전방블랙박스", "타차전방블랙박스", "data_list_Other_Front_cam"),
+    Choice("타차후방블랙박스", "타차후방블랙박스", "data_list_Other_Rear_cam"),
     Choice("페달캠", "페달캠", "data_list_Pedal_cam"),
     Choice("CCTV", "CCTV", "data_list_CCTV"),
     Choice("보고서(감정서)", "보고서(감정서)", "data_list_Report"),
@@ -854,16 +876,15 @@ def validation_errors(values: dict[str, Any]) -> dict[str, str]:
         expected_collision_range,
     ):
         errors["collision_dist_range"] = INVALID_FORMAT_MESSAGE
-    if values.get("obstacle_exists") != "무":
-        expected_obstacle_range = expected_distance_range(
-            values.get("obstacle_dist_value"), collision=False
-        )
-        if expected_obstacle_range and values.get("obstacle_dist_range") not in (
-            None,
-            "",
-            expected_obstacle_range,
-        ):
-            errors["obstacle_dist_range"] = INVALID_FORMAT_MESSAGE
+    expected_obstacle_range = expected_distance_range(
+        values.get("obstacle_dist_value"), collision=False
+    )
+    if expected_obstacle_range and values.get("obstacle_dist_range") not in (
+        None,
+        "",
+        expected_obstacle_range,
+    ):
+        errors["obstacle_dist_range"] = INVALID_FORMAT_MESSAGE
 
     trigger = values.get("trigger_frame")
     collision = values.get("collision_frame")
@@ -907,7 +928,7 @@ def values_to_csv(values: dict[str, Any]) -> dict[str, str]:
     for field in ALL_FIELDS:
         value = values.get(field.key)
         obstacle_answer = values.get("obstacle_exists")
-        if field.group in {"obstacle_detail", "obstacle_distance"} and obstacle_answer == "무":
+        if field.group == "obstacle_detail" and obstacle_answer == "무":
             value = None
         if field.group == "damage_counts" and values.get("incident_damage_unknown") == "확인불가":
             value = None

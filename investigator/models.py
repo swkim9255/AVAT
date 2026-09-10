@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
+    LEGACY_AVAILABLE_DATA_VALUES,
+    LEGACY_TRIGGER_VEHICLE_SPEED_VALUES,
     MISSING_VALUE_MESSAGE,
     incident_day_for_date,
     missing_questions,
@@ -53,6 +55,16 @@ class InvestigationCase:
 
     def __post_init__(self) -> None:
         self.values = normalize_json_value(self.values)
+        legacy_speed = self.values.get("trigger_vehicle_speed")
+        if legacy_speed in LEGACY_TRIGGER_VEHICLE_SPEED_VALUES:
+            self.values["trigger_vehicle_speed"] = LEGACY_TRIGGER_VEHICLE_SPEED_VALUES[legacy_speed]
+        available_data = self.values.get("available_data")
+        if isinstance(available_data, list):
+            self.values["available_data"] = list(
+                dict.fromkeys(
+                    LEGACY_AVAILABLE_DATA_VALUES.get(item, item) for item in available_data
+                )
+            )
         normalized_age = normalize_driver_age(self.values.get("driver_age"))
         if normalized_age is not None:
             self.values["driver_age"] = normalized_age
