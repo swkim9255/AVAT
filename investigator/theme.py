@@ -176,6 +176,7 @@ def apply_theme(app: QApplication) -> None:
         QTextEdit {{ padding: 8px 10px; }}
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus {{ border: 2px solid {PRIMARY}; }}
         QLineEdit[invalid="true"], QComboBox[invalid="true"], QTextEdit[invalid="true"] {{ border: 1px solid #DC2626; background: #FEF2F2; }}
+        QLineEdit[calculated="true"] {{ background: #F1F5F9; color: #475569; border-color: #CBD5E1; }}
         QComboBox::drop-down {{ border: 0; width: 28px; }}
         QComboBox QAbstractItemView {{ background: {SURFACE}; border: 1px solid {BORDER}; selection-background-color: {PRIMARY_SUBTLE}; selection-color: {TEXT}; padding: 4px; }}
         QPushButton, QToolButton {{

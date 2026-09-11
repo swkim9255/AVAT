@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSpinBox,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -882,6 +883,10 @@ class MainWindow(QMainWindow):
             for count_key in (
                 "incident_minor_injury",
                 "incident_severe_injury",
+                "incident_minor_injury_grades",
+                "incident_minor_representative_injury_grade",
+                "incident_severe_injury_grades",
+                "incident_severe_representative_injury_grade",
                 "incident_fatality",
                 "incident_property_damage",
             ):
@@ -1113,7 +1118,7 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         focus = QApplication.focusWidget()
-        if isinstance(focus, (QLineEdit, QComboBox, QSpinBox)):
+        if isinstance(focus, (QLineEdit, QComboBox, QSpinBox, QTextEdit)):
             super().keyPressEvent(event)
             return
         key = event.key()

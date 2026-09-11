@@ -142,6 +142,38 @@ def incident_day_for_date(value: Any) -> str | None:
     return ("월", "화", "수", "목", "금", "토", "일")[parsed.weekday()]
 
 
+INJURY_GRADE_RULES = {
+    "incident_minor_injury_grades": (
+        12,
+        14,
+        "incident_minor_injury",
+        "incident_minor_representative_injury_grade",
+    ),
+    "incident_severe_injury_grades": (
+        1,
+        11,
+        "incident_severe_injury",
+        "incident_severe_representative_injury_grade",
+    ),
+}
+
+
+def injury_grade_summary(value: Any, *, minimum: int, maximum: int) -> tuple[str, str, str] | None:
+    """Normalize a comma-delimited injury-grade list within the requested range."""
+
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return "", "", ""
+    parts = text.split(",")
+    if any(not re.fullmatch(r"\s*\d{1,2}\s*", part) for part in parts):
+        return None
+    grades = sorted(int(part.strip()) for part in parts)
+    if any(grade < minimum or grade > maximum for grade in grades):
+        return None
+    normalized = ", ".join(map(str, grades))
+    return normalized, str(len(grades)), str(grades[0])
+
+
 DRIVER = SectionSpec(
     "driver",
     "운전자 요인",
@@ -648,12 +680,44 @@ COLLISION_OBJECTS = SectionSpec(
             helper="복수 충돌 대상을 모두 선택합니다.",
         ),
         FieldSpec(
+            "incident_minor_injury_grades",
+            "경상부상급수",
+            FieldKind.TEXT,
+            "incident_minor_injury_grade",
+            placeholder="예: 12, 12, 14",
+            group="damage_counts",
+        ),
+        FieldSpec(
+            "incident_minor_representative_injury_grade",
+            "경상대표부상급수",
+            FieldKind.DIGITS,
+            "incident_minor_representative_injury_grade",
+            max_length=2,
+            group="damage_counts",
+        ),
+        FieldSpec(
             "incident_minor_injury",
             "경상자 수",
             FieldKind.DIGITS,
             "incident_minor_injury",
             max_length=4,
             unit="명",
+            group="damage_counts",
+        ),
+        FieldSpec(
+            "incident_severe_injury_grades",
+            "중상부상급수",
+            FieldKind.TEXT,
+            "incident_severe_injury_grade",
+            placeholder="예: 1, 7, 11",
+            group="damage_counts",
+        ),
+        FieldSpec(
+            "incident_severe_representative_injury_grade",
+            "중상대표부상급수",
+            FieldKind.DIGITS,
+            "incident_severe_representative_injury_grade",
+            max_length=2,
             group="damage_counts",
         ),
         FieldSpec(
@@ -799,13 +863,20 @@ def missing_questions(values: dict[str, Any]) -> list[str]:
 
     damage_answer = values.get("incident_damage_unknown")
     if damage_answer == "확인 가능":
+        derived_counts: dict[str, str] = {}
+        for grade_key, (minimum, maximum, count_key, _) in INJURY_GRADE_RULES.items():
+            injury_summary = injury_grade_summary(
+                values.get(grade_key), minimum=minimum, maximum=maximum
+            )
+            if injury_summary and injury_summary[0]:
+                derived_counts[count_key] = injury_summary[1]
         for key in (
             "incident_minor_injury",
             "incident_severe_injury",
             "incident_fatality",
             "incident_property_damage",
         ):
-            if is_blank(values.get(key)):
+            if is_blank(values.get(key)) and is_blank(derived_counts.get(key)):
                 missing.append(key)
     return list(dict.fromkeys(missing))
 
@@ -870,6 +941,20 @@ def validation_errors(values: dict[str, Any]) -> dict[str, str]:
         korean_days = ("월", "화", "수", "목", "금", "토", "일")
         if values["incident_day"] != korean_days[parsed_date.weekday()]:
             errors["incident_day"] = INVALID_FORMAT_MESSAGE
+
+    for grade_key, (minimum, maximum, count_key, representative_key) in INJURY_GRADE_RULES.items():
+        injury_grade_value = values.get(grade_key)
+        injury_summary = injury_grade_summary(injury_grade_value, minimum=minimum, maximum=maximum)
+        if not is_blank(injury_grade_value) and injury_summary is None:
+            errors[grade_key] = INVALID_FORMAT_MESSAGE
+        elif injury_summary and injury_summary[0]:
+            for key, expected in (
+                (count_key, injury_summary[1]),
+                (representative_key, injury_summary[2]),
+            ):
+                actual = values.get(key)
+                if not is_blank(actual) and str(actual) != expected:
+                    errors[key] = INVALID_FORMAT_MESSAGE
 
     def expected_distance_range(raw_value: Any, *, collision: bool) -> str | None:
         if is_blank(raw_value):
@@ -941,10 +1026,23 @@ def csv_headers() -> list[str]:
 def values_to_csv(values: dict[str, Any]) -> dict[str, str]:
     """Flatten one record according to the exact requested CSV contract."""
 
+    effective_values = dict(values)
+    for grade_key, (minimum, maximum, count_key, representative_key) in INJURY_GRADE_RULES.items():
+        injury_summary = injury_grade_summary(
+            effective_values.get(grade_key), minimum=minimum, maximum=maximum
+        )
+        if injury_summary and injury_summary[0]:
+            effective_values.update(
+                {
+                    grade_key: injury_summary[0],
+                    count_key: injury_summary[1],
+                    representative_key: injury_summary[2],
+                }
+            )
     row = {header: "" for header in csv_headers()}
     for field in ALL_FIELDS:
-        value = values.get(field.key)
-        obstacle_answer = values.get("obstacle_exists")
+        value = effective_values.get(field.key)
+        obstacle_answer = effective_values.get("obstacle_exists")
         if field.group == "obstacle_detail" and obstacle_answer == "무":
             value = None
         if field.group == "damage_counts" and values.get("incident_damage_unknown") == "확인불가":
@@ -980,6 +1078,7 @@ __all__ = [
     "FieldKind",
     "FieldSpec",
     "IDENTITY_FIELDS",
+    "INJURY_GRADE_RULES",
     "INVALID_FORMAT_MESSAGE",
     "MISSING_VALUE_MESSAGE",
     "NOTES",
@@ -989,6 +1088,7 @@ __all__ = [
     "csv_headers",
     "field_label",
     "incident_day_for_date",
+    "injury_grade_summary",
     "missing_questions",
     "normalize_driver_age",
     "validation_errors",

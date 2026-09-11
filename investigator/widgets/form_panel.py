@@ -30,10 +30,12 @@ from PySide6.QtWidgets import (
 
 from investigator.schema import (
     IDENTITY_FIELDS,
+    INJURY_GRADE_RULES,
     SECTIONS,
     FieldKind,
     FieldSpec,
     incident_day_for_date,
+    injury_grade_summary,
 )
 from investigator.theme import BORDER, MUTED, PRIMARY, SURFACE, TEXT, material_icon
 
@@ -80,6 +82,29 @@ class FieldEditor(QWidget):
                 "}"
                 "QLineEdit#field_incident_day:focus { border: 1px solid #CBD5E1; }"
                 "QLineEdit#field_incident_day[invalid=true] {"
+                " background: #FEF2F2; border: 1px solid #DC2626;"
+                "}"
+            )
+            self.line_edit = display
+            return display
+
+        representative_keys = {rule[3] for rule in INJURY_GRADE_RULES.values()}
+        if spec.key in representative_keys:
+            display = QLineEdit(self)
+            object_name = f"field_{spec.key}"
+            display.setObjectName(object_name)
+            display.setReadOnly(True)
+            display.setPlaceholderText("")
+            display.setToolTip("")
+            display.setAccessibleDescription("부상급수에서 자동 계산되는 읽기 전용 값")
+            display.setStyleSheet(
+                f"QLineEdit#{object_name} {{"
+                " background: #F1F5F9; color: #475569; border-color: #CBD5E1;"
+                "}"
+                f"QLineEdit#{object_name}:focus {{"
+                " border: 1px solid #CBD5E1;"
+                "}"
+                f"QLineEdit#{object_name}[invalid=true] {{"
                 " background: #FEF2F2; border: 1px solid #DC2626;"
                 "}"
             )
@@ -152,6 +177,8 @@ class FieldEditor(QWidget):
             )
             edit.setInputMethodHints(Qt.InputMethodHint.ImhFormattedNumbersOnly)
         edit.textEdited.connect(lambda text: self._emit(text.strip()))
+        if spec.key in INJURY_GRADE_RULES:
+            edit.editingFinished.connect(self._finish_injury_grades)
         self.line_edit = edit
         layout.addWidget(edit, 1)
         if spec.key == "incident_date":
@@ -270,6 +297,16 @@ class FieldEditor(QWidget):
             return
         selected = [value for checkbox, value in self.checkboxes if checkbox.isChecked()]
         self._emit(selected)
+
+    def _finish_injury_grades(self) -> None:
+        minimum, maximum, _, _ = INJURY_GRADE_RULES[self.spec.key]
+        summary = injury_grade_summary(self.line_edit.text(), minimum=minimum, maximum=maximum)
+        if summary is None:
+            return
+        normalized = summary[0]
+        if self.line_edit.text() != normalized:
+            self.line_edit.setText(normalized)
+        self._emit(normalized)
 
     def _emit(self, value: Any) -> None:
         if not self._loading:
@@ -508,6 +545,8 @@ class InvestigationPanel(QWidget):
             self._update_conditional_states(values)
         if key in {"collision_dist_value", "obstacle_dist_value"} and value not in (None, ""):
             self._apply_distance_range(key, str(value))
+        if key in INJURY_GRADE_RULES:
+            self._apply_injury_grades(key, value)
         if key == "incident_date":
             self._apply_incident_day(str(value or ""))
 
@@ -534,6 +573,30 @@ class InvestigationPanel(QWidget):
             editor.set_value(day)
             self.value_changed.emit("incident_day", day)
 
+    def _apply_injury_grades(self, grade_key: str, value: Any) -> None:
+        minimum, maximum, count_key, representative_key = INJURY_GRADE_RULES[grade_key]
+        summary = injury_grade_summary(value, minimum=minimum, maximum=maximum)
+        if summary is None:
+            return
+        normalized, count, representative = summary
+        derived = {
+            count_key: count,
+            representative_key: representative,
+        }
+        for key, derived_value in derived.items():
+            editor = self.editors[key]
+            if editor.value() != derived_value:
+                editor.set_value(derived_value)
+                self.value_changed.emit(key, derived_value)
+        self._update_injury_count_state(count_key, bool(normalized))
+
+    def _update_injury_count_state(self, count_key: str, calculated: bool) -> None:
+        editor = self.editors[count_key]
+        editor.line_edit.setReadOnly(calculated)
+        editor.line_edit.setProperty("calculated", calculated)
+        editor.line_edit.style().unpolish(editor.line_edit)
+        editor.line_edit.style().polish(editor.line_edit)
+
     def _update_conditional_states(self, values: dict[str, Any]) -> None:
         obstacle_enabled = values.get("obstacle_exists") == "유"
         damage_enabled = values.get("incident_damage_unknown") == "확인 가능"
@@ -544,6 +607,11 @@ class InvestigationPanel(QWidget):
                 editor.setEnabled(True)
             elif editor.spec.group == "damage_counts":
                 editor.setEnabled(damage_enabled)
+        for grade_key, (minimum, maximum, count_key, _) in INJURY_GRADE_RULES.items():
+            injury_summary = injury_grade_summary(
+                values.get(grade_key), minimum=minimum, maximum=maximum
+            )
+            self._update_injury_count_state(count_key, bool(injury_summary and injury_summary[0]))
 
     def show_case(self, display_id: str, missing: list[str], completed: bool) -> None:
         self.case_title.setText(display_id)

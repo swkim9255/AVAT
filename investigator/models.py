@@ -9,11 +9,13 @@ from typing import Any
 from uuid import uuid4
 
 from investigator.schema import (
+    INJURY_GRADE_RULES,
     INVALID_FORMAT_MESSAGE,
     LEGACY_AVAILABLE_DATA_VALUES,
     LEGACY_TRIGGER_VEHICLE_SPEED_VALUES,
     MISSING_VALUE_MESSAGE,
     incident_day_for_date,
+    injury_grade_summary,
     missing_questions,
     normalize_driver_age,
     validation_errors,
@@ -65,6 +67,52 @@ class InvestigationCase:
                     LEGACY_AVAILABLE_DATA_VALUES.get(item, item) for item in available_data
                 )
             )
+        legacy_grades = self.values.pop("incident_injury_grades", None)
+        self.values.pop("incident_representative_injury_grade", None)
+        if legacy_grades is not None:
+            legacy_summary = injury_grade_summary(legacy_grades, minimum=1, maximum=14)
+            if legacy_summary and legacy_summary[0]:
+                legacy_numbers = [int(item) for item in legacy_summary[0].split(", ")]
+                for grade_key, numbers in (
+                    (
+                        "incident_minor_injury_grades",
+                        [item for item in legacy_numbers if item >= 12],
+                    ),
+                    (
+                        "incident_severe_injury_grades",
+                        [item for item in legacy_numbers if item <= 11],
+                    ),
+                ):
+                    _, _, count_key, representative_key = INJURY_GRADE_RULES[grade_key]
+                    if grade_key not in self.values:
+                        self.values[grade_key] = ", ".join(map(str, numbers))
+                        self.values[count_key] = str(len(numbers))
+                        if numbers:
+                            self.values[representative_key] = str(numbers[0])
+                        else:
+                            self.values.pop(representative_key, None)
+            elif legacy_summary is None:
+                self.values.setdefault("incident_severe_injury_grades", legacy_grades)
+        for grade_key, (
+            minimum,
+            maximum,
+            count_key,
+            representative_key,
+        ) in INJURY_GRADE_RULES.items():
+            injury_summary = injury_grade_summary(
+                self.values.get(grade_key), minimum=minimum, maximum=maximum
+            )
+            if injury_summary and injury_summary[0]:
+                self.values.update(
+                    {
+                        grade_key: injury_summary[0],
+                        count_key: injury_summary[1],
+                        representative_key: injury_summary[2],
+                    }
+                )
+            elif not self.values.get(grade_key):
+                self.values.pop(grade_key, None)
+                self.values.pop(representative_key, None)
         normalized_age = normalize_driver_age(self.values.get("driver_age"))
         if normalized_age is not None:
             self.values["driver_age"] = normalized_age
@@ -171,6 +219,20 @@ class InvestigationCase:
             self.values.pop(key, None)
         else:
             self.values[key] = normalized
+        if key in INJURY_GRADE_RULES:
+            minimum, maximum, count_key, representative_key = INJURY_GRADE_RULES[key]
+            injury_summary = injury_grade_summary(normalized, minimum=minimum, maximum=maximum)
+            if injury_summary and injury_summary[0]:
+                self.values.update(
+                    {
+                        key: injury_summary[0],
+                        count_key: injury_summary[1],
+                        representative_key: injury_summary[2],
+                    }
+                )
+            elif normalized in (None, ""):
+                for derived_key in (count_key, representative_key):
+                    self.values.pop(derived_key, None)
         self.mark_edited()
 
     def mark_edited(self) -> None:
