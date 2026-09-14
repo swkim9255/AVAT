@@ -830,7 +830,9 @@ def _obstacle_object_selected(values: dict[str, Any]) -> bool:
     return any(bool(values.get(key)) for key in keys)
 
 
-def missing_questions(values: dict[str, Any]) -> list[str]:
+def missing_questions(
+    values: dict[str, Any], fields: tuple[FieldSpec, ...] = ALL_FIELDS
+) -> list[str]:
     """Return logical required questions that have not been answered."""
 
     ignored_when_no_obstacle = {
@@ -840,7 +842,7 @@ def missing_questions(values: dict[str, Any]) -> list[str]:
     }
     missing = [
         field.key
-        for field in ALL_FIELDS
+        for field in fields
         if field.required
         and field.key != "site_types"
         and not (values.get("obstacle_exists") == "무" and field.key in ignored_when_no_obstacle)
@@ -881,7 +883,9 @@ def missing_questions(values: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(missing))
 
 
-def validation_errors(values: dict[str, Any]) -> dict[str, str]:
+def validation_errors(
+    values: dict[str, Any], fields: tuple[FieldSpec, ...] = ALL_FIELDS
+) -> dict[str, str]:
     """Validate values independently of Qt widgets."""
 
     errors: dict[str, str] = {}
@@ -889,7 +893,7 @@ def validation_errors(values: dict[str, Any]) -> dict[str, str]:
     if institution and re.search(r"\s", institution):
         errors["institution"] = INVALID_FORMAT_MESSAGE
 
-    for field in ALL_FIELDS:
+    for field in fields:
         value = values.get(field.key)
         if is_blank(value):
             continue
@@ -911,15 +915,17 @@ def validation_errors(values: dict[str, Any]) -> dict[str, str]:
                 errors[field.key] = INVALID_FORMAT_MESSAGE
         elif field.kind is FieldKind.SINGLE and field.choices and not field.editable:
             allowed = {choice.value for choice in field.choices}
-            if value not in allowed:
+            if not isinstance(value, str) or value not in allowed:
                 errors[field.key] = INVALID_FORMAT_MESSAGE
         elif field.kind is FieldKind.MULTI:
             if not isinstance(value, list):
                 errors[field.key] = INVALID_FORMAT_MESSAGE
             else:
                 allowed = {choice.value for choice in field.choices}
-                if any(item not in allowed for item in value):
+                if any(not isinstance(item, str) or item not in allowed for item in value):
                     errors[field.key] = INVALID_FORMAT_MESSAGE
+        elif field.kind in {FieldKind.TEXT, FieldKind.LONG_TEXT} and not isinstance(value, str):
+            errors[field.key] = INVALID_FORMAT_MESSAGE
 
     time_value = str(values.get("incident_time", ""))
     if (

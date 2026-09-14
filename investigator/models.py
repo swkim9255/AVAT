@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from investigator.form_definition import FormDefinition
 from investigator.schema import (
     INJURY_GRADE_RULES,
     INVALID_FORMAT_MESSAGE,
@@ -55,11 +56,13 @@ class InvestigationCase:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     completed_at: str | None = None
+    form_definition: FormDefinition | None = field(default=None, repr=False, compare=False)
+    defaults_applied: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.values = normalize_json_value(self.values)
         legacy_speed = self.values.get("trigger_vehicle_speed")
-        if legacy_speed in LEGACY_TRIGGER_VEHICLE_SPEED_VALUES:
+        if isinstance(legacy_speed, str) and legacy_speed in LEGACY_TRIGGER_VEHICLE_SPEED_VALUES:
             self.values["trigger_vehicle_speed"] = LEGACY_TRIGGER_VEHICLE_SPEED_VALUES[legacy_speed]
         available_data = self.values.get("available_data")
         if isinstance(available_data, list):
@@ -211,11 +214,19 @@ class InvestigationCase:
 
     @property
     def missing(self) -> list[str]:
-        return missing_questions(self.values)
+        return (
+            self.form_definition.missing(self.values)
+            if self.form_definition
+            else missing_questions(self.values)
+        )
 
     @property
     def errors(self) -> dict[str, str]:
-        errors = validation_errors(dict(self.values))
+        errors = (
+            self.form_definition.errors(dict(self.values))
+            if self.form_definition
+            else validation_errors(dict(self.values))
+        )
         for marker in self.markers_by_video.values():
             trigger = marker.get("trigger_frame")
             collisions = marker.get("collision_frames", [])
@@ -409,6 +420,7 @@ class InvestigationCase:
             created_at=str(workflow.get("created_at") or utc_now()),
             updated_at=str(workflow.get("updated_at") or utc_now()),
             completed_at=workflow.get("completed_at"),
+            defaults_applied=True,
         )
 
 

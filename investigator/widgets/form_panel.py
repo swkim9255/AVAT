@@ -28,16 +28,16 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+from investigator.form_definition import FormDefinition
 from investigator.schema import (
-    IDENTITY_FIELDS,
     INJURY_GRADE_RULES,
-    SECTIONS,
     FieldKind,
     FieldSpec,
     incident_day_for_date,
     injury_grade_summary,
 )
 from investigator.theme import BORDER, MUTED, PRIMARY, SURFACE, TEXT, material_icon
+from investigator.widgets.scroll_safe_combo import ScrollSafeComboBox
 
 
 class FieldEditor(QWidget):
@@ -112,7 +112,7 @@ class FieldEditor(QWidget):
             return display
 
         if spec.kind is FieldKind.SINGLE:
-            combo = QComboBox(self)
+            combo = ScrollSafeComboBox(self)
             combo.setObjectName(f"field_{spec.key}")
             combo.setEditable(spec.editable)
             combo.addItem(spec.placeholder or "선택", None)
@@ -269,7 +269,7 @@ class FieldEditor(QWidget):
         combo = self.control
         assert isinstance(combo, QComboBox)
         data = combo.currentData()
-        if combo.currentIndex() == 0:
+        if combo.currentIndex() == 0 and (not combo.isEditable() or text == combo.itemText(0)):
             value: Any = None
         elif (
             combo.currentIndex() > 0
@@ -320,7 +320,9 @@ class FieldEditor(QWidget):
             combo = self.control
             assert isinstance(combo, QComboBox)
             data = combo.currentData()
-            if combo.currentIndex() == 0:
+            if combo.currentIndex() == 0 and (
+                not combo.isEditable() or combo.currentText() == combo.itemText(0)
+            ):
                 return None
             if (
                 combo.currentIndex() > 0
@@ -398,14 +400,22 @@ class InvestigationPanel(QWidget):
     save_requested = Signal()
     complete_requested = Signal()
     next_requested = Signal()
+    edit_form_requested = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, definition: FormDefinition | None = None
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("panel")
         self.setMinimumWidth(448)
         self.editors: dict[str, FieldEditor] = {}
         self.section_field_grids: dict[str, QGridLayout] = {}
         self._loading = False
+        definition = definition or FormDefinition.default()
+        configured_sections = definition.specs()
+        tab_layouts = {tab["key"]: tab for tab in definition.tabs}
+        self.identity_fields = configured_sections[0].fields
+        self.sections = configured_sections[1:]
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 12)
@@ -416,6 +426,12 @@ class InvestigationPanel(QWidget):
         title.setObjectName("sectionTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
+        self.edit_form_button = QToolButton(self)
+        self.edit_form_button.setIcon(material_icon("edit_note", PRIMARY))
+        self.edit_form_button.setToolTip("조사 항목 편집")
+        self.edit_form_button.setAccessibleName("조사 항목 편집")
+        self.edit_form_button.clicked.connect(self.edit_form_requested)
+        title_row.addWidget(self.edit_form_button)
         self.completion_badge = QLabel("미입력", self)
         self.completion_badge.setObjectName("missingBadge")
         title_row.addWidget(self.completion_badge)
@@ -427,21 +443,37 @@ class InvestigationPanel(QWidget):
 
         identity_card = QFrame(self)
         identity_card.setObjectName("card")
-        identity_layout = QVBoxLayout(identity_card)
+        identity_layout = QGridLayout(identity_card)
         identity_layout.setContentsMargins(12, 6, 12, 6)
-        identity_layout.setSpacing(0)
-        for spec in IDENTITY_FIELDS:
+        identity_layout.setHorizontalSpacing(12)
+        identity_layout.setVerticalSpacing(0)
+        self.section_field_grids["identity"] = identity_layout
+        identity_settings = tab_layouts["identity"]
+        identity_columns = identity_settings.get("columns", 2)
+        identity_full_width = {
+            f["key"] for f in identity_settings["fields"] if f.get("full_width", False)
+        }
+        for column in range(identity_columns):
+            identity_layout.setColumnStretch(column, 1)
+        row, column = 0, 0
+        for spec in self.identity_fields:
             editor = self._add_editor(spec, identity_card)
-            identity_layout.addWidget(editor)
+            span = identity_columns if spec.key in identity_full_width else 1
+            if column and span == identity_columns:
+                row, column = row + 1, 0
+            identity_layout.addWidget(editor, row, column, 1, span)
+            column += span
+            if column >= identity_columns:
+                row, column = row + 1, 0
         root.addWidget(identity_card)
 
         self.tabs = QTabWidget(self)
         self.tabs.setObjectName("investigationTabs")
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setExpanding(True)
-        self.tabs.tabBar().setUsesScrollButtons(False)
+        self.tabs.tabBar().setUsesScrollButtons(len(self.sections) > 9)
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
-        for section in SECTIONS:
+        for section in self.sections:
             scroll = QScrollArea(self.tabs)
             scroll.setObjectName("formScroll")
             scroll.setWidgetResizable(True)
@@ -455,31 +487,27 @@ class InvestigationPanel(QWidget):
             section_label.setStyleSheet("font-size: 15px; font-weight: 700; padding: 8px 0;")
             page_layout.addWidget(section_label)
             section_fields = list(section.fields)
-            if section.key == "environment":
-                day_index = next(
-                    index
-                    for index, field in enumerate(section_fields)
-                    if field.key == "incident_day"
-                )
-                date_index = next(
-                    index
-                    for index, field in enumerate(section_fields)
-                    if field.key == "incident_date"
-                )
-                section_fields[day_index], section_fields[date_index] = (
-                    section_fields[date_index],
-                    section_fields[day_index],
-                )
-            if section.key == "trigger":
+            tab_layout = tab_layouts[section.key]
+            if tab_layout.get("columns", 1) == 2:
                 field_grid = QGridLayout()
-                field_grid.setObjectName("triggerFieldsGrid")
+                field_grid.setObjectName(f"{section.key}FieldsGrid")
                 field_grid.setContentsMargins(0, 0, 0, 0)
                 field_grid.setHorizontalSpacing(12)
                 field_grid.setVerticalSpacing(0)
                 field_grid.setColumnStretch(0, 1)
                 field_grid.setColumnStretch(1, 1)
-                for index, spec in enumerate(section_fields):
-                    field_grid.addWidget(self._add_editor(spec, page), index // 2, index % 2)
+                full_width_keys = {
+                    f["key"] for f in tab_layout["fields"] if f.get("full_width", False)
+                }
+                row, column = 0, 0
+                for spec in section_fields:
+                    span = 2 if spec.key in full_width_keys else 1
+                    if span == 2 and column:
+                        row, column = row + 1, 0
+                    field_grid.addWidget(self._add_editor(spec, page), row, column, 1, span)
+                    column += span
+                    if column >= 2:
+                        row, column = row + 1, 0
                 self.section_field_grids[section.key] = field_grid
                 page_layout.addLayout(field_grid)
             else:
@@ -646,7 +674,7 @@ class InvestigationPanel(QWidget):
         if editor is None:
             return
         scroll: QScrollArea | None = None
-        for index, section in enumerate(SECTIONS):
+        for index, section in enumerate(self.sections):
             if any(field.key == key for field in section.fields):
                 self.tabs.setCurrentIndex(index)
                 candidate = self.tabs.widget(index)

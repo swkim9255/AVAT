@@ -9,8 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from investigator.form_definition import FormDefinition
 from investigator.models import SCHEMA_VERSION, InvestigationCase
-from investigator.schema import csv_headers, values_to_csv
 
 DATABASE_FILENAME = "investigations.json"
 AUTO_IMPORT_EXCLUSIONS_KEY = "auto_import_exclusions"
@@ -37,6 +37,8 @@ class CaseRepository:
         self.workspace = Path(workspace).expanduser().resolve()
         self.database_path = self.workspace / DATABASE_FILENAME
         self.auto_import_exclusions: set[str] = set()
+        self.form_definition = FormDefinition.default()
+        self.initial_form_definition = FormDefinition.default()
 
     def ensure_workspace(self) -> None:
         try:
@@ -50,6 +52,8 @@ class CaseRepository:
         self.ensure_workspace()
         if not self.database_path.exists():
             self.auto_import_exclusions = set()
+            self.form_definition = FormDefinition.default()
+            self.initial_form_definition = FormDefinition.default()
             return []
         try:
             data = json.loads(self.database_path.read_text(encoding="utf-8"))
@@ -57,9 +61,18 @@ class CaseRepository:
             raise WorkspaceError(
                 f"조사 데이터 파일을 읽을 수 없습니다: {self.database_path}"
             ) from exc
-        if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
+        if not isinstance(data, dict) or data.get("schema_version") not in {SCHEMA_VERSION, 2}:
             raise WorkspaceError("지원하지 않는 조사 데이터 형식입니다.")
         raw_cases = data.get("cases")
+        try:
+            if data.get("schema_version") == 2 and not isinstance(
+                data.get("form_definition"), dict
+            ):
+                raise ValueError("사용자 정의 조사 양식이 누락되었습니다.")
+            definition = FormDefinition.from_dict(data.get("form_definition"))
+            initial_definition = FormDefinition.from_dict(data.get("initial_form_definition"))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise WorkspaceError(f"조사 양식을 읽을 수 없습니다: {exc}") from exc
         if not isinstance(raw_cases, list):
             raise WorkspaceError("조사 데이터의 cases 항목이 올바르지 않습니다.")
         raw_exclusions = data.get(AUTO_IMPORT_EXCLUSIONS_KEY, [])
@@ -83,6 +96,7 @@ class CaseRepository:
                 raise WorkspaceError(f"cases[{index}] 항목은 JSON 객체여야 합니다.")
             try:
                 case = InvestigationCase.from_dict(item)
+                case.form_definition = definition
             except (TypeError, ValueError, OSError) as exc:
                 raise WorkspaceError(f"cases[{index}] 조사 데이터가 올바르지 않습니다.") from exc
             cases.append(case)
@@ -116,6 +130,8 @@ class CaseRepository:
                             f"완료 상태인 사고의 마커 순서가 올바르지 않습니다: {case.display_id}"
                         )
         self.auto_import_exclusions = exclusions
+        self.form_definition = definition
+        self.initial_form_definition = initial_definition
         return cases
 
     def save(
@@ -124,11 +140,23 @@ class CaseRepository:
         *,
         active_case_uid: str | None = None,
         auto_import_exclusions: set[str] | None = None,
+        form_definition: FormDefinition | None = None,
     ) -> None:
         self.ensure_workspace()
+        definition = form_definition or self.form_definition
+        try:
+            definition.validate()
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise WorkspaceError(f"조사 양식 설정이 올바르지 않습니다: {exc}") from exc
         seen: set[tuple[str, str]] = set()
         seen_uids: set[str] = set()
         for case in cases:
+            case.form_definition = definition
+            if not case.defaults_applied:
+                definition.apply_defaults(case.values)
+                # Preserve the normal date/injury derivation for configured defaults.
+                case.__post_init__()
+                case.defaults_applied = True
             if case.uid in seen_uids:
                 raise WorkspaceError(f"중복 사고 UID는 저장할 수 없습니다: {case.uid}")
             seen_uids.add(case.uid)
@@ -155,7 +183,10 @@ class CaseRepository:
         except (OSError, ValueError) as exc:
             raise WorkspaceError("자동 영상 검색 제외 경로를 저장할 수 없습니다.") from exc
         payload = {
-            "schema_version": SCHEMA_VERSION,
+            # Older apps must refuse custom forms instead of silently dropping them on save.
+            "schema_version": SCHEMA_VERSION if definition == FormDefinition.default() else 2,
+            "form_definition": definition.to_dict(),
+            "initial_form_definition": self.initial_form_definition.to_dict(),
             "active_case_uid": active_case_uid,
             AUTO_IMPORT_EXCLUSIONS_KEY: sorted(normalized_exclusions),
             "cases": [case.to_dict() for case in cases],
@@ -182,6 +213,7 @@ class CaseRepository:
                 temporary_path = Path(handle.name)
             os.replace(temporary_path, self.database_path)
             self.auto_import_exclusions = normalized_exclusions
+            self.form_definition = definition
         except OSError as exc:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -208,7 +240,7 @@ class CaseRepository:
             "collision_frames",
             "video_markers",
         ]
-        headers = metadata_headers + csv_headers()
+        headers = metadata_headers + self.form_definition.csv_headers()
         temporary_path: Path | None = None
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -252,7 +284,7 @@ class CaseRepository:
                             )
                             else None
                         ),
-                        **values_to_csv(case.values),
+                        **self.form_definition.csv_row(case.values),
                     }
                     writer.writerow({header: _safe_csv_text(row.get(header)) for header in headers})
                 handle.flush()

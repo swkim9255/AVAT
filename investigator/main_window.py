@@ -11,6 +11,7 @@ from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QLineEdit,
     QMainWindow,
@@ -22,11 +23,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from investigator.form_definition import FormDefinition
 from investigator.models import DEFAULT_INSTITUTION, InvestigationCase, new_case
 from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
     MISSING_VALUE_MESSAGE,
-    field_label,
 )
 from investigator.storage import CaseRepository, WorkspaceError
 from investigator.theme import PRIMARY, material_icon
@@ -37,6 +38,7 @@ from investigator.video_import import (
     scan_video_folder,
 )
 from investigator.widgets.case_list import CaseListPanel
+from investigator.widgets.form_designer import FormDesigner
 from investigator.widgets.form_panel import InvestigationPanel
 from investigator.widgets.playback_panel import PlaybackPanel
 from investigator.widgets.video_player import VideoPlayerPanel
@@ -142,6 +144,11 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        settings_menu = self.menuBar().addMenu("설정")
+        self.edit_form_action = QAction("조사 항목 편집…", self)
+        self.edit_form_action.triggered.connect(self.edit_form)
+        settings_menu.addAction(self.edit_form_action)
+
         help_menu = self.menuBar().addMenu("도움말")
         shortcuts_action = QAction("재생 단축키", self)
         shortcuts_action.triggered.connect(self._show_shortcuts)
@@ -172,6 +179,7 @@ class MainWindow(QMainWindow):
         self.investigation.save_requested.connect(self.save_draft)
         self.investigation.complete_requested.connect(self.complete_case)
         self.investigation.next_requested.connect(self.next_case)
+        self.investigation.edit_form_requested.connect(self.edit_form)
 
         self.video_controller.video_opened.connect(self._video_opened)
         self.video_controller.video_closed.connect(self._video_closed)
@@ -190,6 +198,7 @@ class MainWindow(QMainWindow):
         try:
             active_uid = self.repository.active_case_uid()
             self.cases = self.repository.load()
+            self._install_form(self.repository.form_definition)
         except WorkspaceError as exc:
             QMessageBox.critical(self, "작업 폴더 오류", str(exc))
             self._workspace_load_failed = True
@@ -224,6 +233,83 @@ class MainWindow(QMainWindow):
             quiet_when_empty=True,
             respect_exclusions=True,
         )
+
+    def _install_form(self, definition: FormDefinition) -> None:
+        old = self.investigation
+        tab_index = old.tabs.currentIndex()
+        selected_tab_key = (
+            old.sections[tab_index].key if 0 <= tab_index < len(old.sections) else None
+        )
+        self.investigation = InvestigationPanel(self, definition=definition)
+        self.splitter.replaceWidget(2, self.investigation)
+        old.deleteLater()
+        self.investigation.value_changed.connect(self._field_changed)
+        self.investigation.save_requested.connect(self.save_draft)
+        self.investigation.complete_requested.connect(self.complete_case)
+        self.investigation.next_requested.connect(self.next_case)
+        self.investigation.edit_form_requested.connect(self.edit_form)
+        self.investigation.tabs.setCurrentIndex(
+            next(
+                (
+                    index
+                    for index, section in enumerate(self.investigation.sections)
+                    if section.key == selected_tab_key
+                ),
+                0,
+            )
+        )
+
+    def edit_form(self) -> None:
+        if self._workspace_load_failed:
+            QMessageBox.warning(
+                self, "작업 폴더 오류", "읽기 오류가 없는 작업 폴더를 먼저 선택해 주세요."
+            )
+            return
+        dialog = FormDesigner(
+            self.repository.form_definition,
+            self,
+            initial_definition=self.repository.initial_form_definition,
+        )
+        # Keep the editor open if a data compatibility or disk-write error occurs.
+        while dialog.exec() == QDialog.DialogCode.Accepted:
+            if self.apply_form_definition(dialog.definition):
+                break
+
+    def apply_form_definition(self, definition: FormDefinition) -> bool:
+        if self._workspace_load_failed:
+            return False
+        try:
+            definition = FormDefinition.from_dict(definition.to_dict())
+            candidates = [InvestigationCase.from_dict(case.to_dict()) for case in self.cases]
+            reopened = 0
+            for original, case in zip(self.cases, candidates, strict=True):
+                case.form_definition = definition
+                introduced_errors = set(case.errors) - set(original.errors)
+                if introduced_errors:
+                    labels = ", ".join(definition.label(key) for key in sorted(introduced_errors))
+                    raise ValueError(
+                        f"{case.display_id}: 기존 값이 새 입력 방식·선택지와 맞지 않습니다 ({labels}). 기존 값을 정리한 뒤 적용해 주세요."
+                    )
+                if case.status == "completed" and not case.can_complete:
+                    case.mark_edited()
+                    reopened += 1
+            self.repository.save(
+                candidates, active_case_uid=self.current_uid, form_definition=definition
+            )
+        except (ValueError, TypeError, KeyError, WorkspaceError) as exc:
+            QMessageBox.warning(self, "양식 적용 오류", str(exc))
+            return False
+        self.cases = candidates
+        self._dirty = False
+        self._install_form(definition)
+        self.case_list.set_cases(self.cases, self.current_uid)
+        self._show_current_case(open_video=False)
+        message = "조사 양식을 적용하고 저장했습니다."
+        self._set_workflow_enabled(True)
+        if reopened:
+            message += f" 새 완료 조건에 따라 {reopened}건이 미완료로 전환되었습니다."
+        self.statusBar().showMessage(message, 7000)
+        return True
 
     def _set_workflow_enabled(self, enabled: bool) -> None:
         has_case = enabled and self.current_case is not None
@@ -1019,8 +1105,9 @@ class MainWindow(QMainWindow):
                 field_errors[editor_key] = message
         self.investigation.show_validation(field_errors)
         if missing or errors:
-            messages = [f"• {field_label(key)}: {MISSING_VALUE_MESSAGE}" for key in missing]
-            messages.extend(f"• {field_label(key)}: {message}" for key, message in errors.items())
+            label_for = self.repository.form_definition.label
+            messages = [f"• {label_for(key)}: {MISSING_VALUE_MESSAGE}" for key in missing]
+            messages.extend(f"• {label_for(key)}: {message}" for key, message in errors.items())
             summary = "\n".join(messages[:8])
             if len(messages) > 8:
                 summary += f"\n• 그 외 {len(messages) - 8}개"
