@@ -1,4 +1,4 @@
-"""Pinned identity fields and eight schema-driven investigation tabs."""
+"""Pinned identity fields and nine schema-driven investigation tabs."""
 
 from __future__ import annotations
 

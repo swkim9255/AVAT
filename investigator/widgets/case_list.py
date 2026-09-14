@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QDrag, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -27,6 +28,76 @@ VIDEO_INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
 _SELECTION_UNSET = object()
 
 
+class CaseTreeWidget(QTreeWidget):
+    """Tree that only reorders top-level accident items."""
+
+    case_dropped = Signal(str, int)
+
+    def startDrag(self, supported_actions) -> None:  # type: ignore[no-untyped-def]
+        """Start a custom move drag without Qt deleting the source row."""
+
+        del supported_actions
+        source = self.currentItem()
+        if source is None or source.parent() is not None:
+            return
+        mime_data = self.mimeData([source])
+        if mime_data is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        source_rect = self.visualItemRect(source)
+        if source_rect.isValid():
+            drag.setPixmap(self.viewport().grab(source_rect))
+            drag.setHotSpot(source_rect.center() - source_rect.topLeft())
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        source = self.currentItem()
+        if source is None or source.parent() is not None:
+            event.ignore()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        source = self.currentItem()
+        if source is None or source.parent() is not None or self.topLevelItemCount() < 2:
+            event.ignore()
+            return
+        uid = source.data(0, UID_ROLE)
+        source_index = self.indexOfTopLevelItem(source)
+        if not uid or source_index < 0:
+            event.ignore()
+            return
+
+        position = event.position().toPoint()
+        hit = self.itemAt(position)
+        if hit is None:
+            first = self.topLevelItem(0)
+            raw_destination = (
+                0 if position.y() < self.visualItemRect(first).top() else self.topLevelItemCount()
+            )
+        else:
+            hit_is_video = hit.parent() is not None
+            target = hit.parent() if hit_is_video else hit
+            target_index = self.indexOfTopLevelItem(target)
+            place_after = hit_is_video or position.y() >= self.visualItemRect(target).center().y()
+            raw_destination = target_index + int(place_after)
+
+        destination = raw_destination - int(source_index < raw_destination)
+        destination = max(0, min(destination, self.topLevelItemCount() - 1))
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+        if destination != source_index:
+            # Rebuilding or moving items while Qt is still finalizing the drag
+            # can leave the dragged row temporarily hidden.  Only retain plain
+            # values here and apply the move on the next event-loop turn.
+            dropped_uid = str(uid)
+            QTimer.singleShot(
+                0,
+                lambda uid=dropped_uid, index=destination: self.case_dropped.emit(uid, index),
+            )
+
+
 class CaseListPanel(QWidget):
     case_selected = Signal(str)
     video_selected = Signal(str, int)
@@ -36,6 +107,7 @@ class CaseListPanel(QWidget):
     add_video_requested = Signal()
     delete_case_requested = Signal(str)
     delete_video_requested = Signal(str, int)
+    case_reordered = Signal(str, int)
     export_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -73,7 +145,7 @@ class CaseListPanel(QWidget):
         self.search.textChanged.connect(self._filter)
         root.addWidget(self.search)
 
-        self.tree = QTreeWidget(self)
+        self.tree = CaseTreeWidget(self)
         self.tree.setObjectName("caseTree")
         self.tree.setHeaderHidden(True)
         self.tree.setColumnCount(2)
@@ -83,9 +155,15 @@ class CaseListPanel(QWidget):
         self.tree.setColumnWidth(1, 34)
         self.tree.setIndentation(18)
         self.tree.setAnimated(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.tree.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.tree.setDragDropOverwriteMode(False)
+        self.tree.setDropIndicatorShown(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.itemSelectionChanged.connect(self._selection_changed)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.case_dropped.connect(self.case_reordered)
         root.addWidget(self.tree, 1)
 
         button_row = QHBoxLayout()
@@ -143,6 +221,9 @@ class CaseListPanel(QWidget):
             item.setData(0, UID_ROLE, case.uid)
             item.setData(0, VIDEO_INDEX_ROLE, -1)
             item.setIcon(0, material_icon("description", PRIMARY))
+            item.setFlags(
+                item.flags() | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled
+            )
             if case.uid == selected_uid:
                 selected_case_item = item
                 if selected_video_index is None:
@@ -161,6 +242,9 @@ class CaseListPanel(QWidget):
                 child.setData(0, UID_ROLE, case.uid)
                 child.setData(0, VIDEO_INDEX_ROLE, index)
                 child.setIcon(0, material_icon("movie", MUTED))
+                child.setFlags(
+                    child.flags() & ~Qt.ItemFlag.ItemIsDragEnabled & ~Qt.ItemFlag.ItemIsDropEnabled
+                )
                 child.setToolTip(0, path)
                 if case.uid == selected_uid and index == case.active_video_index:
                     child.setForeground(0, QBrush(QColor(PRIMARY)))
@@ -183,6 +267,37 @@ class CaseListPanel(QWidget):
                 self.tree.setCurrentItem(item)
                 self.tree.scrollToItem(item)
                 return
+
+    def move_case(self, uid: str, destination: int) -> bool:
+        """Move one existing top-level item without rebuilding the tree."""
+
+        source = next(
+            (
+                index
+                for index in range(self.tree.topLevelItemCount())
+                if self.tree.topLevelItem(index).data(0, UID_ROLE) == uid
+            ),
+            -1,
+        )
+        if source < 0:
+            return False
+        target = max(0, min(int(destination), self.tree.topLevelItemCount() - 1))
+        if source == target:
+            return False
+        selected_item = self.tree.currentItem()
+        signals_were_blocked = self.tree.blockSignals(True)
+        was_expanded = self.tree.topLevelItem(source).isExpanded()
+        item = self.tree.takeTopLevelItem(source)
+        if item is None:
+            self.tree.blockSignals(signals_were_blocked)
+            return False
+        self.tree.insertTopLevelItem(target, item)
+        item.setExpanded(was_expanded)
+        if selected_item is not None:
+            self.tree.setCurrentItem(selected_item)
+        self.tree.blockSignals(signals_were_blocked)
+        self.tree.viewport().update()
+        return True
 
     def _selection_changed(self) -> None:
         item = self.tree.currentItem()
@@ -267,4 +382,4 @@ class CaseListPanel(QWidget):
             item.setHidden(bool(needle) and not matches)
 
 
-__all__ = ["CaseListPanel"]
+__all__ = ["CaseListPanel", "CaseTreeWidget"]

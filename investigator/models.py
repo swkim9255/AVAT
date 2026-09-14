@@ -50,6 +50,7 @@ class InvestigationCase:
     videos: list[str] = field(default_factory=list)
     active_video_index: int = 0
     markers_by_video: dict[str, dict[str, Any]] = field(default_factory=dict)
+    rotation_by_video: dict[str, int] = field(default_factory=dict)
     status: str = "draft"
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -149,6 +150,17 @@ class InvestigationCase:
                 "collision_frames": [] if collision is None else [collision],
             }
         self.markers_by_video = normalized_markers
+        normalized_rotations: dict[str, int] = {}
+        known_videos = {str(Path(path)).casefold() for path in self.videos}
+        for video_path, raw_degrees in self.rotation_by_video.items():
+            try:
+                degrees = int(raw_degrees) % 360
+            except (TypeError, ValueError):
+                continue
+            normalized_path = str(Path(str(video_path)))
+            if degrees in {90, 180, 270} and normalized_path.casefold() in known_videos:
+                normalized_rotations[normalized_path] = degrees
+        self.rotation_by_video = normalized_rotations
         if self.status not in {"draft", "completed"}:
             self.status = "draft"
 
@@ -171,6 +183,10 @@ class InvestigationCase:
     @property
     def marker_key(self) -> str:
         return self.active_video or "__case__"
+
+    @property
+    def video_rotation(self) -> int:
+        return self.rotation_by_video.get(self.active_video or "", 0)
 
     def _current_markers(self) -> dict[str, Any]:
         return self.markers_by_video.get(
@@ -278,10 +294,14 @@ class InvestigationCase:
                 continue
             if str(Path(marker_key).expanduser().resolve()).casefold() == removed_key:
                 self.markers_by_video.pop(marker_key, None)
+        for rotation_key in list(self.rotation_by_video):
+            if str(Path(rotation_key).expanduser().resolve()).casefold() == removed_key:
+                self.rotation_by_video.pop(rotation_key, None)
 
         if not self.videos:
             self.active_video_index = 0
             self.markers_by_video.clear()
+            self.rotation_by_video.clear()
         elif index < previous_active:
             self.active_video_index = previous_active - 1
         elif index == previous_active:
@@ -292,6 +312,22 @@ class InvestigationCase:
             self.active_video_index = min(previous_active, len(self.videos) - 1)
         self.mark_edited()
         return removed
+
+    def set_video_rotation(self, degrees: int) -> None:
+        """Persist a clockwise presentation angle for the active video."""
+
+        path = self.active_video
+        if path is None:
+            return
+        normalized = int(degrees) % 360
+        if normalized not in {0, 90, 180, 270}:
+            raise ValueError("영상 회전 각도는 90도 단위여야 합니다.")
+        if normalized:
+            self.rotation_by_video[path] = normalized
+        else:
+            self.rotation_by_video.pop(path, None)
+        # Rotation is a viewing preference and must not reopen a completed case.
+        self.updated_at = utc_now()
 
     def set_trigger(self, frame: int | None) -> None:
         marker = self._current_markers()
@@ -321,6 +357,7 @@ class InvestigationCase:
             "videos": list(self.videos),
             "active_video_index": self.active_video_index,
             "markers_by_video": normalize_json_value(self.markers_by_video),
+            "rotation_by_video": normalize_json_value(self.rotation_by_video),
             "workflow": {
                 "status": self.status,
                 "created_at": self.created_at,
@@ -335,6 +372,7 @@ class InvestigationCase:
         raw_values = data.get("values", {})
         raw_videos = data.get("videos", [])
         raw_markers = data.get("markers_by_video", {})
+        raw_rotations = data.get("rotation_by_video", {})
         if not isinstance(raw_workflow, dict):
             raise TypeError("workflow 항목은 JSON 객체여야 합니다.")
         if not isinstance(raw_values, dict):
@@ -345,6 +383,8 @@ class InvestigationCase:
             raise TypeError("videos 항목은 문자열 배열이어야 합니다.")
         if not isinstance(raw_markers, dict):
             raise TypeError("markers_by_video 항목은 JSON 객체여야 합니다.")
+        if not isinstance(raw_rotations, dict):
+            raise TypeError("rotation_by_video 항목은 JSON 객체여야 합니다.")
 
         workflow = raw_workflow
         videos = list(raw_videos)
@@ -364,6 +404,7 @@ class InvestigationCase:
             videos=videos,
             active_video_index=active_video_index,
             markers_by_video=markers_by_video,
+            rotation_by_video=dict(raw_rotations),
             status=str(workflow.get("status") or "draft"),
             created_at=str(workflow.get("created_at") or utc_now()),
             updated_at=str(workflow.get("updated_at") or utc_now()),

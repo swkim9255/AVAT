@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self.repository = CaseRepository(workspace or default_workspace())
         self.cases: list[InvestigationCase] = []
         self.current_uid: str | None = None
+        self._opening_case: InvestigationCase | None = None
         self._dirty = False
         self._workspace_load_failed = False
 
@@ -154,8 +155,10 @@ class MainWindow(QMainWindow):
         self.case_list.add_video_requested.connect(self.choose_videos)
         self.case_list.delete_case_requested.connect(self.delete_case)
         self.case_list.delete_video_requested.connect(self.delete_video)
+        self.case_list.case_reordered.connect(self.reorder_case)
         self.case_list.export_requested.connect(self.export_csv)
         self.video_player.files_dropped.connect(self.attach_videos)
+        self.video_player.rotation_requested.connect(self.rotate_video_clockwise)
 
         self.investigation.value_changed.connect(self._field_changed)
         self.playback.seek_requested.connect(self._seek_video)
@@ -265,6 +268,21 @@ class MainWindow(QMainWindow):
         if not self._replace_cases_atomically(candidates, case.uid):
             return
         self.statusBar().showMessage(f"{case.display_id} 사고를 만들었습니다.", 3000)
+
+    def reorder_case(self, uid: str, destination: int) -> None:
+        source = next((index for index, case in enumerate(self.cases) if case.uid == uid), -1)
+        if source < 0 or not self.cases:
+            return
+        target = max(0, min(int(destination), len(self.cases) - 1))
+        if source == target:
+            return
+        case = self.cases.pop(source)
+        self.cases.insert(target, case)
+        self._dirty = True
+        self.case_list.move_case(uid, target)
+        self.statusBar().showMessage(
+            f"{case.display_id} 표시 순서를 {target + 1}번째로 변경했습니다.", 3000
+        )
 
     def choose_videos(self) -> None:
         filters = "영상 파일 (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv *.webm);;모든 파일 (*.*)"
@@ -861,7 +879,11 @@ class MainWindow(QMainWindow):
                 self.video_player.set_video_name(path)
             self.statusBar().showMessage(f"영상 파일을 찾을 수 없습니다: {path}", 6000)
             return False
-        return self.video_controller.open_video(path)
+        self._opening_case = case
+        try:
+            return self.video_controller.open_video(path)
+        finally:
+            self._opening_case = None
 
     def _field_changed(self, key: str, value: Any) -> None:
         case = self.current_case
@@ -1069,7 +1091,8 @@ class MainWindow(QMainWindow):
     def _video_opened(self, metadata: VideoMetadata) -> None:
         self.video_player.set_video_name(metadata.path, (metadata.width, metadata.height))
         self.playback.set_video(metadata.total_frames, metadata.fps)
-        case = self.current_case
+        case = self._opening_case or self.current_case
+        self.video_player.set_rotation(case.video_rotation if case else 0)
         if case:
             self.playback.set_markers(case.trigger_frame, case.collision_frame)
         self.statusBar().showMessage(
@@ -1078,11 +1101,24 @@ class MainWindow(QMainWindow):
 
     def _video_closed(self) -> None:
         self.video_player.canvas.clear()
+        self.video_player.set_rotation(0)
         self.playback.clear_video()
 
     def _frame_ready(self, image, frame: int, timestamp: float) -> None:  # type: ignore[no-untyped-def]
         del frame, timestamp
         self.video_player.canvas.set_frame(image)
+
+    def rotate_video_clockwise(self) -> None:
+        case = self.current_case
+        if case is None or case.active_video is None or not self.video_controller.is_open:
+            self.video_player.set_rotation(0)
+            return
+        degrees = (case.video_rotation + 90) % 360
+        case.set_video_rotation(degrees)
+        self.video_player.set_rotation(degrees)
+        self._dirty = True
+        direction = f"{degrees}°" if degrees else "원본 방향"
+        self.statusBar().showMessage(f"영상 화면을 {direction}으로 표시합니다.", 3000)
 
     def _playback_state_changed(self, state: PlaybackState) -> None:
         self.playback.set_playing(state is PlaybackState.PLAYING)

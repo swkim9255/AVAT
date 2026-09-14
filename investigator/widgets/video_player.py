@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, Signal
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QImage,
+    QPainter,
+    QPixmap,
+    QTransform,
+)
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget
 
-from investigator.theme import MUTED, VIDEO_BACKGROUND, material_icon
+from investigator.theme import MUTED, PRIMARY, VIDEO_BACKGROUND, material_icon
 from investigator.video_import import VIDEO_EXTENSIONS
 
 
@@ -22,13 +30,41 @@ class VideoCanvas(QWidget):
         self.setMinimumSize(420, 280)
         self.setStyleSheet(f"background: {VIDEO_BACKGROUND}; border: 0;")
         self._image: QImage | None = None
+        self._source_image: QImage | None = None
+        self._rotation_degrees = 0
         self._placeholder_icon = material_icon("video_file", "#94A3B8")
 
     def set_frame(self, image: QImage) -> None:
-        self._image = image.copy()
+        self._source_image = image.copy()
+        self._update_display_image()
+
+    @property
+    def rotation_degrees(self) -> int:
+        return self._rotation_degrees
+
+    def set_rotation(self, degrees: int) -> None:
+        normalized = int(degrees) % 360
+        if normalized not in {0, 90, 180, 270}:
+            raise ValueError("영상 회전 각도는 90도 단위여야 합니다.")
+        if normalized == self._rotation_degrees:
+            return
+        self._rotation_degrees = normalized
+        self._update_display_image()
+
+    def _update_display_image(self) -> None:
+        if self._source_image is None:
+            self._image = None
+        elif self._rotation_degrees:
+            self._image = self._source_image.transformed(
+                QTransform().rotate(self._rotation_degrees),
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        else:
+            self._image = self._source_image.copy()
         self.update()
 
     def clear(self) -> None:
+        self._source_image = None
         self._image = None
         self.update()
 
@@ -86,6 +122,7 @@ class VideoCanvas(QWidget):
 
 class VideoPlayerPanel(QWidget):
     files_dropped = Signal(list)
+    rotation_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -103,6 +140,17 @@ class VideoPlayerPanel(QWidget):
         self.video_info.setStyleSheet(f"color: {MUTED};")
         self.video_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         heading.addWidget(self.video_info)
+        self.rotate_button = QToolButton(self)
+        self.rotate_button.setObjectName("rotateVideo90Button")
+        self.rotate_button.setIcon(material_icon("rotate_90_degrees_cw", PRIMARY))
+        self.rotate_button.setIconSize(QSize(20, 20))
+        self.rotate_button.setFixedSize(36, 36)
+        self.rotate_button.setEnabled(False)
+        self.rotate_button.setToolTip("시계 방향으로 90° 회전 · 현재 원본 방향")
+        self.rotate_button.setAccessibleName("영상 90도 회전")
+        self.rotate_button.setStyleSheet("QToolButton#rotateVideo90Button { padding: 0; }")
+        self.rotate_button.clicked.connect(lambda checked=False: self.rotation_requested.emit())
+        heading.addWidget(self.rotate_button)
         root.addLayout(heading)
         self.canvas = VideoCanvas(self)
         self.canvas.files_dropped.connect(self.files_dropped)
@@ -114,14 +162,23 @@ class VideoPlayerPanel(QWidget):
         if path is None:
             self.video_info.setText("선택된 영상 없음")
             self.video_info.setToolTip("")
+            self.rotate_button.setEnabled(False)
             return
         source = Path(path)
         suffix = f" · {resolution[0]}×{resolution[1]}" if resolution else ""
         self.video_info.setText(source.name + suffix)
         self.video_info.setToolTip(str(source))
+        self.rotate_button.setEnabled(True)
+
+    def set_rotation(self, degrees: int) -> None:
+        normalized = int(degrees) % 360
+        self.canvas.set_rotation(normalized)
+        current = f"{normalized}°" if normalized else "원본 방향"
+        self.rotate_button.setToolTip(f"시계 방향으로 90° 회전 · 현재 {current}")
 
     def clear(self) -> None:
         self.canvas.clear()
+        self.set_rotation(0)
         self.set_video_name(None)
 
 
