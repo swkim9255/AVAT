@@ -37,6 +37,7 @@ from investigator.schema import (
     injury_grade_summary,
 )
 from investigator.theme import BORDER, MUTED, PRIMARY, SURFACE, TEXT, material_icon
+from investigator.widgets.responsive_choices import ResponsiveChoiceGroup, WrappingCheckBox
 from investigator.widgets.scroll_safe_combo import ScrollSafeComboBox
 
 
@@ -46,25 +47,38 @@ class FieldEditor(QWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.spec = spec
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.setMinimumWidth(0)
         self._loading = False
         self.checkboxes: list[tuple[QCheckBox, str]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 8, 0, 10)
         root.setSpacing(6)
+        root.setAlignment(Qt.AlignmentFlag.AlignTop)
         label_row = QHBoxLayout()
         label_row.setSpacing(0)
         label = QLabel(spec.label, self)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label_policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        label_policy.setHeightForWidth(True)
+        label.setSizePolicy(label_policy)
         label.setStyleSheet("font-weight: 650;")
-        label_row.addWidget(label)
+        label_row.addWidget(label, 1)
         self.required_mark = QLabel("*", self)
         self.required_mark.setObjectName("requiredMark")
         self.required_mark.setVisible(False)
         label_row.addWidget(self.required_mark)
-        label_row.addStretch(1)
         root.addLayout(label_row)
 
         self.control = self._make_control()
+        control_policy = self.control.sizePolicy()
+        control_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        self.control.setSizePolicy(control_policy)
+        self.control.setMinimumWidth(0)
         root.addWidget(self.control)
 
     def _make_control(self) -> QWidget:
@@ -129,24 +143,19 @@ class FieldEditor(QWidget):
             return combo
 
         if spec.kind is FieldKind.MULTI:
-            container = QFrame(self)
+            container = ResponsiveChoiceGroup(self)
             container.setObjectName("multiChoiceContainer")
             container.setStyleSheet(
                 "QFrame#multiChoiceContainer { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; }"
                 "QFrame#multiChoiceContainer[invalid=true] { background: #FEF2F2; border: 1px solid #DC2626; }"
             )
-            grid = QGridLayout(container)
-            grid.setContentsMargins(10, 8, 10, 8)
-            grid.setHorizontalSpacing(12)
-            grid.setVerticalSpacing(8)
-            columns = 2 if len(spec.choices) > 3 else 1
             for index, choice in enumerate(spec.choices):
-                checkbox = QCheckBox(choice.label, container)
+                checkbox = WrappingCheckBox(choice.label, container)
                 checkbox.setObjectName(f"choice_{spec.key}_{index}")
                 checkbox.setToolTip(choice.label)
                 checkbox.toggled.connect(self._multi_changed)
                 self.checkboxes.append((checkbox, choice.value))
-                grid.addWidget(checkbox, index // columns, index % columns)
+                container.add_choice(checkbox)
             return container
 
         if spec.kind is FieldKind.LONG_TEXT:
@@ -163,6 +172,8 @@ class FieldEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         edit = QLineEdit(row)
+        edit.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        edit.setMinimumWidth(0)
         edit.setObjectName(f"field_{spec.key}")
         edit.setPlaceholderText(spec.placeholder)
         if spec.max_length:
@@ -484,6 +495,9 @@ class InvestigationPanel(QWidget):
             page_layout.setContentsMargins(4, 8, 8, 16)
             page_layout.setSpacing(0)
             section_label = QLabel(section.title, page)
+            section_label.setWordWrap(True)
+            section_label.setMinimumWidth(0)
+            section_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             section_label.setStyleSheet("font-size: 15px; font-weight: 700; padding: 8px 0;")
             page_layout.addWidget(section_label)
             section_fields = list(section.fields)
