@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from ctypes import WinDLL
+
+_icuuc = WinDLL(r"C:/Windows/System32/icuuc.dll")
+_icuin = WinDLL(r"C:/Windows/System32/icuin.dll")
 
 from PySide6.QtWidgets import QApplication
 

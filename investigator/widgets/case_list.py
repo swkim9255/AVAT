@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDrag, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -32,6 +33,15 @@ class CaseTreeWidget(QTreeWidget):
     """Tree that only reorders top-level accident items."""
 
     case_dropped = Signal(str, int)
+    cases_dropped = Signal(list, int)
+
+    def selected_cases(self) -> list[QTreeWidgetItem]:
+        return [
+            self.topLevelItem(index)
+            for index in range(self.topLevelItemCount())
+            if self.topLevelItem(index).isSelected()
+            and not self.topLevelItem(index).isHidden()
+        ]
 
     def startDrag(self, supported_actions) -> None:  # type: ignore[no-untyped-def]
         """Start a custom move drag without Qt deleting the source row."""
@@ -40,7 +50,7 @@ class CaseTreeWidget(QTreeWidget):
         source = self.currentItem()
         if source is None or source.parent() is not None:
             return
-        mime_data = self.mimeData([source])
+        mime_data = self.mimeData(self.selected_cases())
         if mime_data is None:
             return
         drag = QDrag(self)
@@ -63,9 +73,8 @@ class CaseTreeWidget(QTreeWidget):
         if source is None or source.parent() is not None or self.topLevelItemCount() < 2:
             event.ignore()
             return
-        uid = source.data(0, UID_ROLE)
-        source_index = self.indexOfTopLevelItem(source)
-        if not uid or source_index < 0:
+        sources = self.selected_cases()
+        if not sources:
             event.ignore()
             return
 
@@ -83,18 +92,22 @@ class CaseTreeWidget(QTreeWidget):
             place_after = hit_is_video or position.y() >= self.visualItemRect(target).center().y()
             raw_destination = target_index + int(place_after)
 
-        destination = raw_destination - int(source_index < raw_destination)
-        destination = max(0, min(destination, self.topLevelItemCount() - 1))
+        destination = raw_destination - sum(
+            self.indexOfTopLevelItem(item) < raw_destination for item in sources
+        )
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
-        if destination != source_index:
+        if sources:
             # Rebuilding or moving items while Qt is still finalizing the drag
             # can leave the dragged row temporarily hidden.  Only retain plain
             # values here and apply the move on the next event-loop turn.
-            dropped_uid = str(uid)
+            dropped_uids = [str(item.data(0, UID_ROLE)) for item in sources]
             QTimer.singleShot(
                 0,
-                lambda uid=dropped_uid, index=destination: self.case_dropped.emit(uid, index),
+                lambda uids=dropped_uids, index=destination: (
+                    self.case_dropped.emit(uids[0], index)
+                    if len(uids) == 1 else self.cases_dropped.emit(uids, index)
+                ),
             )
 
 
@@ -108,6 +121,7 @@ class CaseListPanel(QWidget):
     delete_case_requested = Signal(str)
     delete_video_requested = Signal(str, int)
     case_reordered = Signal(str, int)
+    cases_reordered = Signal(list, int)
     export_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -116,6 +130,7 @@ class CaseListPanel(QWidget):
         self.setMinimumWidth(240)
         self.setMaximumWidth(390)
         self._cases: list[InvestigationCase] = []
+        self._navigation_deferred = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 16, 14, 12)
@@ -155,15 +170,18 @@ class CaseListPanel(QWidget):
         self.tree.setColumnWidth(1, 34)
         self.tree.setIndentation(18)
         self.tree.setAnimated(True)
-        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.tree.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.tree.setDragDropOverwriteMode(False)
         self.tree.setDropIndicatorShown(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        self.tree.currentItemChanged.connect(self._selection_changed)
+        self.tree.itemSelectionChanged.connect(self._update_delete_button)
+        self.tree.itemClicked.connect(self._activate_deferred_selection)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         self.tree.case_dropped.connect(self.case_reordered)
+        self.tree.cases_dropped.connect(self.cases_reordered)
         root.addWidget(self.tree, 1)
 
         button_row = QHBoxLayout()
@@ -201,6 +219,11 @@ class CaseListPanel(QWidget):
         selected_uid: str | None = None,
         selected_video_index: int | None | object = _SELECTION_UNSET,
     ) -> None:
+        expanded = {
+            self.tree.topLevelItem(index).data(0, UID_ROLE):
+            self.tree.topLevelItem(index).isExpanded()
+            for index in range(self.tree.topLevelItemCount())
+        }
         if selected_video_index is _SELECTION_UNSET:
             previous = self._selected_target()
             selected_video_index = (
@@ -250,7 +273,7 @@ class CaseListPanel(QWidget):
                     child.setForeground(0, QBrush(QColor(PRIMARY)))
                 if case.uid == selected_uid and index == selected_video_index:
                     selected_item = child
-            item.setExpanded(True)
+            item.setExpanded(expanded.get(case.uid, True))
         if selected_item is None:
             selected_item = selected_case_item
         if selected_item:
@@ -299,17 +322,56 @@ class CaseListPanel(QWidget):
         self.tree.viewport().update()
         return True
 
+    def move_cases(self, uids: list[str], destination: int) -> None:
+        """Move the selected block, preserving item identity and UI state."""
+        tree = self.tree
+        items = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+        moving = [item for item in items if item.data(0, UID_ROLE) in uids]
+        current = tree.currentItem()
+        selected = tree.selectedItems()
+        expanded = [(item, item.isExpanded()) for item in moving]
+        blocked = tree.blockSignals(True)
+        tree.setUpdatesEnabled(False)
+        try:
+            for item in moving:
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+            target = max(0, min(destination, tree.topLevelItemCount()))
+            for offset, item in enumerate(moving):
+                tree.insertTopLevelItem(target + offset, item)
+            for item, state in expanded:
+                item.setExpanded(state)
+            if current is not None:
+                tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            for item in selected:
+                item.setSelected(True)
+        finally:
+            tree.setUpdatesEnabled(True)
+            tree.blockSignals(blocked)
+        tree.viewport().update()
+
     def _selection_changed(self) -> None:
         item = self.tree.currentItem()
         self._update_delete_button()
         if item is None:
             return
+        if QApplication.keyboardModifiers() & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        ):
+            self._navigation_deferred = True
+            return
+        self._navigation_deferred = False
         uid = item.data(0, UID_ROLE)
         video_index = int(item.data(0, VIDEO_INDEX_ROLE) or 0)
         if item.parent() is not None and video_index >= 0:
             self.video_selected.emit(str(uid), video_index)
         else:
             self.case_selected.emit(str(uid))
+
+    def _activate_deferred_selection(self) -> None:
+        # A plain click on the current Ctrl/Shift-selected row does not emit
+        # currentItemChanged again, but should still open that accident/video.
+        if self._navigation_deferred:
+            self._selection_changed()
 
     def _selected_target(self) -> tuple[str, int] | None:
         item = self.tree.currentItem()

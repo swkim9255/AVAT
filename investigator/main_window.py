@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         self.case_list.delete_case_requested.connect(self.delete_case)
         self.case_list.delete_video_requested.connect(self.delete_video)
         self.case_list.case_reordered.connect(self.reorder_case)
+        self.case_list.cases_reordered.connect(self.reorder_cases)
         self.case_list.export_requested.connect(self.export_csv)
         self.video_player.files_dropped.connect(self.attach_videos)
         self.video_player.rotation_requested.connect(self.rotate_video_clockwise)
@@ -369,6 +370,20 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{case.display_id} 표시 순서를 {target + 1}번째로 변경했습니다.", 3000
         )
+
+    def reorder_cases(self, uids: list[str], destination: int) -> None:
+        moving = [case for case in self.cases if case.uid in uids]
+        if not moving:
+            return
+        remaining = [case for case in self.cases if case.uid not in uids]
+        target = max(0, min(int(destination), len(remaining)))
+        reordered = remaining[:target] + moving + remaining[target:]
+        if [case.uid for case in reordered] == [case.uid for case in self.cases]:
+            return
+        self.cases[:] = reordered
+        self.case_list.move_cases([case.uid for case in moving], target)
+        self._dirty = True
+        self.statusBar().showMessage(f"사고 {len(moving)}개의 표시 순서를 변경했습니다.", 3000)
 
     def choose_videos(self) -> None:
         filters = "영상 파일 (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv *.webm);;모든 파일 (*.*)"
