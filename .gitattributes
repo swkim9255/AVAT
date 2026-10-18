@@ -1,12 +1,16 @@
 * text=auto
 .gitattributes text eol=lf
 .gitignore text eol=lf
+# Keep source and documentation LF on every platform.
 *.py text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
 *.json text eol=lf
 *.csv text eol=lf
+# Explicit rules for files previously containing mixed CRLF/LF endings.
+/README.md text eol=lf
+/investigator/widgets/playback_panel.py text eol=lf
 *.ttf binary
 *.png binary
 *.mp4 binary

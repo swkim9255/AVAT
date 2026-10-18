@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from uuid import uuid4
 
 from PySide6.QtCore import Qt
@@ -55,13 +56,16 @@ class FormDesigner(QDialog):
         self.initial_definition = FormDefinition.from_dict(
             (initial_definition or FormDefinition.default()).to_dict()
         )
+        # The immutable initial snapshot can itself contain the previous
+        # automatic expansion, even after being saved in the current format.
+        self.initial_definition._restore_automatic_adult_expansion()
         self._original_columns = {f["key"]: f["csv_column"] for f in definition.records()}
         self._selected: tuple[int, int | None] | None = None
         self._loading = False
         root = QVBoxLayout(self)
         help_text = QLabel(
             "현재 작업 폴더의 조사 양식을 편집합니다. 적용하면 설정과 조사 데이터가 함께 저장됩니다.\n"
-            "CSV의 기존 칼럼은 유지되고, 변경한 이름과 새 항목은 추가 칼럼으로 내보냅니다.\n"
+            "선택지 이름·저장값·개별 CSV 칼럼을 수정할 수 있습니다. 저장값 변경 시 기존 선택도 함께 옮깁니다.\n"
             "기본값은 이후 새로 생성·가져오는 사고에만 적용됩니다. 기존 입력값은 유지됩니다.",
             self,
         )
@@ -223,22 +227,34 @@ class FormDesigner(QDialog):
                 editable=self.editable.isChecked(),
                 full_width=self.full_width.isChecked(),
             )
-            record["choices"] = [
-                dict(
-                    zip(
-                        ("label", "value", "csv_column"),
-                        (self.choices.item(row, col).text().strip() for col in range(3)),
-                        strict=True,
-                    )
-                )
-                for row in range(self.choices.rowCount())
-            ]
+            choices = []
+            for row in range(self.choices.rowCount()):
+                original = self.choices.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
+                choice = deepcopy(original)
+                choice.update(zip(
+                    ("label", "value", "csv_column"),
+                    (self.choices.item(row, col).text().strip() for col in range(3)),
+                    strict=True,
+                ))
+                choice.setdefault("id", original.get("value", choice["value"]))
+                for current_key, alias_key in (
+                    ("value", "value_aliases"), ("csv_column", "csv_aliases")
+                ):
+                    aliases = list(choice.get(alias_key, []))
+                    old = original.get(current_key)
+                    if old and old != choice[current_key] and old not in aliases:
+                        aliases.append(old)
+                    choice[alias_key] = [a for a in aliases if a != choice[current_key]]
+                choices.append(choice)
+                self.choices.item(row, 0).setData(Qt.ItemDataRole.UserRole, deepcopy(choice))
+            record["choices"] = choices
             default = self.default_value.toPlainText().strip()
             record["default"] = (
                 [s.strip() for s in default.splitlines() if s.strip()]
                 if record["kind"] == FieldKind.MULTI
                 else default or None
             )
+            record["default"] = self.definition._migrate_value(record, record["default"])
 
     def _selection_changed(self, current, previous) -> None:  # type: ignore[no-untyped-def]
         self._store_editor()
@@ -279,9 +295,9 @@ class FormDesigner(QDialog):
             self.full_width.setEnabled(True)
             self.editable.setEnabled(not locked)
             self.rule_note.setText(
-                "자동 계산 또는 기존 CSV 연결이 있어 입력 방식을 유지합니다. 이름·CSV 별칭은 변경할 수 있습니다."
+                "입력 방식은 유지합니다. 선택지 이름·저장값·개별 CSV 칼럼은 변경할 수 있습니다."
                 if locked
-                else "저장값은 기존 데이터와 연결됩니다. 선택지 이름만 바꾸면 기존 선택값도 유지됩니다."
+                else "저장값·개별 CSV 칼럼을 변경하면 기존 선택을 유지하며, 모든 사고의 다음 CSV 출력에 반영합니다."
             )
             default = record.get("default")
             self.default_value.setPlainText(
@@ -349,8 +365,8 @@ class FormDesigner(QDialog):
         self.choices.insertRow(row)
         for col, key in enumerate(("label", "value", "csv_column")):
             item = QTableWidgetItem(choice.get(key, ""))
-            if existing and col > 0:
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if col == 0:
+                item.setData(Qt.ItemDataRole.UserRole, deepcopy(choice))
             self.choices.setItem(row, col, item)
 
     def add_choice(self) -> None:
@@ -370,7 +386,8 @@ class FormDesigner(QDialog):
         if fi is None:
             return
         base = FIELD_BY_KEY.get(self.definition.tabs[ti]["fields"][fi]["key"])
-        value = self.choices.item(row, 1).text()
+        original = self.choices.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
+        value = original.get("id", original.get("value"))
         if base and value in {c.value for c in base.choices}:
             QMessageBox.warning(
                 self,
@@ -403,6 +420,17 @@ class FormDesigner(QDialog):
         self._refresh_tree((ti, len(fields) - 1))
 
     def restore_initial(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "초기 설정 복원 확인",
+            "조사 양식을 초기 설정으로 복원하시겠습니까?\n"
+            "기본 항목의 이름·저장값·CSV 칼럼과 배치가 초기값으로 돌아갑니다.\n"
+            "복원 결과는 ‘양식 적용 및 저장’을 눌러야 저장됩니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         self._store_editor()
         try:
             restored = self.definition.restored(self.initial_definition)

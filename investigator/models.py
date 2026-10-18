@@ -61,6 +61,8 @@ class InvestigationCase:
 
     def __post_init__(self) -> None:
         self.values = normalize_json_value(self.values)
+        if self.form_definition:
+            self.values = self.form_definition.canonical_values(self.values)
         legacy_speed = self.values.get("trigger_vehicle_speed")
         if isinstance(legacy_speed, str) and legacy_speed in LEGACY_TRIGGER_VEHICLE_SPEED_VALUES:
             self.values["trigger_vehicle_speed"] = LEGACY_TRIGGER_VEHICLE_SPEED_VALUES[legacy_speed]
@@ -166,6 +168,8 @@ class InvestigationCase:
         self.rotation_by_video = normalized_rotations
         if self.status not in {"draft", "completed"}:
             self.status = "draft"
+        if self.form_definition:
+            self.values = self.form_definition.stored_values(self.values)
 
     @property
     def display_id(self) -> str:
@@ -378,7 +382,9 @@ class InvestigationCase:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> InvestigationCase:
+    def from_dict(
+        cls, data: dict[str, Any], *, form_definition: FormDefinition | None = None
+    ) -> InvestigationCase:
         raw_workflow = data.get("workflow", {})
         raw_values = data.get("values", {})
         raw_videos = data.get("videos", [])
@@ -421,6 +427,7 @@ class InvestigationCase:
             updated_at=str(workflow.get("updated_at") or utc_now()),
             completed_at=workflow.get("completed_at"),
             defaults_applied=True,
+            form_definition=form_definition,
         )
 
 

@@ -329,7 +329,7 @@ class PlaybackPanel(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(6)
         controls.addStretch(1)
-        self.back_5s = self._transport_button("replay_5", "5초 뒤로 이동")
+        self.back_1s = self._transport_button("replay", "1초 뒤로 이동")
         self.back_10f = self._transport_button("fast_rewind", "10프레임 뒤로")
         self.back_1f = self._transport_button("skip_previous", "이전 프레임")
         self.play_button = self._transport_button("play_arrow", "영상 재생")
@@ -337,15 +337,15 @@ class PlaybackPanel(QWidget):
         self.play_button.setIconSize(QSize(26, 26))
         self.next_1f = self._transport_button("skip_next", "다음 프레임")
         self.next_10f = self._transport_button("fast_forward", "10프레임 앞으로")
-        self.next_5s = self._transport_button("forward_5", "5초 앞으로 이동")
+        self.next_1s = self._transport_button("forward_media", "1초 앞으로 이동")
         for button in (
-            self.back_5s,
+            self.back_1s,
             self.back_10f,
             self.back_1f,
             self.play_button,
             self.next_1f,
             self.next_10f,
-            self.next_5s,
+            self.next_1s,
         ):
             controls.addWidget(button)
         controls.addStretch(1)
@@ -379,13 +379,13 @@ class PlaybackPanel(QWidget):
         bottom.addStretch(1)
         root.addLayout(bottom)
 
-        self.back_5s.clicked.connect(lambda: self.relative_seconds_requested.emit(-5.0))
+        self.back_1s.clicked.connect(lambda: self.relative_seconds_requested.emit(-1.0))
         self.back_10f.clicked.connect(lambda: self.relative_frames_requested.emit(-10))
         self.back_1f.clicked.connect(lambda: self.relative_frames_requested.emit(-1))
         self.play_button.clicked.connect(self.toggle_playback_requested)
         self.next_1f.clicked.connect(lambda: self.relative_frames_requested.emit(1))
         self.next_10f.clicked.connect(lambda: self.relative_frames_requested.emit(10))
-        self.next_5s.clicked.connect(lambda: self.relative_seconds_requested.emit(5.0))
+        self.next_1s.clicked.connect(lambda: self.relative_seconds_requested.emit(1.0))
         self.trigger_button.clicked.connect(self.trigger_requested)
         self.collision_button.clicked.connect(self.collision_requested)
         self.go_button.clicked.connect(
@@ -440,13 +440,13 @@ class PlaybackPanel(QWidget):
     def set_video_enabled(self, enabled: bool) -> None:
         for widget in (
             self.timeline,
-            self.back_5s,
+            self.back_1s,
             self.back_10f,
             self.back_1f,
             self.play_button,
             self.next_1f,
             self.next_10f,
-            self.next_5s,
+            self.next_1s,
             self.trigger_button,
             self.collision_button,
             self.frame_input,

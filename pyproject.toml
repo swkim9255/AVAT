@@ -28,7 +28,7 @@ katri-investigator = "investigator.app:main"
 include = ["investigator*"]
 
 [tool.setuptools.package-data]
-investigator = ["assets/material_symbols/*", "assets/fonts/*"]
+investigator = ["assets/material_symbols/*", "assets/fonts/*", "assets/*.xlsx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

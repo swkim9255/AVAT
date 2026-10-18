@@ -93,7 +93,14 @@ def field_record(spec: FieldSpec) -> dict[str, Any]:
         "default": None,
         "full_width": False,
         "choices": [
-            {"label": c.label, "value": c.value, "csv_column": c.csv_column or ""}
+            {
+                "id": c.value,
+                "label": c.label,
+                "value": c.value,
+                "csv_column": c.csv_column or "",
+                "value_aliases": [],
+                "csv_aliases": [],
+            }
             for c in spec.choices
         ],
     }
@@ -160,11 +167,14 @@ class FormDefinition:
             return cls.default()
         if (
             not isinstance(raw, dict)
-            or raw.get("version") not in {1, 2, 3}
+            or raw.get("version") not in {1, 2, 3, 4, 5}
             or not isinstance(raw.get("tabs"), list)
         ):
             raise ValueError("지원하지 않는 조사 양식 형식입니다.")
         result = cls(deepcopy(raw["tabs"]), deepcopy(raw.get("csv_column_order", [])))
+        result._upgrade_choices(initialize=raw["version"] < 4)
+        if raw["version"] < 5:
+            result._restore_automatic_adult_expansion()
         if raw["version"] == 1:
             # Capture CSV order before changing the presentation order.
             result.csv_column_order = result.csv_headers()
@@ -177,7 +187,66 @@ class FormDefinition:
         return result
 
     def to_dict(self) -> dict[str, Any]:
-        return {"version": 3, "tabs": deepcopy(self.tabs), "csv_column_order": self.csv_headers()}
+        return {"version": 5, "tabs": deepcopy(self.tabs), "csv_column_order": self.csv_headers()}
+
+    def _restore_automatic_adult_expansion(self) -> None:
+        """Repair the previous automatic defaults in already saved workspaces once.
+
+        Version 5 keeps deliberate edits, including the same wording, unchanged.
+        A prior explicit individual-column edit has history and is preserved too.
+        """
+        renamed_columns: dict[str, str] = {}
+        originals = {
+            "obstacle_pedestrians": ("어른", "어른", "obstacle_adult"),
+            "collision_targets": ("보행자 · 어른", "pedestrian.adult", ""),
+        }
+        for record in self.records():
+            original = originals.get(record["key"])
+            if original is None:
+                continue
+            label, value, column = original
+            for choice in record["choices"]:
+                if (
+                    choice.get("id", choice["value"]) != value
+                    or choice["value"] != "어른, 청소년"
+                    or choice["label"] != label.replace("어른", "어른, 청소년")
+                    or choice.get("csv_column", "") != ("obstacle_adult,youth" if column else "")
+                    or choice.get("csv_aliases")
+                ):
+                    continue
+                old_value, old_column = choice["value"], choice.get("csv_column", "")
+                choice.update(label=label, value=value, csv_column=column)
+                choice["value_aliases"] = list(dict.fromkeys([
+                    *(a for a in choice.get("value_aliases", []) if a != value), old_value,
+                ]))
+                if old_column:
+                    renamed_columns[old_column] = column
+            if record.get("default") is not None:
+                record["default"] = self._migrate_value(record, record["default"])
+        self.csv_column_order = list(dict.fromkeys(
+            renamed_columns.get(column, column) for column in self.csv_column_order
+        ))
+
+    def _upgrade_choices(self, *, initialize: bool = True) -> None:
+        """Add stable editing identities without renaming existing choices or values."""
+        for record in self.records():
+            # Accept files saved during the earlier category expansion. Restore
+            # only their internal editing identity; keep the saved configuration.
+            original_id = {
+                "obstacle_pedestrians": "어른",
+                "collision_targets": "pedestrian.adult",
+            }.get(record["key"])
+            identities = {c.get("id", c["value"]) for c in record.get("choices", [])}
+            for choice in record.get("choices", []):
+                if initialize:
+                    choice.setdefault("id", choice["value"])
+                    choice.setdefault("value_aliases", [])
+                    choice.setdefault("csv_aliases", [])
+                if (
+                    original_id and original_id not in identities
+                    and choice.get("id", choice["value"]) == "어른, 청소년"
+                ):
+                    choice["id"] = original_id
 
     def restored(self, initial: FormDefinition) -> FormDefinition:
         """Restore saved initial settings while keeping added fields and CSV links."""
@@ -195,10 +264,19 @@ class FormDefinition:
                 if target is None:
                     target_tab["fields"].append(deepcopy(current))
                     continue
-                known_choices = {c["value"] for c in target["choices"]}
+                known_choices = {c.get("id", c["value"]) for c in target["choices"]}
                 target["choices"].extend(
-                    deepcopy(c) for c in current["choices"] if c["value"] not in known_choices
+                    deepcopy(c) for c in current["choices"]
+                    if c.get("id", c["value"]) not in known_choices
                 )
+                targets = {c.get("id", c["value"]): c for c in target["choices"]}
+                for choice in current["choices"]:
+                    restored = targets[choice.get("id", choice["value"])]
+                    for column in [choice.get("csv_column"), *choice.get("csv_aliases", [])]:
+                        if column and column != restored.get("csv_column"):
+                            aliases = restored.setdefault("csv_aliases", [])
+                            if column not in aliases:
+                                aliases.append(column)
                 columns = {target["csv_column"], *(c.get("csv_column") for c in target["choices"])}
                 for column in [current["csv_column"], *current.get("aliases", [])]:
                     if column and column not in columns and column not in target["aliases"]:
@@ -304,6 +382,8 @@ class FormDefinition:
                 if not isinstance(choices, list):
                     raise ValueError("선택지 목록이 올바르지 않습니다.")
                 values: set[str] = set()
+                choice_ids: set[str] = set()
+                historical_values: set[str] = set()
                 choice_columns: list[str] = []
                 for choice in choices:
                     if not isinstance(choice, dict) or any(
@@ -314,19 +394,29 @@ class FormDefinition:
                     if choice["value"] in values:
                         raise ValueError("선택지 저장값이 중복됩니다.")
                     values.add(choice["value"])
+                    identity = choice.get("id", choice["value"])
+                    if not isinstance(identity, str) or not identity or identity in choice_ids:
+                        raise ValueError("선택지 식별자가 중복되거나 비어 있습니다.")
+                    choice_ids.add(identity)
+                    for alias_key in ("value_aliases", "csv_aliases"):
+                        aliases = choice.get(alias_key, [])
+                        if not isinstance(aliases, list) or any(
+                            not isinstance(alias, str) or not alias.strip() for alias in aliases
+                        ):
+                            raise ValueError("선택지의 이전 저장값·CSV 연결이 올바르지 않습니다.")
+                    linked_values = {choice["value"], *choice.get("value_aliases", [])}
+                    if historical_values & linked_values:
+                        raise ValueError("선택지의 저장값이 다른 선택지의 이전 저장값과 겹칩니다.")
+                    historical_values.update(linked_values)
                     if choice.get("csv_column"):
                         choice_columns.append(choice["csv_column"])
                 if kind in {FieldKind.SINGLE, FieldKind.MULTI} and not choices:
                     raise ValueError(f"{record['label']}: 선택지를 추가해 주세요.")
                 if base:
-                    by_value = {c["value"]: c for c in choices}
                     for c in base.choices:
-                        if (
-                            c.value not in by_value
-                            or (by_value[c.value].get("csv_column") or None) != c.csv_column
-                        ):
+                        if c.value not in choice_ids:
                             raise ValueError(
-                                f"{record['label']}: 기존 선택지의 저장값과 CSV 연결은 유지해야 합니다."
+                                f"{record['label']}: 기존 선택지는 유지해야 합니다."
                             )
                     if type_locked(key) and record["editable"] != base.editable:
                         raise ValueError("자동 계산 항목의 직접 입력 설정은 유지해야 합니다.")
@@ -342,7 +432,10 @@ class FormDefinition:
                     raise ValueError("CSV 칼럼 설정이 올바르지 않습니다.")
                 if not column and not choice_columns:
                     raise ValueError(f"{record['label']}: CSV 칼럼명을 입력해 주세요.")
-                used = [*([column] if column else []), *choice_columns, *aliases]
+                used = [
+                    *([column] if column else []), *choice_columns, *aliases,
+                    *(a for c in choices for a in c.get("csv_aliases", [])),
+                ]
                 if len(used) != len(set(used)):
                     raise ValueError(f"{record['label']}: CSV 칼럼명이 중복됩니다.")
                 for column in used:
@@ -363,7 +456,7 @@ class FormDefinition:
         defaults = {
             f["key"]: f.get("default") for f in self.records() if not is_blank(f.get("default"))
         }
-        errors = validation_errors(defaults, self.fields)
+        errors = self.errors(defaults)
         if errors:
             labels = {f.key: f.label for f in self.fields}
             raise ValueError(
@@ -376,10 +469,83 @@ class FormDefinition:
                 values[f["key"]] = deepcopy(f["default"])
 
     def missing(self, values: dict[str, Any]) -> list[str]:
-        return missing_questions(values, self.fields)
+        return missing_questions(self.canonical_values(values), self._canonical_fields())
 
     def errors(self, values: dict[str, Any]) -> dict[str, str]:
-        return validation_errors(values, self.fields)
+        return validation_errors(self.canonical_values(values), self._canonical_fields())
+
+    def _canonical_fields(self) -> tuple[FieldSpec, ...]:
+        return tuple(
+            replace(spec, choices=tuple(
+                replace(choice, value=record_choice.get("id", record_choice["value"]))
+                for choice, record_choice in zip(spec.choices, record["choices"], strict=True)
+            ))
+            for spec, record in zip(self.fields, self.records(), strict=True)
+        )
+
+    def canonical_values(self, values: dict[str, Any]) -> dict[str, Any]:
+        result = dict(values)
+        for record in self.records():
+            mapping = {c["value"]: c.get("id", c["value"]) for c in record["choices"]}
+            value = result.get(record["key"])
+            if isinstance(value, list):
+                result[record["key"]] = [mapping.get(item, item) for item in value]
+            elif isinstance(value, str):
+                result[record["key"]] = mapping.get(value, value)
+        return result
+
+    def stored_value(self, key: str, canonical_value: Any) -> Any:
+        record = next(record for record in self.records() if record["key"] == key)
+        return next((c["value"] for c in record["choices"]
+                     if c.get("id", c["value"]) == canonical_value), canonical_value)
+
+    def stored_values(self, values: dict[str, Any]) -> dict[str, Any]:
+        result = dict(values)
+        for record in self.records():
+            key = record["key"]
+            value = result.get(key)
+            if isinstance(value, list):
+                result[key] = [self.stored_value(key, item) for item in value]
+            elif isinstance(value, str):
+                result[key] = self.stored_value(key, value)
+        return result
+
+    @staticmethod
+    def _migrate_value(record: dict[str, Any], value: Any) -> Any:
+        mapping = {c.get("id", c["value"]): c["value"] for c in record["choices"]}
+        mapping.update({
+            alias: c["value"]
+            for c in record["choices"]
+            for alias in c.get("value_aliases", [])
+        })
+        mapping.update({c["value"]: c["value"] for c in record["choices"]})
+        if isinstance(value, list):
+            return list(dict.fromkeys(mapping.get(item, item) for item in value))
+        return mapping.get(value, value) if isinstance(value, str) else value
+
+    def migrate_values(
+        self, values: dict[str, Any], previous: FormDefinition | None = None
+    ) -> dict[str, Any]:
+        """Migrate on a copy so cancelling or a failed save cannot change live cases."""
+        result = deepcopy(values)
+        previous_records = {r["key"]: r for r in previous.records()} if previous else {}
+        for record in self.records():
+            key = record["key"]
+            if key not in result:
+                continue
+            old = previous_records.get(key)
+            if old:
+                current = {c.get("id", c["value"]): c["value"] for c in record["choices"]}
+                mapping = {c["value"]: current.get(c.get("id", c["value"]), c["value"])
+                           for c in old["choices"]}
+                value = result[key]
+                result[key] = (
+                    list(dict.fromkeys(mapping.get(item, item) for item in value))
+                    if isinstance(value, list) else mapping.get(value, value)
+                )
+            else:
+                result[key] = self._migrate_value(record, result[key])
+        return result
 
     def label(self, key: str) -> str:
         from investigator.schema import field_label
@@ -387,9 +553,32 @@ class FormDefinition:
         return next((f.label for f in self.fields if f.key == key), field_label(key))
 
     def csv_headers(self) -> list[str]:
-        result = csv_headers()
+        # Historical names identify the same choice, rather than additional
+        # output columns. Re-export using the current individual-column name.
+        records = {record["key"]: record for record in self.records()}
+        renamed: dict[str, str] = {}
+        for key, record in records.items():
+            base = FIELD_BY_KEY.get(key)
+            base_choices = {c.value: c for c in base.choices} if base else {}
+            for choice in record["choices"]:
+                current = choice.get("csv_column")
+                if not current:
+                    continue
+                original = base_choices.get(choice.get("id", choice["value"]))
+                for old in [original.csv_column if original else None,
+                            *choice.get("csv_aliases", [])]:
+                    if old:
+                        renamed[old] = current
+        result = list(dict.fromkeys(renamed.get(column, column) for column in csv_headers()))
+        active = set(result)
+        for record in self.records():
+            active.update(column for column in [
+                record["csv_column"], *record.get("aliases", []),
+                *(c.get("csv_column") for c in record["choices"]),
+            ] if column)
         for column in self.csv_column_order:
-            if column not in result:
+            column = renamed.get(column, column)
+            if column in active and column not in result:
                 result.append(column)
         for record in self.records():
             for column in [
@@ -402,13 +591,14 @@ class FormDefinition:
         return result
 
     def csv_row(self, values: dict[str, Any]) -> dict[str, str]:
-        row = values_to_csv(values)
-        legacy = set(csv_headers())
+        values = self.migrate_values(values)
+        canonical = self.canonical_values(values)
+        row = values_to_csv(canonical)
         for record, spec in zip(self.records(), self.fields, strict=True):
             value = values.get(spec.key)
-            if (spec.group == "obstacle_detail" and values.get("obstacle_exists") == "무") or (
+            if (spec.group == "obstacle_detail" and canonical.get("obstacle_exists") == "무") or (
                 spec.group == "damage_counts"
-                and values.get("incident_damage_unknown") == "확인불가"
+                and canonical.get("incident_damage_unknown") == "확인불가"
             ):
                 value = None
             text = (
@@ -417,16 +607,39 @@ class FormDefinition:
                 else ("|".join(map(str, value)) if isinstance(value, list) else str(value))
             )
             base = FIELD_BY_KEY.get(spec.key)
-            if base and base.csv_column:
+            if base and spec.key == "incident_damage_unknown":
                 text = row[base.csv_column]
-            for column in [record["csv_column"], *record.get("aliases", [])]:
-                if column and column not in legacy:
+            elif base and isinstance(value, list):
+                configured = {c["value"]: c for c in record["choices"]}
+                output_values = []
+                for item in value:
+                    choice = configured.get(item)
+                    if choice is None:
+                        output_values.append(str(item))
+                    elif choice["value"] != choice.get("id", choice["value"]):
+                        output_values.append(choice["value"])
+                    else:
+                        label = choice["label"]
+                        output_values.append(
+                            label.split(" · ", 1)[-1] if spec.key == "collision_targets" else label
+                        )
+                text = "|".join(output_values)
+            elif base and base.csv_column and spec.key in INJURY_GRADE_RULES:
+                text = row[base.csv_column]
+            for column in [record["csv_column"], *record.get("aliases", []),
+                           *([base.csv_column] if base and base.csv_column else [])]:
+                if column:
                     row[column] = text
             selected = value if isinstance(value, list) else [value]
-            for c in spec.choices:
-                if c.csv_column and c.csv_column not in legacy:
-                    row[c.csv_column] = "1" if c.value in selected else ""
-        return row
+            base_choices = {c.value: c for c in base.choices} if base else {}
+            for choice in record["choices"]:
+                original = base_choices.get(choice.get("id", choice["value"]))
+                columns = [choice.get("csv_column"), *choice.get("csv_aliases", []),
+                           original.csv_column if original else None]
+                for column in columns:
+                    if column:
+                        row[column] = "1" if choice["value"] in selected else ""
+        return {column: row.get(column, "") for column in self.csv_headers()}
 
 
 def new_field() -> dict[str, Any]:

@@ -6,41 +6,52 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QDir, QStandardPaths, Qt
+from PySide6.QtCore import QDir, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
+    QHBoxLayout,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QSpinBox,
     QSplitter,
+    QTabBar,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from investigator.diagnostics import timed_operation
+from investigator.folder_watcher import ProjectFolderWatcher
 from investigator.form_definition import FormDefinition
 from investigator.models import DEFAULT_INSTITUTION, InvestigationCase, new_case
+from investigator.project_session import ProjectSession
 from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
     MISSING_VALUE_MESSAGE,
 )
-from investigator.storage import CaseRepository, WorkspaceError
+from investigator.storage import CaseRepository, WorkspaceError, data_specification_path
+from investigator.storage_worker import StorageWorker
 from investigator.theme import PRIMARY, material_icon
 from investigator.video_controller import PlaybackState, VideoController, VideoMetadata
+from investigator.video_copy import CopiedVideos, copy_videos
 from investigator.video_import import (
     VIDEO_EXTENSIONS,
+    VideoFolderScan,
     parse_accident_video_name,
     scan_video_folder,
 )
 from investigator.widgets.case_list import CaseListPanel
+from investigator.widgets.csv_export_dialog import CsvExportDialog
 from investigator.widgets.form_designer import FormDesigner
 from investigator.widgets.form_panel import InvestigationPanel
 from investigator.widgets.playback_panel import PlaybackPanel
+from investigator.widgets.video_import_dialog import VideoImportDialog
 from investigator.widgets.video_player import VideoPlayerPanel
 
 
@@ -54,7 +65,7 @@ class MainWindow(QMainWindow):
     def __init__(self, workspace: str | Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("mainWindow")
-        self.setWindowTitle("사고 영상 조사 도구")
+        self.setWindowTitle("AVAT")
         self.setWindowIcon(material_icon("car_crash", PRIMARY))
         self.setMinimumSize(1180, 760)
         self.resize(1660, 940)
@@ -64,7 +75,24 @@ class MainWindow(QMainWindow):
         self.current_uid: str | None = None
         self._opening_case: InvestigationCase | None = None
         self._dirty = False
+        self._dirty_cases: set[str] = set()
+        self._case_revisions: dict[str, int] = {}
+        self._order_dirty = False
+        self._saved_active_uid: str | None = None
+        self._persisted_uids: set[str] = set()
+        self._storage_worker = StorageWorker(self)
+        self._commit_in_progress = False
+        self._deferred_reorders: list[tuple[list[str], int]] = []
         self._workspace_load_failed = False
+        self._projects = [ProjectSession(self.repository)]
+        self._active_project_index = 0
+        self._switching_project = False
+        self._video_import_in_progress = False
+        self._auto_import_failed = False
+        self.folder_watcher = ProjectFolderWatcher(self)
+        self._watch_refresh_timer = QTimer(self)
+        self._watch_refresh_timer.setSingleShot(True)
+        self._watch_refresh_timer.timeout.connect(self._refresh_watched_videos)
 
         self.video_controller = VideoController(self)
         self.case_list = CaseListPanel(self)
@@ -75,10 +103,99 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._connect_signals()
         self._load_workspace()
+        self._projects[0].initialized = True
+        self._watch_active_project()
 
     @property
     def current_case(self) -> InvestigationCase | None:
         return next((case for case in self.cases if case.uid == self.current_uid), None)
+
+    def _disk_operation(self, operation, *args, allow_edit=False, **kwargs):  # type: ignore[no-untyped-def]
+        """Run commits off-thread; keep GUI timers/painting alive until committed."""
+        self._commit_in_progress = True
+        disabled = []
+        if allow_edit:
+            # Keep fields editable during an explicit draft save, but prevent
+            # structural/navigation commands from reentering the transaction.
+            for control in [
+                self.case_list, self.video_player, self.investigation.save_button,
+                self.project_tabs, self.project_add_button,
+                self.investigation.complete_button, self.investigation.next_button,
+                self.investigation.edit_form_button,
+                *self.findChildren(QAction),
+            ]:
+                if control.isEnabled():
+                    control.setEnabled(False)
+                    disabled.append(control)
+        try:
+            with timed_operation("storage_operation", count=len(args[0]) if args and isinstance(args[0], list) else None):
+                return self._storage_worker.run(operation, *args, allow_input=allow_edit, **kwargs)
+        finally:
+            for control in disabled:
+                control.setEnabled(True)
+            self._commit_in_progress = False
+            if allow_edit:
+                case = self.current_case
+                self.investigation.complete_button.setEnabled(
+                    case is not None and case.status != "completed"
+                )
+            if self._deferred_reorders:
+                QTimer.singleShot(0, self._flush_deferred_reorders)
+            self._schedule_watch_refresh()
+
+    def _flush_deferred_reorders(self) -> None:
+        if self._commit_in_progress:
+            return
+        pending, self._deferred_reorders = self._deferred_reorders, []
+        for uids, destination in pending:
+            self.reorder_cases(uids, destination)
+
+    def _copy_case(self, case: InvestigationCase) -> InvestigationCase:
+        snapshot = InvestigationCase.from_dict(
+            case.to_dict(), form_definition=self.repository.form_definition
+        )
+        snapshot.defaults_applied = case.defaults_applied
+        return snapshot
+
+    def _mark_case_dirty(self, case: InvestigationCase) -> None:
+        self._dirty_cases.add(case.uid)
+        self._case_revisions[case.uid] = self._case_revisions.get(case.uid, 0) + 1
+        self._dirty = True
+
+    def _mark_saved(self, active_uid: str | None) -> None:
+        self._dirty = False
+        self._dirty_cases.clear()
+        self._order_dirty = False
+        self._saved_active_uid = active_uid
+        self._persisted_uids = {case.uid for case in self.cases}
+        if hasattr(self, "_projects"):
+            project = self._projects[self._active_project_index]
+            project.cases = self.cases
+            project.current_uid = active_uid
+
+    def _save_candidates(
+        self, candidates: list[InvestigationCase], active_uid: str | None,
+        *, auto_import_exclusions: set[str] | None = None,
+    ) -> None:
+        """Persist only detached/new/edited cases and structural metadata."""
+        previous = {case.uid: case for case in self.cases}
+        candidate_uids = {case.uid for case in candidates}
+        changes = [
+            case for case in candidates
+            if previous.get(case.uid) is not case or case.uid in self._dirty_cases
+        ]
+        snapshots = [self._copy_case(case) for case in changes]
+        self._disk_operation(
+            self.repository.save_changes, snapshots,
+            deleted_uids=list(previous.keys() - candidate_uids),
+            order=[case.uid for case in candidates], active_case_uid=active_uid,
+            auto_import_exclusions=auto_import_exclusions,
+        )
+        # Configured defaults are applied only to genuinely new cases.
+        saved_by_uid = {case.uid: case for case in snapshots}
+        for index, case in enumerate(candidates):
+            if case.uid in saved_by_uid:
+                candidates[index] = saved_by_uid[case.uid]
 
     def _build_layout(self) -> None:
         root_widget = QWidget(self)
@@ -86,6 +203,27 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(root_widget)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(1)
+        project_row = QHBoxLayout()
+        project_row.setContentsMargins(12, 0, 12, 0)
+        project_row.setSpacing(8)
+        self.project_tabs = QTabBar(root_widget)
+        self.project_tabs.setObjectName("projectTabs")
+        self.project_tabs.setAccessibleName("프로젝트 폴더 탭")
+        self.project_tabs.setExpanding(False)
+        self.project_tabs.setUsesScrollButtons(True)
+        self.project_tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self.project_tabs.setStyleSheet("QTabBar#projectTabs::tab { padding: 11px 14px; max-width: 240px; }")
+        self.project_tabs.addTab(self.repository.workspace.name or str(self.repository.workspace))
+        self.project_tabs.setTabToolTip(0, str(self.repository.workspace))
+        project_row.addWidget(self.project_tabs, 1)
+        self.project_add_button = QToolButton(root_widget)
+        self.project_add_button.setIcon(material_icon("add", PRIMARY))
+        self.project_add_button.setAccessibleName("프로젝트 폴더 열기")
+        self.project_add_button.setToolTip("프로젝트 폴더 열기 · 현재 탭 / 새 탭")
+        self.project_add_button.setFixedSize(34, 34)
+        self.project_add_button.setStyleSheet("padding: 0;")
+        project_row.addWidget(self.project_add_button)
+        root.addLayout(project_row)
         self.splitter = QSplitter(Qt.Orientation.Horizontal, root_widget)
         self.splitter.setObjectName("mainSplitter")
         self.splitter.setChildrenCollapsible(False)
@@ -109,14 +247,11 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("파일")
-        workspace_action = QAction(material_icon("folder_open", PRIMARY), "작업 폴더 열기…", self)
+        workspace_action = QAction(material_icon("folder_open", PRIMARY), "프로젝트 폴더 열기…", self)
         workspace_action.setShortcut(QKeySequence("Ctrl+O"))
         workspace_action.triggered.connect(self.choose_workspace)
         file_menu.addAction(workspace_action)
 
-        folder_action = QAction(material_icon("folder_open", PRIMARY), "영상 폴더 불러오기…", self)
-        folder_action.triggered.connect(self.choose_video_folder)
-        file_menu.addAction(folder_action)
         file_menu.addSeparator()
 
         new_action = QAction(material_icon("add", PRIMARY), "새 사고", self)
@@ -138,6 +273,9 @@ class MainWindow(QMainWindow):
         export_action.setShortcut(QKeySequence("Ctrl+E"))
         export_action.triggered.connect(self.export_csv)
         file_menu.addAction(export_action)
+        backup_action = QAction("조사 데이터 백업…", self)
+        backup_action.triggered.connect(self.backup_workspace)
+        file_menu.addAction(backup_action)
         file_menu.addSeparator()
         exit_action = QAction("종료", self)
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
@@ -155,17 +293,22 @@ class MainWindow(QMainWindow):
         help_menu.addAction(shortcuts_action)
 
     def _connect_signals(self) -> None:
+        self.folder_watcher.videos_ready.connect(self._watched_videos_ready)
+        self.folder_watcher.watch_error.connect(lambda message: self.statusBar().showMessage(message, 5000))
+        self.project_tabs.currentChanged.connect(self.switch_project)
+        self.project_tabs.tabCloseRequested.connect(self.close_project)
+        self.project_add_button.clicked.connect(self.choose_workspace)
+        self.case_list.open_project_requested.connect(self.choose_workspace)
         self.case_list.case_selected.connect(self.select_case)
         self.case_list.video_selected.connect(self.select_video)
         self.case_list.new_case_requested.connect(self.create_case)
-        self.case_list.video_folder_requested.connect(self.choose_video_folder)
         self.case_list.add_video_requested.connect(self.choose_videos)
         self.case_list.delete_case_requested.connect(self.delete_case)
         self.case_list.delete_video_requested.connect(self.delete_video)
         self.case_list.case_reordered.connect(self.reorder_case)
         self.case_list.cases_reordered.connect(self.reorder_cases)
         self.case_list.export_requested.connect(self.export_csv)
-        self.video_player.files_dropped.connect(self.attach_videos)
+        self.video_player.files_dropped.connect(self._import_dropped_videos)
         self.video_player.rotation_requested.connect(self.rotate_video_clockwise)
 
         self.investigation.value_changed.connect(self._field_changed)
@@ -197,8 +340,9 @@ class MainWindow(QMainWindow):
 
         self._workspace_load_failed = False
         try:
+            self.cases = self._disk_operation(self.repository.load)
             active_uid = self.repository.active_case_uid()
-            self.cases = self.repository.load()
+            self._mark_saved(active_uid)
             self._install_form(self.repository.form_definition)
         except WorkspaceError as exc:
             QMessageBox.critical(self, "작업 폴더 오류", str(exc))
@@ -261,6 +405,8 @@ class MainWindow(QMainWindow):
         )
 
     def edit_form(self) -> None:
+        if self._commit_in_progress:
+            return
         if self._workspace_load_failed:
             QMessageBox.warning(
                 self, "작업 폴더 오류", "읽기 오류가 없는 작업 폴더를 먼저 선택해 주세요."
@@ -281,9 +427,16 @@ class MainWindow(QMainWindow):
             return False
         try:
             definition = FormDefinition.from_dict(definition.to_dict())
-            candidates = [InvestigationCase.from_dict(case.to_dict()) for case in self.cases]
+            candidates = [
+                InvestigationCase.from_dict(
+                    case.to_dict(), form_definition=self.repository.form_definition
+                ) for case in self.cases
+            ]
             reopened = 0
             for original, case in zip(self.cases, candidates, strict=True):
+                case.values = definition.migrate_values(
+                    case.values, self.repository.form_definition
+                )
                 case.form_definition = definition
                 introduced_errors = set(case.errors) - set(original.errors)
                 if introduced_errors:
@@ -294,14 +447,14 @@ class MainWindow(QMainWindow):
                 if case.status == "completed" and not case.can_complete:
                     case.mark_edited()
                     reopened += 1
-            self.repository.save(
+            self._disk_operation(self.repository.save,
                 candidates, active_case_uid=self.current_uid, form_definition=definition
             )
         except (ValueError, TypeError, KeyError, WorkspaceError) as exc:
             QMessageBox.warning(self, "양식 적용 오류", str(exc))
             return False
         self.cases = candidates
-        self._dirty = False
+        self._mark_saved(self.current_uid)
         self._install_form(definition)
         self.case_list.set_cases(self.cases, self.current_uid)
         self._show_current_case(open_video=False)
@@ -315,7 +468,6 @@ class MainWindow(QMainWindow):
     def _set_workflow_enabled(self, enabled: bool) -> None:
         has_case = enabled and self.current_case is not None
         self.case_list.new_button.setEnabled(enabled)
-        self.case_list.video_button.setEnabled(enabled)
         self.case_list.delete_button.setEnabled(
             enabled and self.case_list.tree.currentItem() is not None
         )
@@ -328,28 +480,211 @@ class MainWindow(QMainWindow):
         self.investigation.next_button.setEnabled(has_case)
 
     def choose_workspace(self) -> None:
+        if self._commit_in_progress or self._switching_project:
+            return
         selected = QFileDialog.getExistingDirectory(
             self,
-            "조사 작업 폴더 선택",
+            "프로젝트 폴더 선택",
             str(self.repository.workspace),
             QFileDialog.Option.ShowDirsOnly,
         )
         if not selected:
             return
-        if not self._workspace_load_failed and not self._save(show_message=False):
+        # Selecting an already-open folder activates its one existing tab.
+        destination = Path(selected).expanduser().resolve()
+        if any(project.repository.workspace == destination for project in self._projects):
+            self.open_project(destination)
             return
+        mode = self._choose_project_open_mode(destination)
+        if mode is not None:
+            self.open_project(destination, new_tab=mode == "new")
+
+    def _choose_project_open_mode(self, folder: Path) -> str | None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("프로젝트 폴더 열기")
+        dialog.setText(f"‘{folder.name or folder}’ 프로젝트를 어디에서 열까요?")
+        dialog.setInformativeText("프로젝트마다 사고 목록과 조사 내용이 별도로 저장됩니다.")
+        current = dialog.addButton("현재 탭으로 불러오기", QMessageBox.ButtonRole.AcceptRole)
+        new = dialog.addButton("새 탭에서 열기", QMessageBox.ButtonRole.ActionRole)
+        cancel = dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(new)
+        dialog.setEscapeButton(cancel)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        return "new" if clicked is new else "current" if clicked is current else None
+
+    def _sync_project_tabs(self) -> None:
+        blocked = self.project_tabs.blockSignals(True)
+        try:
+            self.project_tabs.setCurrentIndex(self._active_project_index)
+            self.project_tabs.setTabsClosable(len(self._projects) > 1)
+            for index, project in enumerate(self._projects):
+                path = project.repository.workspace
+                name = path.name or str(path)
+                if sum(other.repository.workspace.name == path.name for other in self._projects) > 1:
+                    name = f"{name} — {path.parent.name or path.parent}"
+                if project.pending_video_paths:
+                    name += " •"
+                self.project_tabs.setTabText(index, name)
+                self.project_tabs.setTabToolTip(index, str(path))
+        finally:
+            self.project_tabs.blockSignals(blocked)
+
+    def _capture_project(self) -> None:
+        project = self._projects[self._active_project_index]
+        project.repository = self.repository
+        project.cases = self.cases
+        project.current_uid = self.current_uid
+        project.load_failed = self._workspace_load_failed
+        project.initialized = True
+        project.list_state = self.case_list.capture_view_state()
+        index = self.investigation.tabs.currentIndex()
+        project.form_tab_key = self.investigation.sections[index].key if index >= 0 else None
+        page = self.investigation.tabs.currentWidget()
+        project.form_scroll = page.verticalScrollBar().value() if page is not None else 0
+        project.splitter_sizes = self.splitter.sizes()
+        metadata = self.video_controller.metadata
+        project.video_path = str(metadata.path) if metadata else None
+        project.video_frame = max(0, self.video_controller.current_frame)
+
+    def _leave_project(self) -> bool:
+        if not self._workspace_load_failed and not self._save(show_message=False):
+            return False
+        self._capture_project()
         self.video_controller.close_video()
-        self.repository = CaseRepository(selected)
-        self.cases = []
-        self.current_uid = None
-        imported = self._load_workspace()
-        if not self._workspace_load_failed and not imported:
-            self.statusBar().showMessage("작업 폴더를 열었습니다.", 3000)
+        return True
+
+    def _activate_project(self, index: int) -> bool:
+        project = self._projects[index]
+        self._active_project_index = index
+        self.repository = project.repository
+        self.cases = project.cases
+        self.current_uid = project.current_uid
+        self._workspace_load_failed = project.load_failed
+        self._case_revisions.clear()
+        self._deferred_reorders.clear()
+        self._mark_saved(self.current_uid)
+        self._sync_project_tabs()
+        self.case_list.set_cases([])
+        self.case_list.search.clear()
+        self._update_workspace_status()
+        if not project.initialized:
+            self.current_uid = None
+            self.investigation.tabs.setCurrentIndex(0)
+            self._load_workspace()
+            project.initialized = True
+            project.load_failed = self._workspace_load_failed
+            self._watch_active_project()
+            return not self._workspace_load_failed
+
+        self._install_form(self.repository.form_definition)
+        current = project.list_state.get("current")
+        video_index = current[1] if current and current[1] >= 0 else None
+        self.case_list.set_cases(self.cases, self.current_uid, selected_video_index=video_index)
+        self.case_list.restore_view_state(project.list_state)
+        self._show_current_case(open_video=True)
+        metadata = self.video_controller.metadata
+        if metadata and str(metadata.path) == project.video_path:
+            self.video_controller.seek(min(project.video_frame, metadata.last_frame))
+        if project.form_tab_key:
+            tab = next((i for i, section in enumerate(self.investigation.sections)
+                        if section.key == project.form_tab_key), 0)
+            self.investigation.tabs.setCurrentIndex(tab)
+            self.investigation.tabs.currentWidget().verticalScrollBar().setValue(project.form_scroll)
+        if project.splitter_sizes:
+            self.splitter.setSizes(project.splitter_sizes)
+        self._set_workflow_enabled(not self._workspace_load_failed)
+        if self._workspace_load_failed:
+            self.investigation.case_title.setText("작업 폴더 읽기 오류")
+            self.investigation.completion_badge.setText("읽기 오류")
+        self._watch_active_project()
+        return True
+
+    def switch_project(self, index: int) -> bool:
+        if index == self._active_project_index:
+            return True
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress or not 0 <= index < len(self._projects):
+            self._sync_project_tabs()
+            return False
+        self._switching_project = True
+        try:
+            if not self._leave_project():
+                self._sync_project_tabs()
+                return False
+            return self._activate_project(index)
+        finally:
+            self._switching_project = False
+
+    def open_project(self, folder: str | Path, *, new_tab: bool = True) -> bool:
+        """Open an independent workspace, or activate its existing tab."""
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress:
+            return False
+        path = Path(folder).expanduser().resolve()
+        if not path.is_dir():
+            QMessageBox.warning(self, "프로젝트 폴더", "존재하는 폴더를 선택해 주세요.")
+            return False
+        for index, project in enumerate(self._projects):
+            if project.repository.workspace == path:
+                return self.switch_project(index)
+        self._switching_project = True
+        previous_index = self._active_project_index
+        previous_project = self._projects[previous_index]
+        try:
+            if not self._leave_project():
+                return False
+            project = ProjectSession(CaseRepository(path))
+            index = len(self._projects) if new_tab else previous_index
+            if new_tab:
+                self._projects.append(project)
+                blocked = self.project_tabs.blockSignals(True)
+                self.project_tabs.addTab(path.name or str(path))
+                self.project_tabs.blockSignals(blocked)
+            else:
+                self._projects[index] = project
+            if self._activate_project(index):
+                return True
+            # Failed opens keep the saved source project accessible in its tab.
+            if new_tab:
+                self._projects.pop(index)
+                blocked = self.project_tabs.blockSignals(True)
+                self.project_tabs.removeTab(index)
+                self.project_tabs.blockSignals(blocked)
+            else:
+                self._projects[index] = previous_project
+            self._activate_project(previous_index)
+            self.statusBar().showMessage("프로젝트를 열지 못해 이전 프로젝트를 유지했습니다.", 5000)
+            return False
+        finally:
+            self._switching_project = False
+
+    def close_project(self, index: int) -> bool:
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress or len(self._projects) <= 1:
+            return False
+        if not 0 <= index < len(self._projects):
+            return False
+        self._switching_project = True
+        try:
+            active = index == self._active_project_index
+            if active and not self._leave_project():
+                return False
+            removed = self._projects.pop(index)
+            self.folder_watcher.remove_directory(removed.repository.workspace)
+            blocked = self.project_tabs.blockSignals(True)
+            self.project_tabs.removeTab(index)
+            self.project_tabs.blockSignals(blocked)
+            if active:
+                self._activate_project(min(index, len(self._projects) - 1))
+            else:
+                self._active_project_index -= int(index < self._active_project_index)
+                self._sync_project_tabs()
+            return True
+        finally:
+            self._switching_project = False
 
     def create_case(self) -> None:
         if not self._save(show_message=False):
             return
-        candidates = [InvestigationCase.from_dict(item.to_dict()) for item in self.cases]
+        candidates = list(self.cases)
         case = new_case(candidates)
         candidates.append(case)
         if not self._replace_cases_atomically(candidates, case.uid):
@@ -357,6 +692,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{case.display_id} 사고를 만들었습니다.", 3000)
 
     def reorder_case(self, uid: str, destination: int) -> None:
+        if self._commit_in_progress:
+            self._deferred_reorders.append(([uid], destination))
+            return
         source = next((index for index, case in enumerate(self.cases) if case.uid == uid), -1)
         if source < 0 or not self.cases:
             return
@@ -366,12 +704,16 @@ class MainWindow(QMainWindow):
         case = self.cases.pop(source)
         self.cases.insert(target, case)
         self._dirty = True
+        self._order_dirty = True
         self.case_list.move_case(uid, target)
         self.statusBar().showMessage(
             f"{case.display_id} 표시 순서를 {target + 1}번째로 변경했습니다.", 3000
         )
 
     def reorder_cases(self, uids: list[str], destination: int) -> None:
+        if self._commit_in_progress:
+            self._deferred_reorders.append((list(uids), destination))
+            return
         moving = [case for case in self.cases if case.uid in uids]
         if not moving:
             return
@@ -383,23 +725,85 @@ class MainWindow(QMainWindow):
         self.cases[:] = reordered
         self.case_list.move_cases([case.uid for case in moving], target)
         self._dirty = True
+        self._order_dirty = True
         self.statusBar().showMessage(f"사고 {len(moving)}개의 표시 순서를 변경했습니다.", 3000)
 
     def choose_videos(self) -> None:
         filters = "영상 파일 (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv *.webm);;모든 파일 (*.*)"
         files, _ = QFileDialog.getOpenFileNames(self, "조사 영상 선택", QDir.homePath(), filters)
         if files:
-            self.attach_videos(files)
+            self._import_dropped_videos(files)
 
-    def choose_video_folder(self) -> None:
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "사고 영상 폴더 선택",
-            QDir.homePath(),
-            QFileDialog.Option.ShowDirsOnly,
-        )
-        if selected:
-            self.import_video_folder(selected)
+    def _choose_video_import_options(self) -> bool | None:
+        dialog = VideoImportDialog(self.repository.workspace, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.copy_to_workspace.isChecked()
+
+    def _import_dropped_videos(self, files: list[str]) -> None:
+        copy = self._choose_video_import_options()
+        if copy is not None:
+            self.attach_videos(files, copy_to_workspace=copy)
+
+    def _watch_active_project(self) -> None:
+        if not self._workspace_load_failed:
+            self.folder_watcher.add_directory(
+                self.repository.workspace,
+                known_paths={path for case in self.cases for path in case.videos},
+            )
+        self._schedule_watch_refresh()
+
+    def _schedule_watch_refresh(self) -> None:
+        if self._projects[self._active_project_index].pending_video_paths and not self._watch_refresh_timer.isActive():
+            self._watch_refresh_timer.start(500)
+
+    def _watched_videos_ready(self, folder: str, paths: list[str]) -> None:
+        project = next((p for p in self._projects if p.repository.workspace == Path(folder)), None)
+        if project is None:
+            return
+        project.pending_video_paths.update(paths)
+        self._sync_project_tabs()
+        self._schedule_watch_refresh()
+
+    def _refresh_watched_videos(self) -> None:
+        if (self._commit_in_progress or self._switching_project or self._video_import_in_progress
+                or QApplication.activeModalWidget() is not None):
+            self._watch_refresh_timer.start(500)
+            return
+        project = self._projects[self._active_project_index]
+        if self._workspace_load_failed or not project.pending_video_paths:
+            return
+        paths = set(project.pending_video_paths)
+        project.pending_video_paths.difference_update(paths)
+        self._auto_import_failed = False
+        self._video_import_in_progress = True
+        try:
+            self.import_video_folder(
+                self.repository.workspace, quiet_when_empty=True, respect_exclusions=True,
+                only_paths=paths, automatic=True,
+            )
+        finally:
+            self._video_import_in_progress = False
+        if self._auto_import_failed:
+            project.pending_video_paths.update(paths)
+            self._watch_refresh_timer.start(5000)
+        self._sync_project_tabs()
+
+    def _copy_import_files(self, files: list[str]) -> CopiedVideos | None:
+        self.statusBar().showMessage("영상을 작업 폴더로 복사하고 있습니다…")
+        try:
+            return self._disk_operation(copy_videos, files, self.repository.workspace)
+        except OSError as exc:
+            QMessageBox.warning(self, "영상 복사 오류", f"영상을 복사할 수 없습니다.\n{exc}")
+            return None
+
+    def _rollback_video_copy(self, batch: CopiedVideos) -> None:
+        try:
+            self._disk_operation(batch.rollback)
+            project = self._projects[self._active_project_index]
+            project.pending_video_paths.difference_update(str(path) for path in batch.created)
+        except OSError as exc:
+            QMessageBox.warning(self, "영상 복사 정리 오류", f"복사한 일부 파일을 정리하지 못했습니다.\n{exc}")
 
     @staticmethod
     def _is_default_case_shell(case: InvestigationCase) -> bool:
@@ -416,6 +820,9 @@ class MainWindow(QMainWindow):
         *,
         quiet_when_empty: bool = False,
         respect_exclusions: bool = False,
+        copy_to_workspace: bool = False,
+        only_paths: set[str] | None = None,
+        automatic: bool = False,
     ) -> bool:
         """Group conventionally named videos into Samsung accident cases atomically."""
 
@@ -425,12 +832,24 @@ class MainWindow(QMainWindow):
         try:
             scan = scan_video_folder(folder)
         except OSError as exc:
+            if automatic:
+                self._auto_import_failed = True
+                self.statusBar().showMessage("작업 폴더를 읽지 못해 자동 갱신을 보류했습니다.", 5000)
+                return False
             QMessageBox.warning(
                 self,
                 "영상 폴더 오류",
                 f"영상 폴더를 읽을 수 없습니다.\n{exc}",
             )
             return False
+
+        if only_paths is not None:
+            selected = {str(Path(path).resolve()).casefold() for path in only_paths}
+            scan = VideoFolderScan(
+                tuple((number, matching) for number, paths in scan.groups
+                      if (matching := tuple(path for path in paths if path.casefold() in selected))),
+                tuple(path for path in scan.ignored_videos if path.casefold() in selected),
+            )
 
         if not scan.groups:
             if not quiet_when_empty:
@@ -446,9 +865,36 @@ class MainWindow(QMainWindow):
                 )
             return False
 
-        # Work on detached model copies and replace both disk state and live
-        # state only after the repository's atomic save succeeds.
-        candidates = [InvestigationCase.from_dict(case.to_dict()) for case in self.cases]
+        if copy_to_workspace:
+            self._video_import_in_progress = True
+            try:
+                files = [path for _, paths in scan.groups for path in paths]
+                batch = self._copy_import_files(files)
+                if batch is None:
+                    return False
+                success = self.import_video_folder(
+                    self.repository.workspace, quiet_when_empty=quiet_when_empty,
+                    respect_exclusions=respect_exclusions, only_paths=set(batch.paths),
+                )
+                if not success:
+                    self._rollback_video_copy(batch)
+                return success
+            finally:
+                self._video_import_in_progress = False
+                self._schedule_watch_refresh()
+
+        # Copy on write: unchanged accidents retain their model identity.
+        candidates = list(self.cases)
+        detached: set[str] = set()
+        candidate_positions = {case.uid: index for index, case in enumerate(candidates)}
+
+        def detach(case: InvestigationCase) -> InvestigationCase:
+            if case.uid not in detached:
+                copy = self._copy_case(case)
+                candidates[candidate_positions[case.uid]] = copy
+                detached.add(case.uid)
+                return copy
+            return case
         candidate_exclusions = set(self.repository.auto_import_exclusions)
         scan_number_by_path: dict[str, str] = {}
         for accident_number, paths in scan.groups:
@@ -471,6 +917,7 @@ class MainWindow(QMainWindow):
         for shell in list(candidates):
             if not self._is_default_case_shell(shell):
                 continue
+            shell = detach(shell)
             mapped = [
                 (index, path, scan_number_by_path.get(str(Path(path).resolve()).casefold()))
                 for index, path in enumerate(shell.videos)
@@ -541,6 +988,7 @@ class MainWindow(QMainWindow):
                 repaired_videos += len(moved_indexes)
             if moved_indexes and not shell.videos and not shell.markers_by_video:
                 candidates.remove(shell)
+                candidate_positions = {case.uid: index for index, case in enumerate(candidates)}
                 removed_default_cases += 1
 
         by_identity = {
@@ -592,6 +1040,8 @@ class MainWindow(QMainWindow):
                             for marker_key in case.markers_by_video
                         )
                         if marker is not None and not marker_exists:
+                            case = detach(case)
+                            by_identity[identity] = case
                             case.markers_by_video[str(Path(path).resolve())] = marker
                             case.mark_edited()
                     else:
@@ -615,9 +1065,13 @@ class MainWindow(QMainWindow):
                     }
                 )
                 candidates.append(case)
+                candidate_positions[case.uid] = len(candidates) - 1
+                detached.add(case.uid)
                 by_identity[identity] = case
                 created_cases += 1
 
+            case = detach(case)
+            by_identity[identity] = case
             added = case.attach_videos(new_paths)
             if not added:
                 continue
@@ -668,23 +1122,38 @@ class MainWindow(QMainWindow):
             active_uid = self.current_uid if self.current_uid in available_uids else None
         if active_uid is None and candidates:
             active_uid = candidates[0].uid
+        if automatic and self.current_uid in available_uids:
+            active_uid = self.current_uid
 
         try:
-            self.repository.save(
-                candidates,
-                active_case_uid=active_uid,
+            self._save_candidates(
+                candidates, active_uid,
                 auto_import_exclusions=candidate_exclusions,
             )
         except WorkspaceError as exc:
+            if automatic:
+                self._auto_import_failed = True
+                self.statusBar().showMessage("새 영상 저장에 실패했습니다. 자동 갱신을 다시 시도합니다.", 5000)
+                return False
             QMessageBox.critical(self, "저장 오류", str(exc))
             return False
 
-        self.video_controller.close_video()
+        previous_uid = self.current_uid
+        if not automatic:
+            self.video_controller.close_video()
         self.cases = candidates
         self.current_uid = active_uid
-        self._dirty = False
-        self.case_list.set_cases(self.cases, active_uid)
-        self._show_current_case(open_video=True)
+        self._mark_saved(active_uid)
+        if automatic:
+            self.case_list.merge_cases(self.cases, active_uid)
+            if previous_uid != active_uid:
+                self.case_list.select_case(active_uid)
+                self._show_current_case(open_video=True)
+            else:
+                self._refresh_case_presentation(rebuild_list=False)
+        else:
+            self.case_list.set_cases(self.cases, active_uid)
+            self._show_current_case(open_video=True)
         self._set_workflow_enabled(True)
 
         notes = []
@@ -713,10 +1182,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 6000)
         return True
 
-    def attach_videos(self, files: list[str]) -> None:
+    def attach_videos(self, files: list[str], *, copy_to_workspace: bool = False) -> None:
+        if not copy_to_workspace:
+            self._attach_video_paths(files)
+            return
         if self._workspace_load_failed:
             self.statusBar().showMessage("읽기 오류가 없는 작업 폴더를 먼저 선택해 주세요.", 5000)
             return
+        self._video_import_in_progress = True
+        try:
+            batch = self._copy_import_files(files)
+            if batch is not None and not self._attach_video_paths(batch.paths):
+                self._rollback_video_copy(batch)
+        finally:
+            self._video_import_in_progress = False
+            self._schedule_watch_refresh()
+
+    def _attach_video_paths(self, files: list[str]) -> bool:
+        if self._workspace_load_failed:
+            self.statusBar().showMessage("읽기 오류가 없는 작업 폴더를 먼저 선택해 주세요.", 5000)
+            return False
         valid = [
             path
             for path in files
@@ -724,10 +1209,14 @@ class MainWindow(QMainWindow):
         ]
         if not valid:
             QMessageBox.warning(self, "영상 추가", "지원되는 영상 파일을 선택해 주세요.")
-            return
+            return False
 
-        candidates = [InvestigationCase.from_dict(case.to_dict()) for case in self.cases]
+        candidates = list(self.cases)
         case = next((item for item in candidates if item.uid == self.current_uid), None)
+        if case is not None:
+            index = candidates.index(case)
+            case = self._copy_case(case)
+            candidates[index] = case
         parsed_names = [parse_accident_video_name(path) for path in valid]
         parsed_numbers = {parsed[0] for parsed in parsed_names if parsed is not None}
         all_conventional = all(parsed is not None for parsed in parsed_names)
@@ -752,9 +1241,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "영상 추가",
-                "여러 사고번호의 영상은 '영상 폴더' 기능으로 불러와 주세요.",
+                "여러 사고번호의 영상은 프로젝트 폴더에 넣어 자동으로 불러와 주세요.",
             )
-            return
+            return False
 
         if case is None:
             if all_conventional and len(parsed_numbers) == 1:
@@ -783,13 +1272,16 @@ class MainWindow(QMainWindow):
                 case.values["accident_classification"] = next(iter(parsed_numbers))
                 case.mark_edited()
 
+        case_index = next(index for index, item in enumerate(candidates) if item.uid == case.uid)
+        case = self._copy_case(case)
+        candidates[case_index] = case
         added = case.attach_videos(valid)
         if not added:
             if removed_default_shell and self._replace_cases_atomically(candidates, case.uid):
                 self.statusBar().showMessage("빈 기본 사고를 정리했습니다.", 3000)
-                return
+                return True
             self.statusBar().showMessage("선택한 영상은 이미 현재 사고에 연결되어 있습니다.", 4000)
-            return
+            return False
         updated_exclusions = set(self.repository.auto_import_exclusions)
         for path in valid:
             updated_exclusions.discard(str(Path(path).expanduser().resolve()).casefold())
@@ -799,8 +1291,9 @@ class MainWindow(QMainWindow):
             case.uid,
             auto_import_exclusions=updated_exclusions,
         ):
-            return
+            return False
         self.statusBar().showMessage(f"영상 {added}개를 추가했습니다.", 3000)
+        return True
 
     def _replace_cases_atomically(
         self,
@@ -812,9 +1305,8 @@ class MainWindow(QMainWindow):
         """Persist candidate state before replacing live models and UI."""
 
         try:
-            self.repository.save(
-                candidates,
-                active_case_uid=active_uid,
+            self._save_candidates(
+                candidates, active_uid,
                 auto_import_exclusions=auto_import_exclusions,
             )
         except WorkspaceError as exc:
@@ -824,7 +1316,7 @@ class MainWindow(QMainWindow):
         self.video_controller.close_video()
         self.cases = candidates
         self.current_uid = active_uid
-        self._dirty = False
+        self._mark_saved(active_uid)
         self.case_list.set_cases(self.cases, active_uid, selected_video_index=None)
         self._show_current_case(open_video=True)
         self._set_workflow_enabled(True)
@@ -849,7 +1341,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        candidates = [InvestigationCase.from_dict(item.to_dict()) for item in self.cases]
+        candidates = list(self.cases)
         candidates.pop(case_index)
         if not candidates:
             active_uid = None
@@ -888,8 +1380,10 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        candidates = [InvestigationCase.from_dict(item.to_dict()) for item in self.cases]
-        target = next(case for case in candidates if case.uid == uid)
+        candidates = list(self.cases)
+        target_index = next(index for index, case in enumerate(candidates) if case.uid == uid)
+        target = self._copy_case(candidates[target_index])
+        candidates[target_index] = target
         target.remove_video(index)
         active_uid = (
             str(self.current_uid) if self.current_uid in {case.uid for case in candidates} else uid
@@ -913,6 +1407,7 @@ class MainWindow(QMainWindow):
         if self.current_uid and not self._save(show_message=False):
             return
         self.current_uid = uid
+        self.case_list.set_active_video(uid)
         self._show_current_case(open_video=True)
 
     def select_video(self, uid: str, index: int) -> None:
@@ -935,8 +1430,8 @@ class MainWindow(QMainWindow):
                 )
             return
         self.current_uid = uid
-        self._dirty = True
-        self.case_list.set_cases(self.cases, uid, selected_video_index=index)
+        self._mark_case_dirty(target_case)
+        self.case_list.update_case(target_case, active_uid=uid)
         self._show_current_case(open_video=False)
 
     def _show_current_case(self, *, open_video: bool) -> None:
@@ -991,6 +1486,7 @@ class MainWindow(QMainWindow):
         if case is None:
             return
         case.set_value(key, value)
+        value = self.repository.form_definition.canonical_values({key: value}).get(key)
         if key == "obstacle_exists" and value == "무":
             for detail_key in (
                 "obstacle_vehicle_types",
@@ -1014,7 +1510,7 @@ class MainWindow(QMainWindow):
                 "incident_property_damage",
             ):
                 case.values.pop(count_key, None)
-        self._dirty = True
+        self._mark_case_dirty(case)
         self._refresh_case_presentation(rebuild_list=True)
 
     def _refresh_case_presentation(self, *, rebuild_list: bool) -> None:
@@ -1023,9 +1519,12 @@ class MainWindow(QMainWindow):
             return
         missing = case.missing
         self.investigation.show_case(case.display_id, missing, case.status == "completed")
-        self.investigation.complete_button.setEnabled(case.status != "completed")
+        self.investigation.complete_button.setEnabled(
+            case.status != "completed" and not self._commit_in_progress
+        )
         if rebuild_list:
-            self.case_list.set_cases(self.cases, case.uid)
+            with timed_operation("case_row_update", count=1):
+                self.case_list.update_case(case, active_uid=case.uid)
 
     def set_trigger_marker(self) -> None:
         case = self.current_case
@@ -1034,7 +1533,7 @@ class MainWindow(QMainWindow):
         frame = self.video_controller.current_frame
         removing = case.trigger_frame == frame
         case.set_trigger(None if removing else frame)
-        self._dirty = True
+        self._mark_case_dirty(case)
         self.playback.set_markers(case.trigger_frame, case.collision_frame)
         self._refresh_case_presentation(rebuild_list=True)
         if removing:
@@ -1049,7 +1548,7 @@ class MainWindow(QMainWindow):
         frame = self.video_controller.current_frame
         removing = case.collision_frame == frame
         case.set_collision(None if removing else frame)
-        self._dirty = True
+        self._mark_case_dirty(case)
         self.playback.set_markers(case.trigger_frame, case.collision_frame)
         self._refresh_case_presentation(rebuild_list=True)
         if removing:
@@ -1068,24 +1567,65 @@ class MainWindow(QMainWindow):
         show_message: bool,
         auto_import_exclusions: set[str] | None = None,
     ) -> bool:
+        if self._commit_in_progress:
+            return False
+        self._flush_deferred_reorders()
         if self._workspace_load_failed:
             self.statusBar().showMessage("읽기 오류가 없는 작업 폴더를 먼저 선택해 주세요.", 5000)
             return False
+        current_uids = {case.uid for case in self.cases}
+        changed_uids = self._dirty_cases | (current_uids - self._persisted_uids)
+        if self._dirty and not changed_uids and not self._order_dirty and self.current_uid:
+            changed_uids = {self.current_uid}
+        deleted = self._persisted_uids - current_uids
+        order_changed = self._order_dirty or current_uids != self._persisted_uids
+        if not (
+            changed_uids or deleted or order_changed
+            or self.current_uid != self._saved_active_uid
+            or auto_import_exclusions is not None
+        ):
+            if show_message:
+                self.statusBar().showMessage("변경 사항이 없습니다. 모두 저장되어 있습니다.", 3000)
+            return True
         try:
-            self.repository.save(
-                self.cases,
+            revisions = {uid: self._case_revisions.get(uid, 0) for uid in changed_uids}
+            saved_active_uid = self.current_uid
+            snapshots = [self._copy_case(case) for case in self.cases if case.uid in changed_uids]
+            self._disk_operation(self.repository.save_changes,
+                snapshots,
+                deleted_uids=list(deleted),
+                order=[case.uid for case in self.cases] if order_changed else None,
                 active_case_uid=self.current_uid,
                 auto_import_exclusions=auto_import_exclusions,
+                allow_edit=show_message,
             )
         except WorkspaceError as exc:
+            self._flush_deferred_reorders()
             QMessageBox.critical(self, "저장 오류", str(exc))
             return False
-        self._dirty = False
+        self._dirty_cases.difference_update(
+            uid for uid, version in revisions.items()
+            if self._case_revisions.get(uid, 0) == version
+        )
+        self._dirty = bool(self._dirty_cases)
+        self._order_dirty = False
+        self._persisted_uids = current_uids
+        self._saved_active_uid = saved_active_uid
+        self._flush_deferred_reorders()
+        if not show_message and self._order_dirty:
+            # A deferred drag must also be committed before closing/changing
+            # workspaces; ordinary draft save can leave it visibly unsaved.
+            return self._save(show_message=False)
         if show_message:
-            self.statusBar().showMessage("조사 내용을 임시저장했습니다.", 3000)
+            message = "조사 내용을 임시저장했습니다."
+            if self._dirty:
+                message += " 저장 중 추가로 수정한 내용은 아직 미저장입니다."
+            self.statusBar().showMessage(message, 5000)
         return True
 
     def complete_case(self) -> None:
+        if self._commit_in_progress:
+            return
         case = self.current_case
         if case is None:
             return
@@ -1139,7 +1679,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, MISSING_VALUE_MESSAGE, str(exc))
             return
-        self._dirty = True
+        self._mark_case_dirty(case)
         if not self._save(show_message=False):
             case.status, case.completed_at, case.updated_at = draft_workflow
             self._dirty = True
@@ -1169,6 +1709,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("다음 사고가 없습니다.", 3000)
             return
         self.current_uid = target.uid
+        self.case_list.set_active_video(target.uid)
         self.case_list.select_case(target.uid)
         self._show_current_case(open_video=True)
 
@@ -1183,12 +1724,39 @@ class MainWindow(QMainWindow):
             return
         if not Path(path).suffix:
             path += ".csv"
+        options = CsvExportDialog(Path(path), self)
+        if options.exec() != QDialog.DialogCode.Accepted:
+            return
+        include_specification = options.include_specification.isChecked()
         try:
-            destination = self.repository.export_csv(path, self.cases)
+            destination = self._disk_operation(self.repository.export_csv,
+                path, self.cases, include_specification=include_specification
+            )
         except WorkspaceError as exc:
             QMessageBox.critical(self, "CSV 내보내기 오류", str(exc))
             return
-        self.statusBar().showMessage(f"CSV를 저장했습니다: {destination}", 6000)
+        message = f"CSV를 저장했습니다: {destination}"
+        if include_specification:
+            message += f" · 데이터 명세서: {data_specification_path(destination).name}"
+        self.statusBar().showMessage(message, 8000)
+
+    def backup_workspace(self) -> None:
+        if not self._save(show_message=False):
+            return
+        suggested = self.repository.workspace / f"investigations_backup_{datetime.now():%Y%m%d_%H%M%S}.db"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "조사 데이터 백업", str(suggested), "SQLite 파일 (*.db)"
+        )
+        if not path:
+            return
+        if not Path(path).suffix:
+            path += ".db"
+        try:
+            destination = self._disk_operation(self.repository.backup, path)
+        except WorkspaceError as exc:
+            QMessageBox.critical(self, "백업 오류", str(exc))
+            return
+        self.statusBar().showMessage(f"조사 데이터를 백업했습니다: {destination}", 5000)
 
     def _video_opened(self, metadata: VideoMetadata) -> None:
         self.video_player.set_video_name(metadata.path, (metadata.width, metadata.height))
@@ -1218,7 +1786,7 @@ class MainWindow(QMainWindow):
         degrees = (case.video_rotation + 90) % 360
         case.set_video_rotation(degrees)
         self.video_player.set_rotation(degrees)
-        self._dirty = True
+        self._mark_case_dirty(case)
         direction = f"{degrees}°" if degrees else "원본 방향"
         self.statusBar().showMessage(f"영상 화면을 {direction}으로 표시합니다.", 3000)
 
@@ -1244,6 +1812,7 @@ class MainWindow(QMainWindow):
         self.video_controller.seek_seconds(seconds)
 
     def _update_workspace_status(self) -> None:
+        self.case_list.set_project_folder(self.repository.workspace)
         self.statusBar().setToolTip(str(self.repository.workspace))
         self.statusBar().showMessage(f"작업 폴더 · {self.repository.workspace}", 4000)
 
@@ -1251,7 +1820,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "재생 단축키",
-            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  5초 이동\nCtrl+S  임시저장",
+            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nCtrl+S  임시저장",
         )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -1268,19 +1837,26 @@ class MainWindow(QMainWindow):
         elif key == Qt.Key.Key_Right:
             self._step_frames(10 if modifiers & Qt.KeyboardModifier.ControlModifier else 1)
         elif key == Qt.Key.Key_J:
-            self._step_seconds(-5)
+            self._step_seconds(-1)
         elif key == Qt.Key.Key_L:
-            self._step_seconds(5)
+            self._step_seconds(1)
         else:
             super().keyPressEvent(event)
             return
         event.accept()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._commit_in_progress or self._video_import_in_progress:
+            event.ignore()
+            self.statusBar().showMessage("저장 작업이 끝난 뒤 종료해 주세요.", 3000)
+            return
         if not self._workspace_load_failed and not self._save(show_message=False):
             event.ignore()
             return
         self.video_controller.close_video()
+        self._watch_refresh_timer.stop()
+        self.folder_watcher.shutdown()
+        self._storage_worker.shutdown()
         event.accept()
 
 

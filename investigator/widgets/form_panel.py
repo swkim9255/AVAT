@@ -423,6 +423,7 @@ class InvestigationPanel(QWidget):
         self.section_field_grids: dict[str, QGridLayout] = {}
         self._loading = False
         definition = definition or FormDefinition.default()
+        self.definition = definition
         configured_sections = definition.specs()
         tab_layouts = {tab["key"]: tab for tab in definition.tabs}
         self.identity_fields = configured_sections[0].fields
@@ -574,6 +575,7 @@ class InvestigationPanel(QWidget):
         if self._loading:
             return
         self.value_changed.emit(key, value)
+        value = self.definition.canonical_values({key: value}).get(key)
         if key == "obstacle_exists" and value == "무":
             for editor in self.editors.values():
                 if editor.spec.group == "obstacle_detail":
@@ -603,6 +605,7 @@ class InvestigationPanel(QWidget):
         else:
             target_key = "obstacle_dist_range"
             target = "1.5m 이내" if number <= 1.5 else ("1.5m~10m" if number < 10 else "10m 이상")
+        target = self.definition.stored_value(target_key, target)
         editor = self.editors[target_key]
         if editor.value() != target:
             editor.set_value(target)
@@ -610,6 +613,7 @@ class InvestigationPanel(QWidget):
 
     def _apply_incident_day(self, text: str) -> None:
         day = incident_day_for_date(text)
+        day = self.definition.stored_value("incident_day", day)
         editor = self.editors["incident_day"]
         if editor.value() != day:
             editor.set_value(day)
@@ -640,6 +644,7 @@ class InvestigationPanel(QWidget):
         editor.line_edit.style().polish(editor.line_edit)
 
     def _update_conditional_states(self, values: dict[str, Any]) -> None:
+        values = self.definition.canonical_values(values)
         obstacle_enabled = values.get("obstacle_exists") == "유"
         damage_enabled = values.get("incident_damage_unknown") == "확인 가능"
         for editor in self.editors.values():

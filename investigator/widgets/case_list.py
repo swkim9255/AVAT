@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QSizePolicy,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -34,6 +36,13 @@ class CaseTreeWidget(QTreeWidget):
 
     case_dropped = Signal(str, int)
     cases_dropped = Signal(list, int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._drop_generation = 0
+
+    def cancel_pending_drops(self) -> None:
+        self._drop_generation += 1
 
     def selected_cases(self) -> list[QTreeWidgetItem]:
         return [
@@ -102,20 +111,25 @@ class CaseTreeWidget(QTreeWidget):
             # can leave the dragged row temporarily hidden.  Only retain plain
             # values here and apply the move on the next event-loop turn.
             dropped_uids = [str(item.data(0, UID_ROLE)) for item in sources]
-            QTimer.singleShot(
-                0,
-                lambda uids=dropped_uids, index=destination: (
-                    self.case_dropped.emit(uids[0], index)
-                    if len(uids) == 1 else self.cases_dropped.emit(uids, index)
-                ),
-            )
+            generation = self._drop_generation
+
+            def emit_drop() -> None:
+                # A project switch/list rebuild invalidates the old drag,
+                # including when two copied projects share accident UIDs.
+                if generation != self._drop_generation:
+                    return
+                if len(dropped_uids) == 1:
+                    self.case_dropped.emit(dropped_uids[0], destination)
+                else:
+                    self.cases_dropped.emit(dropped_uids, destination)
+
+            QTimer.singleShot(0, emit_drop)
 
 
 class CaseListPanel(QWidget):
     case_selected = Signal(str)
     video_selected = Signal(str, int)
     new_case_requested = Signal()
-    video_folder_requested = Signal()
     # Kept for API compatibility with integrations that add individual files.
     add_video_requested = Signal()
     delete_case_requested = Signal(str)
@@ -123,6 +137,7 @@ class CaseListPanel(QWidget):
     case_reordered = Signal(str, int)
     cases_reordered = Signal(list, int)
     export_requested = Signal()
+    open_project_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -130,11 +145,39 @@ class CaseListPanel(QWidget):
         self.setMinimumWidth(240)
         self.setMaximumWidth(390)
         self._cases: list[InvestigationCase] = []
+        self._cases_by_uid: dict[str, InvestigationCase] = {}
+        self._items_by_uid: dict[str, QTreeWidgetItem] = {}
+        self._videos_by_uid: dict[str, tuple[str, ...]] = {}
+        self._missing_counts: dict[str, int] = {}
+        self._completed_uids: set[str] = set()
+        self._active_uid: str | None = None
+        self._active_video_item: QTreeWidgetItem | None = None
         self._navigation_deferred = False
+        self._project_name = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 16, 14, 12)
         root.setSpacing(10)
+        caption = QLabel("프로젝트", self)
+        caption.setObjectName("muted")
+        root.addWidget(caption)
+        project_row = QHBoxLayout()
+        self.project_label = QLabel(self)
+        self.project_label.setObjectName("projectFolderName")
+        self.project_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.project_label.setMinimumWidth(0)
+        self.project_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.project_label.setStyleSheet("font-size: 15px; font-weight: 700;")
+        project_row.addWidget(self.project_label, 1)
+        self.project_open_button = QToolButton(self)
+        self.project_open_button.setIcon(material_icon("folder_open", PRIMARY))
+        self.project_open_button.setAccessibleName("프로젝트 폴더 열기")
+        self.project_open_button.setToolTip("프로젝트 폴더 열기 · 현재 탭 / 새 탭")
+        self.project_open_button.setFixedSize(34, 34)
+        self.project_open_button.setStyleSheet("padding: 0;")
+        self.project_open_button.clicked.connect(self.open_project_requested)
+        project_row.addWidget(self.project_open_button)
+        root.addLayout(project_row)
         title_row = QHBoxLayout()
         title = QLabel("사고 / 영상 목록", self)
         title.setObjectName("sectionTitle")
@@ -188,11 +231,7 @@ class CaseListPanel(QWidget):
         self.new_button = QPushButton(material_icon("add", PRIMARY), "새 사고", self)
         self.new_button.setObjectName("newCaseButton")
         self.new_button.clicked.connect(self.new_case_requested)
-        self.video_button = QPushButton(material_icon("folder_open", PRIMARY), "영상 폴더", self)
-        self.video_button.setObjectName("importVideoFolderButton")
-        self.video_button.clicked.connect(self.video_folder_requested)
         button_row.addWidget(self.new_button)
-        button_row.addWidget(self.video_button)
         root.addLayout(button_row)
 
         self.delete_button = QPushButton(
@@ -213,34 +252,96 @@ class CaseListPanel(QWidget):
         self.export_button.clicked.connect(self.export_requested)
         root.addWidget(self.export_button)
 
+    def set_project_folder(self, folder: str | Path) -> None:
+        path = Path(folder)
+        self._project_name = path.name or str(path)
+        self.project_label.setToolTip(str(path))
+        self.project_label.setAccessibleName(f"현재 프로젝트: {self._project_name}")
+        self._elide_project_name()
+
+    def _elide_project_name(self) -> None:
+        self.project_label.setText(self.project_label.fontMetrics().elidedText(
+            self._project_name, Qt.TextElideMode.ElideRight, max(1, self.project_label.width())
+        ))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        self._elide_project_name()
+
+    def capture_view_state(self) -> dict:
+        return {
+            "search": self.search.text(),
+            "expanded": {uid: item.isExpanded() for uid, item in self._items_by_uid.items()},
+            "selected": [
+                (str(item.data(0, UID_ROLE)), int(item.data(0, VIDEO_INDEX_ROLE)))
+                for item in self.tree.selectedItems()
+            ],
+            "current": self._selected_target(),
+            "scroll": self.tree.verticalScrollBar().value(),
+        }
+
+    def restore_view_state(self, state: dict) -> None:
+        blocked = self.tree.blockSignals(True)
+        try:
+            self.search.setText(state.get("search", ""))
+            self.tree.clearSelection()
+            for uid, expanded in state.get("expanded", {}).items():
+                if item := self._items_by_uid.get(uid):
+                    item.setExpanded(expanded)
+
+            def find(target):  # type: ignore[no-untyped-def]
+                if not target or (item := self._items_by_uid.get(target[0])) is None:
+                    return None
+                return item.child(target[1]) if target[1] >= 0 else item
+
+            if current := find(state.get("current")):
+                self.tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            for target in state.get("selected", []):
+                if item := find(target):
+                    item.setSelected(True)
+            self.tree.verticalScrollBar().setValue(state.get("scroll", 0))
+        finally:
+            self.tree.blockSignals(blocked)
+        self._update_delete_button()
+
     def set_cases(
         self,
         cases: list[InvestigationCase],
         selected_uid: str | None = None,
         selected_video_index: int | None | object = _SELECTION_UNSET,
     ) -> None:
+        self.tree.cancel_pending_drops()
+        previous = self._selected_target()
+        selected_targets = {
+            (str(item.data(0, UID_ROLE)), item.toolTip(0) if item.parent() else None)
+            for item in self.tree.selectedItems()
+        } if previous is not None and previous[0] == selected_uid else set()
         expanded = {
             self.tree.topLevelItem(index).data(0, UID_ROLE):
             self.tree.topLevelItem(index).isExpanded()
             for index in range(self.tree.topLevelItemCount())
         }
         if selected_video_index is _SELECTION_UNSET:
-            previous = self._selected_target()
             selected_video_index = (
                 previous[1]
                 if previous is not None and previous[0] == selected_uid and previous[1] >= 0
                 else None
             )
         self._cases = cases
-        self.tree.blockSignals(True)
+        self._cases_by_uid = {case.uid: case for case in cases}
+        self._active_video_item = None
+        self._active_uid = None
+        self._items_by_uid.clear()
+        self._videos_by_uid.clear()
+        self._missing_counts.clear()
+        self._completed_uids.clear()
+        blocked = self.tree.blockSignals(True)
         self.tree.clear()
         selected_item: QTreeWidgetItem | None = None
         selected_case_item: QTreeWidgetItem | None = None
-        completed = sum(case.status == "completed" for case in cases)
-        self.count_label.setText(f"{completed}/{len(cases)} 완료")
         for case in cases:
             item = QTreeWidgetItem(self.tree)
-            item.setText(0, case.display_id)
+            self._items_by_uid[case.uid] = item
             item.setData(0, UID_ROLE, case.uid)
             item.setData(0, VIDEO_INDEX_ROLE, -1)
             item.setIcon(0, material_icon("description", PRIMARY))
@@ -251,45 +352,175 @@ class CaseListPanel(QWidget):
                 selected_case_item = item
                 if selected_video_index is None:
                     selected_item = item
-            if case.status == "completed":
-                item.setText(1, "✓")
-                item.setForeground(1, QBrush(QColor(SUCCESS)))
-                item.setToolTip(1, "조사 완료")
+            self._update_case_row(case, item)
+            self._sync_video_items(case, item)
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if case.uid == selected_uid and index == selected_video_index:
+                    selected_item = child
+                if (case.uid, child.toolTip(0)) in selected_targets:
+                    child.setSelected(True)
+            if (case.uid, None) in selected_targets:
+                item.setSelected(True)
+            item.setExpanded(expanded.get(case.uid, True))
+        if selected_item is None:
+            selected_item = selected_case_item
+        if selected_item:
+            if selected_targets:
+                self.tree.setCurrentItem(selected_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
             else:
-                item.setText(1, str(len(case.missing)))
-                item.setForeground(1, QBrush(QColor(DANGER)))
-                item.setToolTip(1, f"미입력 {len(case.missing)}개")
-            for index, path in enumerate(case.videos):
-                child = QTreeWidgetItem(item)
+                self.tree.setCurrentItem(selected_item)
+        self.set_active_video(selected_uid)
+        self._update_count_label()
+        self.tree.blockSignals(blocked)
+        self._filter(self.search.text())
+        self._update_delete_button()
+
+    def update_case(
+        self,
+        case: InvestigationCase,
+        active_uid: str | None | object = _SELECTION_UNSET,
+    ) -> bool:
+        """Refresh one existing row without rebuilding or changing selection."""
+
+        item = self._items_by_uid.get(case.uid)
+        if item is None:
+            return False
+        self._cases_by_uid[case.uid] = case
+        blocked = self.tree.blockSignals(True)
+        try:
+            self._update_case_row(case, item)
+            if self._videos_by_uid.get(case.uid) != tuple(case.videos):
+                self._sync_video_items(case, item)
+            self._filter_item(item, self.search.text().strip().casefold())
+            self.set_active_video(self._active_uid if active_uid is _SELECTION_UNSET else active_uid)
+            self._update_count_label()
+        finally:
+            self.tree.blockSignals(blocked)
+        self._update_delete_button()
+        return True
+
+    def merge_cases(self, cases: list[InvestigationCase], active_uid: str | None) -> None:
+        """Append watched accidents and refresh changed rows without a tree reset."""
+        self._cases = cases
+        blocked = self.tree.blockSignals(True)
+        try:
+            remaining = {case.uid for case in cases}
+            for uid in self._items_by_uid.keys() - remaining:
+                item = self._items_by_uid.pop(uid)
+                if self._active_video_item is not None and self._active_video_item.parent() is item:
+                    self._active_video_item = None
+                self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+                self._cases_by_uid.pop(uid, None)
+                self._videos_by_uid.pop(uid, None)
+                self._missing_counts.pop(uid, None)
+                self._completed_uids.discard(uid)
+            for case in cases:
+                if self._cases_by_uid.get(case.uid) is case:
+                    continue
+                if case.uid in self._items_by_uid:
+                    self.update_case(case)
+                    continue
+                item = QTreeWidgetItem(self.tree)
+                item.setData(0, UID_ROLE, case.uid)
+                item.setData(0, VIDEO_INDEX_ROLE, -1)
+                item.setIcon(0, material_icon("description", PRIMARY))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+                self._items_by_uid[case.uid] = item
+                self._cases_by_uid[case.uid] = case
+                self._update_case_row(case, item)
+                self._sync_video_items(case, item)
+                item.setExpanded(True)
+                self._filter_item(item, self.search.text().strip().casefold())
+            self.set_active_video(active_uid)
+            self._update_count_label()
+        finally:
+            self.tree.blockSignals(blocked)
+        self._update_delete_button()
+
+    def _update_case_row(self, case: InvestigationCase, item: QTreeWidgetItem) -> None:
+        item.setText(0, case.display_id)
+        if case.status == "completed":
+            self._completed_uids.add(case.uid)
+            self._missing_counts[case.uid] = 0
+            item.setText(1, "✓")
+            item.setForeground(1, QBrush(QColor(SUCCESS)))
+            item.setToolTip(1, "조사 완료")
+        else:
+            self._completed_uids.discard(case.uid)
+            missing = len(case.missing)
+            self._missing_counts[case.uid] = missing
+            item.setText(1, str(missing))
+            item.setForeground(1, QBrush(QColor(DANGER)))
+            item.setToolTip(1, f"미입력 {missing}개")
+
+    def _update_count_label(self) -> None:
+        self.count_label.setText(f"{len(self._completed_uids)}/{len(self._items_by_uid)} 완료")
+
+    def _sync_video_items(self, case: InvestigationCase, item: QTreeWidgetItem) -> None:
+        """Reuse video rows by path, retaining selections through attachment edits."""
+
+        current = self.tree.currentItem()
+        current_path = current.toolTip(0) if current is not None and current.parent() is item else None
+        selected_paths = {
+            item.child(index).toolTip(0)
+            for index in range(item.childCount())
+            if item.child(index).isSelected()
+        }
+        expanded = item.isExpanded()
+        if self._active_video_item is not None and self._active_video_item.parent() is item:
+            self._active_video_item.setForeground(0, QBrush())
+            self._active_video_item = None
+        children = {child.toolTip(0): child for child in item.takeChildren()}
+        current_replacement = item
+        for index, path in enumerate(case.videos):
+            child = children.pop(path, None)
+            if child is None:
+                child = QTreeWidgetItem()
                 child.setText(0, Path(path).name)
                 child.setData(0, UID_ROLE, case.uid)
-                child.setData(0, VIDEO_INDEX_ROLE, index)
                 child.setIcon(0, material_icon("movie", MUTED))
                 child.setFlags(
                     child.flags() & ~Qt.ItemFlag.ItemIsDragEnabled & ~Qt.ItemFlag.ItemIsDropEnabled
                 )
                 child.setToolTip(0, path)
-                if case.uid == selected_uid and index == case.active_video_index:
-                    child.setForeground(0, QBrush(QColor(PRIMARY)))
-                if case.uid == selected_uid and index == selected_video_index:
-                    selected_item = child
-            item.setExpanded(expanded.get(case.uid, True))
-        if selected_item is None:
-            selected_item = selected_case_item
-        if selected_item:
-            self.tree.setCurrentItem(selected_item)
-        self.tree.blockSignals(False)
-        self._filter(self.search.text())
-        self._update_delete_button()
+            child.setData(0, VIDEO_INDEX_ROLE, index)
+            item.addChild(child)
+            child.setSelected(path in selected_paths)
+            if path == current_path:
+                current_replacement = child
+        if current_path is not None:
+            self.tree.setCurrentItem(
+                current_replacement, 0, QItemSelectionModel.SelectionFlag.NoUpdate
+            )
+            if current_replacement is item and current_path in selected_paths:
+                item.setSelected(True)
+        item.setExpanded(expanded)
+        self._videos_by_uid[case.uid] = tuple(case.videos)
+
+    def set_active_video(self, uid: str | None) -> None:
+        """Highlight only the playing child; leave navigation selection untouched."""
+
+        case = self._cases_by_uid.get(uid) if uid is not None else None
+        item = self._items_by_uid.get(uid) if uid is not None else None
+        child = (
+            item.child(case.active_video_index)
+            if item is not None and case is not None and 0 <= case.active_video_index < item.childCount()
+            else None
+        )
+        if child is not self._active_video_item:
+            if self._active_video_item is not None:
+                self._active_video_item.setForeground(0, QBrush())
+            if child is not None:
+                child.setForeground(0, QBrush(QColor(PRIMARY)))
+            self._active_video_item = child
+        self._active_uid = uid
 
     def select_case(self, uid: str) -> None:
-        iterator = self.tree.invisibleRootItem()
-        for index in range(iterator.childCount()):
-            item = iterator.child(index)
-            if item.data(0, UID_ROLE) == uid:
-                self.tree.setCurrentItem(item)
-                self.tree.scrollToItem(item)
-                return
+        item = self._items_by_uid.get(uid)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+            self.tree.scrollToItem(item)
 
     def move_case(self, uid: str, destination: int) -> bool:
         """Move one existing top-level item without rebuilding the tree."""
@@ -432,16 +663,18 @@ class CaseListPanel(QWidget):
 
     def _filter(self, text: str) -> None:
         needle = text.strip().casefold()
-        root = self.tree.invisibleRootItem()
-        for index in range(root.childCount()):
-            item = root.child(index)
-            matches = needle in item.text(0).casefold()
-            for child_index in range(item.childCount()):
-                child = item.child(child_index)
-                child_match = needle in child.text(0).casefold()
-                child.setHidden(bool(needle) and not child_match)
-                matches = matches or child_match
-            item.setHidden(bool(needle) and not matches)
+        for item in self._items_by_uid.values():
+            self._filter_item(item, needle)
+
+    @staticmethod
+    def _filter_item(item: QTreeWidgetItem, needle: str) -> None:
+        matches = needle in item.text(0).casefold()
+        for child_index in range(item.childCount()):
+            child = item.child(child_index)
+            child_match = needle in child.text(0).casefold()
+            child.setHidden(bool(needle) and not child_match)
+            matches = matches or child_match
+        item.setHidden(bool(needle) and not matches)
 
 
 __all__ = ["CaseListPanel", "CaseTreeWidget"]

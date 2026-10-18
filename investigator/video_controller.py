@@ -15,6 +15,8 @@ import numpy as np
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
+from investigator.audio_playback import AudioPlayback
+
 DEFAULT_FPS = 30.0
 
 
@@ -73,6 +75,7 @@ class VideoController(QObject):
         self._state = PlaybackState.EMPTY
         self._current_frame = -1
         self._current_image: QImage | None = None
+        self._audio: AudioPlayback | None = None
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._next_for_playback)
@@ -141,6 +144,10 @@ class VideoController(QObject):
         self._metadata = metadata
         self._current_frame = 0
         self._current_image = image
+        if self._audio is None:
+            self._audio = AudioPlayback(self)
+            self._audio.error_occurred.connect(self.error_occurred)
+        self._audio.open(resolved)
         self._timer.setInterval(max(1, round(1000 / fps)))
         self._set_state(PlaybackState.STOPPED)
         self.video_opened.emit(metadata)
@@ -152,6 +159,8 @@ class VideoController(QObject):
     def close_video(self) -> None:
         had_video = self._capture is not None
         self._timer.stop()
+        if self._audio is not None:
+            self._audio.close()
         self._safe_release(self._capture)
         self._capture = None
         self._metadata = None
@@ -177,6 +186,8 @@ class VideoController(QObject):
         ):
             return False
         self._timer.start()
+        if self._audio is not None:
+            self._audio.play(self._position_ms())
         self._set_state(PlaybackState.PLAYING)
         return True
 
@@ -185,6 +196,8 @@ class VideoController(QObject):
         if not self.is_open:
             return False
         self._timer.stop()
+        if self._audio is not None:
+            self._audio.pause()
         self._set_state(PlaybackState.PAUSED)
         return True
 
@@ -196,6 +209,8 @@ class VideoController(QObject):
         target = max(0, int(frame))
         if self._metadata.total_frames:
             target = min(target, self._metadata.last_frame)
+        if target == self._current_frame:
+            return True
         try:
             if not self._capture.set(cv2.CAP_PROP_POS_FRAMES, float(target)):
                 raise RuntimeError("seek failed")
@@ -204,9 +219,12 @@ class VideoController(QObject):
                 raise RuntimeError("decode failed")
             image = self._to_qimage(bgr)
         except Exception:
+            self.pause()
             self.error_occurred.emit(f"{target + 1:,}번 프레임으로 이동할 수 없습니다.")
             return False
         self._publish(image, target)
+        if self._audio is not None:
+            self._audio.seek(self._position_ms())
         return True
 
     @Slot(int, result=bool)
@@ -255,12 +273,16 @@ class VideoController(QObject):
     def _publish(self, image: QImage, frame: int) -> None:
         self._current_frame = frame
         self._current_image = image.copy()
+        if self._audio is not None and self.is_playing:
+            self._audio.sync(self._position_ms())
         timestamp = frame / self.fps if self.fps else 0.0
         self.frame_ready.emit(image.copy(), frame, timestamp)
         self.position_changed.emit(frame, self.total_frames)
 
     def _finish(self) -> None:
         self._timer.stop()
+        if self._audio is not None:
+            self._audio.pause()
         if self._metadata is not None and self._metadata.total_frames == 0:
             observed_total = max(0, self._current_frame + 1)
             self._metadata = VideoMetadata(
@@ -273,6 +295,9 @@ class VideoController(QObject):
             self.total_frames_changed.emit(observed_total)
         self._set_state(PlaybackState.STOPPED)
         self.playback_finished.emit()
+
+    def _position_ms(self) -> int:
+        return round(max(0, self._current_frame) * 1000 / self.fps) if self.fps else 0
 
     def _set_state(self, state: PlaybackState) -> None:
         if state is self._state:

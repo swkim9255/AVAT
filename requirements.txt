@@ -1,3 +1,7 @@
+# Python >=3.11,<3.14 (same runtime dependencies as pyproject.toml).
+# SQLite persistence, background saving, and diagnostics use Python's standard
+# library (sqlite3, concurrent.futures, logging, faulthandler); no extra package.
+# PySide6 also includes QtMultimedia for audio playback.
 PySide6>=6.7,<7
 opencv-python>=4.9,<5
 numpy>=1.24,<3
