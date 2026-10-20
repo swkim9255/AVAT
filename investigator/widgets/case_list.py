@@ -135,6 +135,7 @@ class CaseListPanel(QWidget):
     case_reordered = Signal(str, int)
     cases_reordered = Signal(list, int)
     export_requested = Signal()
+    report_export_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -227,6 +228,23 @@ class CaseListPanel(QWidget):
         self.export_button.setObjectName("exportCsvButton")
         self.export_button.clicked.connect(self.export_requested)
         root.addWidget(self.export_button)
+
+        self.report_export_button = QPushButton(
+            material_icon("description", PRIMARY), "사고 분석 보고서 내보내기", self
+        )
+        self.report_export_button.setObjectName("exportReportButton")
+        self.report_export_button.clicked.connect(self.report_export_requested)
+        root.addWidget(self.report_export_button)
+
+    def selected_case_uids(self) -> list[str]:
+        """Map selected case/video rows to distinct accidents in project order."""
+        selected = {
+            str(item.data(0, UID_ROLE))
+            for item in self.tree.selectedItems()
+            if not item.isHidden()
+            and (item.parent() is None or not item.parent().isHidden())
+        }
+        return [case.uid for case in self._cases if case.uid in selected]
 
     def capture_view_state(self) -> dict:
         return {

@@ -2,6 +2,8 @@
 # SQLite persistence, background saving, and diagnostics use Python's standard
 # library (sqlite3, concurrent.futures, logging, faulthandler); no extra package.
 # PySide6 also includes QtMultimedia for audio playback.
+# Word report templates use zipfile/xml.dom from the standard library; no Word
+# installation or extra DOCX dependency is required for report export.
 PySide6>=6.7,<7
 opencv-python>=4.9,<5
 numpy>=1.24,<3

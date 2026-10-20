@@ -35,6 +35,7 @@ from investigator.form_definition import FormDefinition
 from investigator.models import DEFAULT_INSTITUTION, InvestigationCase, new_case
 from investigator.project_session import ProjectSession
 from investigator.project_tabs_state import ProjectTabsState, ProjectTabsStore
+from investigator.report_export import ReportExportError, export_case_reports
 from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
     MISSING_VALUE_MESSAGE,
@@ -57,6 +58,7 @@ from investigator.widgets.csv_export_dialog import CsvExportDialog
 from investigator.widgets.form_designer import FormDesigner
 from investigator.widgets.form_panel import InvestigationPanel
 from investigator.widgets.playback_panel import PlaybackPanel
+from investigator.widgets.report_export_dialog import ReportExportDialog
 from investigator.widgets.speed_panel import SpeedPanel
 from investigator.widgets.statistics_panel import StatisticsPanel
 from investigator.widgets.video_import_dialog import VideoImportDialog
@@ -164,6 +166,10 @@ class MainWindow(QMainWindow):
         """Run commits off-thread; keep GUI timers/painting alive until committed."""
         self._commit_in_progress = True
         disabled = []
+        for control in [self.case_list.report_export_button, self.report_export_action]:
+            if control.isEnabled():
+                control.setEnabled(False)
+                disabled.append(control)
         if allow_edit:
             # Keep fields editable during an explicit draft save, but prevent
             # structural/navigation commands from reentering the transaction.
@@ -342,6 +348,11 @@ class MainWindow(QMainWindow):
         export_action.setShortcut(QKeySequence("Ctrl+E"))
         export_action.triggered.connect(self.export_csv)
         file_menu.addAction(export_action)
+        self.report_export_action = QAction(
+            material_icon("description", PRIMARY), "사고 분석 보고서 내보내기…", self
+        )
+        self.report_export_action.triggered.connect(self.export_reports)
+        file_menu.addAction(self.report_export_action)
         backup_action = QAction("조사 데이터 백업…", self)
         backup_action.triggered.connect(self.backup_workspace)
         file_menu.addAction(backup_action)
@@ -381,6 +392,7 @@ class MainWindow(QMainWindow):
         self.case_list.case_reordered.connect(self.reorder_case)
         self.case_list.cases_reordered.connect(self.reorder_cases)
         self.case_list.export_requested.connect(self.export_csv)
+        self.case_list.report_export_requested.connect(self.export_reports)
         self.video_player.files_dropped.connect(self._import_dropped_videos)
         self.video_player.rotation_requested.connect(self.rotate_video_clockwise)
 
@@ -559,6 +571,8 @@ class MainWindow(QMainWindow):
             enabled and self.case_list.tree.currentItem() is not None
         )
         self.case_list.export_button.setEnabled(enabled and bool(self.cases))
+        self.case_list.report_export_button.setEnabled(enabled and bool(self.cases))
+        self.report_export_action.setEnabled(enabled and bool(self.cases))
         self.investigation.setEnabled(has_case)
         self.investigation.save_button.setEnabled(has_case)
         self.investigation.complete_button.setEnabled(
@@ -2019,6 +2033,49 @@ class MainWindow(QMainWindow):
         if include_specification:
             message += f" · 데이터 명세서: {data_specification_path(destination).name}"
         self.statusBar().showMessage(message, 8000)
+
+    def export_reports(self) -> None:
+        """Export detached case snapshots without changing drafts or completion."""
+        if self._commit_in_progress:
+            return
+        if not self.cases:
+            QMessageBox.information(self, "사고 분석 보고서", "보고서로 만들 사고가 없습니다.")
+            return
+        selected = self.case_list.selected_case_uids()
+        if not selected and self.current_uid:
+            selected = [self.current_uid]
+        options = ReportExportDialog(self.cases, selected, self)
+        if options.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_uids = set(options.selected_uids())
+        if not selected_uids:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "사고 분석 보고서 저장 폴더 선택",
+            str(self.repository.workspace),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not folder:
+            return
+        snapshots = [self._copy_case(case) for case in self.cases if case.uid in selected_uids]
+        if not snapshots:
+            return
+        self.statusBar().showMessage(f"사고 분석 보고서 {len(snapshots)}건을 생성하고 있습니다…")
+        try:
+            destinations = self._disk_operation(
+                export_case_reports,
+                snapshots,
+                Path(folder),
+                form_definition=self.repository.form_definition,
+            )
+        except (ReportExportError, OSError, ValueError) as exc:
+            self.statusBar().showMessage("사고 분석 보고서 내보내기에 실패했습니다.", 5000)
+            QMessageBox.critical(self, "사고 분석 보고서 내보내기 오류", str(exc))
+            return
+        message = f"사고 분석 보고서 {len(destinations)}건을 저장했습니다: {Path(folder)}"
+        self.statusBar().showMessage(message, 10000)
+        QMessageBox.information(self, "사고 분석 보고서 내보내기 완료", message)
 
     def backup_workspace(self) -> None:
         if not self._save(show_message=False):
