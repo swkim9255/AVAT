@@ -4,21 +4,24 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QDir, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import QDir, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
-    QHBoxLayout,
+    QFrame,
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QSpinBox,
+    QScrollArea,
     QSplitter,
+    QStackedWidget,
     QTabBar,
     QTextEdit,
     QToolButton,
@@ -31,13 +34,16 @@ from investigator.folder_watcher import ProjectFolderWatcher
 from investigator.form_definition import FormDefinition
 from investigator.models import DEFAULT_INSTITUTION, InvestigationCase, new_case
 from investigator.project_session import ProjectSession
+from investigator.project_tabs_state import ProjectTabsState, ProjectTabsStore
 from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
     MISSING_VALUE_MESSAGE,
 )
+from investigator.speed_estimation import SpeedEstimate, estimate_speed
+from investigator.statistics_media import probe_video_fps
 from investigator.storage import CaseRepository, WorkspaceError, data_specification_path
 from investigator.storage_worker import StorageWorker
-from investigator.theme import PRIMARY, material_icon
+from investigator.theme import MUTED, PRIMARY, material_icon
 from investigator.video_controller import PlaybackState, VideoController, VideoMetadata
 from investigator.video_copy import CopiedVideos, copy_videos
 from investigator.video_import import (
@@ -51,8 +57,11 @@ from investigator.widgets.csv_export_dialog import CsvExportDialog
 from investigator.widgets.form_designer import FormDesigner
 from investigator.widgets.form_panel import InvestigationPanel
 from investigator.widgets.playback_panel import PlaybackPanel
+from investigator.widgets.speed_panel import SpeedPanel
+from investigator.widgets.statistics_panel import StatisticsPanel
 from investigator.widgets.video_import_dialog import VideoImportDialog
 from investigator.widgets.video_player import VideoPlayerPanel
+from investigator.widgets.workspace_menu import ProjectTabBar, ViewModeSwitch, WorkspaceMenuBar
 
 
 def default_workspace() -> Path:
@@ -62,7 +71,8 @@ def default_workspace() -> Path:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, workspace: str | Path | None = None, parent: QWidget | None = None) -> None:
+    def __init__(self, workspace: str | Path | None = None, parent: QWidget | None = None,
+                 *, project_tabs_store: ProjectTabsStore | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("mainWindow")
         self.setWindowTitle("AVAT")
@@ -70,7 +80,24 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1180, 760)
         self.resize(1660, 940)
 
-        self.repository = CaseRepository(workspace or default_workspace())
+        self._project_tabs_store = project_tabs_store or ProjectTabsStore()
+        self._project_tabs_warning = ""
+        try:
+            tabs_state = self._project_tabs_store.load()
+        except (OSError, ValueError, RuntimeError):
+            tabs_state = ProjectTabsState()
+            self._project_tabs_warning = "저장된 프로젝트 탭 설정을 읽지 못했습니다. 프로젝트 폴더를 다시 열어 주세요."
+        self._projects = [ProjectSession(CaseRepository(path), restored=True) for path in tabs_state.folders]
+        selected = Path(workspace).expanduser().resolve() if workspace is not None else tabs_state.active_folder
+        if selected is None:
+            selected = default_workspace().resolve()
+        active_index = next((index for index, project in enumerate(self._projects)
+                             if project.repository.workspace == selected), None)
+        if active_index is None:
+            self._projects.append(ProjectSession(CaseRepository(selected)))
+            active_index = len(self._projects) - 1
+        self._active_project_index = active_index
+        self.repository = self._projects[active_index].repository
         self.cases: list[InvestigationCase] = []
         self.current_uid: str | None = None
         self._opening_case: InvestigationCase | None = None
@@ -84,11 +111,27 @@ class MainWindow(QMainWindow):
         self._commit_in_progress = False
         self._deferred_reorders: list[tuple[list[str], int]] = []
         self._workspace_load_failed = False
-        self._projects = [ProjectSession(self.repository)]
-        self._active_project_index = 0
         self._switching_project = False
         self._video_import_in_progress = False
+        self._project_tabs_timer = QTimer(self)
+        self._project_tabs_timer.setSingleShot(True)
+        self._project_tabs_timer.setInterval(250)
+        self._project_tabs_timer.timeout.connect(self._save_project_tabs)
         self._auto_import_failed = False
+        self._statistics_dirty = True
+        self._statistics_timer = QTimer(self)
+        self._statistics_timer.setSingleShot(True)
+        self._statistics_timer.setInterval(300)
+        self._statistics_timer.timeout.connect(self._refresh_statistics)
+        self._statistics_media_worker = StorageWorker(self)
+        self._statistics_media_cache: dict[str, tuple[int, int, float]] = {}
+        self._statistics_media_attempted: set[str] = set()
+        self._statistics_media_future = None
+        self._statistics_media_cancel = Event()
+        self._statistics_media_origin: Path | None = None
+        self._statistics_media_timer = QTimer(self)
+        self._statistics_media_timer.setInterval(50)
+        self._statistics_media_timer.timeout.connect(self._finish_statistics_media)
         self.folder_watcher = ProjectFolderWatcher(self)
         self._watch_refresh_timer = QTimer(self)
         self._watch_refresh_timer.setSingleShot(True)
@@ -99,12 +142,19 @@ class MainWindow(QMainWindow):
         self.video_player = VideoPlayerPanel(self)
         self.investigation = InvestigationPanel(self)
         self.playback = PlaybackPanel(self)
+        self.speed_panel = SpeedPanel(self)
         self._build_layout()
         self._build_menu()
         self._connect_signals()
         self._load_workspace()
-        self._projects[0].initialized = True
+        self._sync_project_tabs()
+        project = self._projects[self._active_project_index]
+        project.initialized = not self._workspace_load_failed
+        project.load_failed = self._workspace_load_failed
         self._watch_active_project()
+        if self._project_tabs_warning:
+            self.statusBar().showMessage(self._project_tabs_warning, 12000)
+        self._project_tabs_timer.start()
 
     @property
     def current_case(self) -> InvestigationCase | None:
@@ -120,6 +170,7 @@ class MainWindow(QMainWindow):
             for control in [
                 self.case_list, self.video_player, self.investigation.save_button,
                 self.project_tabs, self.project_add_button,
+                self.mode_tabs,
                 self.investigation.complete_button, self.investigation.next_button,
                 self.investigation.edit_form_button,
                 *self.findChildren(QAction),
@@ -161,6 +212,7 @@ class MainWindow(QMainWindow):
         self._dirty_cases.add(case.uid)
         self._case_revisions[case.uid] = self._case_revisions.get(case.uid, 0) + 1
         self._dirty = True
+        self._invalidate_statistics()
 
     def _mark_saved(self, active_uid: str | None) -> None:
         self._dirty = False
@@ -172,6 +224,7 @@ class MainWindow(QMainWindow):
             project = self._projects[self._active_project_index]
             project.cases = self.cases
             project.current_uid = active_uid
+        self._invalidate_statistics()
 
     def _save_candidates(
         self, candidates: list[InvestigationCase], active_uid: str | None,
@@ -198,32 +251,34 @@ class MainWindow(QMainWindow):
                 candidates[index] = saved_by_uid[case.uid]
 
     def _build_layout(self) -> None:
+        self.workspace_menu = WorkspaceMenuBar(self)
+        self.setMenuBar(self.workspace_menu)
         root_widget = QWidget(self)
         root_widget.setObjectName("appRoot")
         root = QVBoxLayout(root_widget)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(1)
-        project_row = QHBoxLayout()
-        project_row.setContentsMargins(12, 0, 12, 0)
-        project_row.setSpacing(8)
-        self.project_tabs = QTabBar(root_widget)
+        self.project_tabs = ProjectTabBar(root_widget)
         self.project_tabs.setObjectName("projectTabs")
         self.project_tabs.setAccessibleName("프로젝트 폴더 탭")
         self.project_tabs.setExpanding(False)
         self.project_tabs.setUsesScrollButtons(True)
-        self.project_tabs.setElideMode(Qt.TextElideMode.ElideRight)
-        self.project_tabs.setStyleSheet("QTabBar#projectTabs::tab { padding: 11px 14px; max-width: 240px; }")
-        self.project_tabs.addTab(self.repository.workspace.name or str(self.repository.workspace))
-        self.project_tabs.setTabToolTip(0, str(self.repository.workspace))
-        project_row.addWidget(self.project_tabs, 1)
+        self.project_tabs.setElideMode(Qt.TextElideMode.ElideMiddle)
+        self.project_tabs.setTabsClosable(True)
+        self.project_tabs.setMovable(True)
+        self.project_tabs.setAccessibleDescription("탭을 좌우로 드래그하여 프로젝트 폴더의 표시 순서를 변경합니다.")
+        for project in self._projects:
+            path = project.repository.workspace
+            self.project_tabs.addTab(path.name or str(path))
+        self.project_tabs.setCurrentIndex(self._active_project_index)
         self.project_add_button = QToolButton(root_widget)
         self.project_add_button.setIcon(material_icon("add", PRIMARY))
         self.project_add_button.setAccessibleName("프로젝트 폴더 열기")
         self.project_add_button.setToolTip("프로젝트 폴더 열기 · 현재 탭 / 새 탭")
         self.project_add_button.setFixedSize(34, 34)
         self.project_add_button.setStyleSheet("padding: 0;")
-        project_row.addWidget(self.project_add_button)
-        root.addLayout(project_row)
+        self.view_mode = ViewModeSwitch(root_widget)
+        self.mode_tabs = self.view_mode  # Preserve index-based view routing.
         self.splitter = QSplitter(Qt.Orientation.Horizontal, root_widget)
         self.splitter.setObjectName("mainSplitter")
         self.splitter.setChildrenCollapsible(False)
@@ -235,13 +290,27 @@ class MainWindow(QMainWindow):
         video_layout.setSpacing(1)
         video_layout.addWidget(self.video_player, 1)
         video_layout.addWidget(self.playback, 0)
+        self.speed_scroll = QScrollArea(self.video_workspace)
+        self.speed_scroll.setObjectName("speedScroll")
+        self.speed_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.speed_scroll.setWidgetResizable(True)
+        self.speed_scroll.setMinimumWidth(0)
+        self.speed_scroll.setMinimumHeight(180)
+        self.speed_scroll.setMaximumHeight(340)
+        self.speed_scroll.setWidget(self.speed_panel)
+        self.speed_scroll.hide()
+        video_layout.addWidget(self.speed_scroll, 0)
         self.splitter.addWidget(self.video_workspace)
         self.splitter.addWidget(self.investigation)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 5)
         self.splitter.setStretchFactor(2, 3)
         self.splitter.setSizes([275, 790, 510])
-        root.addWidget(self.splitter, 1)
+        self.workspace_pages = QStackedWidget(root_widget)
+        self.workspace_pages.addWidget(self.splitter)
+        self.statistics_panel = StatisticsPanel(self)
+        self.workspace_pages.addWidget(self.statistics_panel)
+        root.addWidget(self.workspace_pages, 1)
         self.setCentralWidget(root_widget)
         self._update_workspace_status()
 
@@ -291,14 +360,18 @@ class MainWindow(QMainWindow):
         shortcuts_action = QAction("재생 단축키", self)
         shortcuts_action.triggered.connect(self._show_shortcuts)
         help_menu.addAction(shortcuts_action)
+        self.workspace_menu.set_controls(self.project_tabs, self.project_add_button, self.view_mode)
 
     def _connect_signals(self) -> None:
+        self.mode_tabs.currentChanged.connect(self._change_workspace_view)
+        self.statistics_panel.case_activated.connect(self._open_statistics_case)
+        self.statistics_panel.media_requested.connect(self._request_statistics_media)
         self.folder_watcher.videos_ready.connect(self._watched_videos_ready)
         self.folder_watcher.watch_error.connect(lambda message: self.statusBar().showMessage(message, 5000))
+        self.project_tabs.tabMoved.connect(self._move_project_tab)
         self.project_tabs.currentChanged.connect(self.switch_project)
         self.project_tabs.tabCloseRequested.connect(self.close_project)
         self.project_add_button.clicked.connect(self.choose_workspace)
-        self.case_list.open_project_requested.connect(self.choose_workspace)
         self.case_list.case_selected.connect(self.select_case)
         self.case_list.video_selected.connect(self.select_video)
         self.case_list.new_case_requested.connect(self.create_case)
@@ -320,6 +393,14 @@ class MainWindow(QMainWindow):
         )
         self.playback.trigger_requested.connect(self.set_trigger_marker)
         self.playback.collision_requested.connect(self.set_collision_marker)
+        self.playback.speed_point_requested.connect(self.toggle_speed_point)
+        self.playback.speed_panel_toggled.connect(self._set_speed_panel_visible)
+        self.speed_panel.add_point_requested.connect(self.toggle_speed_point)
+        self.speed_panel.remove_point_requested.connect(self.remove_speed_point)
+        self.speed_panel.clear_requested.connect(self.clear_speed_points)
+        self.speed_panel.distance_changed.connect(self.set_speed_distance)
+        self.speed_panel.seek_requested.connect(self._seek_video)
+        self.speed_panel.apply_requested.connect(self.apply_speed_label)
         self.investigation.save_requested.connect(self.save_draft)
         self.investigation.complete_requested.connect(self.complete_case)
         self.investigation.next_requested.connect(self.next_case)
@@ -331,6 +412,8 @@ class MainWindow(QMainWindow):
         self.video_controller.position_changed.connect(
             lambda frame, total: self.playback.set_position(frame)
         )
+        self.video_controller.seek_requested_position.connect(self.playback.set_requested_position)
+        self.video_controller.seek_cancelled.connect(self.playback.clear_pending_seek)
         self.video_controller.total_frames_changed.connect(self.playback.update_total_frames)
         self.video_controller.state_changed.connect(self._playback_state_changed)
         self.video_controller.error_occurred.connect(self._video_error)
@@ -340,12 +423,17 @@ class MainWindow(QMainWindow):
 
         self._workspace_load_failed = False
         try:
-            self.cases = self._disk_operation(self.repository.load)
+            project = self._projects[self._active_project_index]
+            self.cases = (
+                self._disk_operation(self.repository.load, require_existing=True) if project.restored
+                else self._disk_operation(self.repository.load)
+            )
             active_uid = self.repository.active_case_uid()
             self._mark_saved(active_uid)
             self._install_form(self.repository.form_definition)
         except WorkspaceError as exc:
-            QMessageBox.critical(self, "작업 폴더 오류", str(exc))
+            if not self._projects[self._active_project_index].restored:
+                QMessageBox.critical(self, "작업 폴더 오류", str(exc))
             self._workspace_load_failed = True
             self.cases = []
             self.current_uid = None
@@ -358,7 +446,7 @@ class MainWindow(QMainWindow):
             self.investigation.completion_badge.setText("읽기 오류")
             self._set_workflow_enabled(False)
             self.statusBar().showMessage(
-                "원본 데이터는 변경하지 않았습니다. 다른 작업 폴더를 선택해 주세요.", 0
+                f"{exc}\n원본 데이터는 변경하지 않았습니다. 다른 탭을 선택하거나 프로젝트 폴더를 다시 열어 주세요.", 0
             )
             return False
         if active_uid not in {case.uid for case in self.cases}:
@@ -370,8 +458,7 @@ class MainWindow(QMainWindow):
         else:
             self.select_case(str(active_uid))
         self._set_workflow_enabled(True)
-        # Establish the passive workspace message first so an automatic import
-        # summary remains visible instead of being immediately overwritten.
+        # Clear the previous project's transient status before an import summary.
         self._update_workspace_status()
         return self.import_video_folder(
             self.repository.workspace,
@@ -517,7 +604,7 @@ class MainWindow(QMainWindow):
         blocked = self.project_tabs.blockSignals(True)
         try:
             self.project_tabs.setCurrentIndex(self._active_project_index)
-            self.project_tabs.setTabsClosable(len(self._projects) > 1)
+            self.project_tabs.setTabsClosable(True)
             for index, project in enumerate(self._projects):
                 path = project.repository.workspace
                 name = path.name or str(path)
@@ -526,9 +613,61 @@ class MainWindow(QMainWindow):
                 if project.pending_video_paths:
                     name += " •"
                 self.project_tabs.setTabText(index, name)
+                self.project_tabs.setTabIcon(index, material_icon("folder_open", PRIMARY))
                 self.project_tabs.setTabToolTip(index, str(path))
+                if self.project_tabs.tabButton(index, QTabBar.ButtonPosition.LeftSide) is not None:
+                    self.project_tabs.setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
+                close_button = self.project_tabs.tabButton(index, QTabBar.ButtonPosition.RightSide)
+                if not isinstance(close_button, QToolButton) or close_button.objectName() != "closeProjectTab":
+                    close_button = QToolButton(self.project_tabs)
+                    close_button.setObjectName("closeProjectTab")
+                    close_button.setIcon(material_icon("close", MUTED))
+                    close_button.setIconSize(QSize(16, 16))
+                    close_button.setFixedSize(20, 20)
+                    close_button.clicked.connect(lambda checked=False, button=close_button: self._request_project_tab_close(button))
+                    self.project_tabs.setTabButton(index, QTabBar.ButtonPosition.RightSide, close_button)
+                close_button.setEnabled(len(self._projects) > 1)
+                close_button.setAccessibleName(f"{name} 프로젝트 닫기")
+                close_button.setToolTip("프로젝트 닫기" if len(self._projects) > 1 else "마지막 프로젝트는 닫을 수 없습니다.")
         finally:
             self.project_tabs.blockSignals(blocked)
+
+    def _request_project_tab_close(self, button: QToolButton) -> None:
+        for index in range(self.project_tabs.count()):
+            if self.project_tabs.tabButton(index, QTabBar.ButtonPosition.RightSide) is button:
+                self.project_tabs.tabCloseRequested.emit(index)
+                return
+
+    def _move_project_tab(self, source: int, destination: int) -> None:
+        """Keep tab order and project identity aligned without reloading a project."""
+        if source == destination or not (0 <= source < len(self._projects) and 0 <= destination < len(self._projects)):
+            return
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress:
+            blocked = self.project_tabs.blockSignals(True)
+            try:
+                self.project_tabs.moveTab(destination, source)
+            finally:
+                self.project_tabs.blockSignals(blocked)
+            return
+        active = self._projects[self._active_project_index]
+        self._projects.insert(destination, self._projects.pop(source))
+        # QTabBar emits tabMoved before currentChanged. Update the active index
+        # first so that the latter does not save/reopen an unchanged project.
+        self._active_project_index = next(index for index, project in enumerate(self._projects) if project is active)
+        self._project_tabs_timer.start()
+        self.statusBar().showMessage("프로젝트 폴더 탭 순서를 변경했습니다.", 3000)
+
+    def _save_project_tabs(self) -> None:
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress:
+            self._project_tabs_timer.start()
+            return
+        state = ProjectTabsState(
+            tuple(project.repository.workspace for project in self._projects), self.repository.workspace,
+        )
+        try:
+            self._project_tabs_store.save(state)
+        except (OSError, ValueError, RuntimeError):
+            self.statusBar().showMessage("프로젝트 탭 설정을 저장하지 못했습니다. 설정 폴더의 쓰기 권한을 확인해 주세요. 사고 데이터 저장과는 별개입니다.", 12000)
 
     def _capture_project(self) -> None:
         project = self._projects[self._active_project_index]
@@ -536,7 +675,7 @@ class MainWindow(QMainWindow):
         project.cases = self.cases
         project.current_uid = self.current_uid
         project.load_failed = self._workspace_load_failed
-        project.initialized = True
+        project.initialized = not self._workspace_load_failed
         project.list_state = self.case_list.capture_view_state()
         index = self.investigation.tabs.currentIndex()
         project.form_tab_key = self.investigation.sections[index].key if index >= 0 else None
@@ -545,7 +684,10 @@ class MainWindow(QMainWindow):
         project.splitter_sizes = self.splitter.sizes()
         metadata = self.video_controller.metadata
         project.video_path = str(metadata.path) if metadata else None
-        project.video_frame = max(0, self.video_controller.current_frame)
+        # Preserve the user's latest navigation target even if its asynchronous
+        # decode has not completed when this project tab is left.
+        project.video_frame = max(0, self.video_controller.requested_frame)
+        project.statistics_state = self.statistics_panel.capture_state()
 
     def _leave_project(self) -> bool:
         if not self._workspace_load_failed and not self._save(show_message=False):
@@ -564,6 +706,7 @@ class MainWindow(QMainWindow):
         self._case_revisions.clear()
         self._deferred_reorders.clear()
         self._mark_saved(self.current_uid)
+        self.statistics_panel.restore_state(project.statistics_state)
         self._sync_project_tabs()
         self.case_list.set_cases([])
         self.case_list.search.clear()
@@ -572,9 +715,10 @@ class MainWindow(QMainWindow):
             self.current_uid = None
             self.investigation.tabs.setCurrentIndex(0)
             self._load_workspace()
-            project.initialized = True
+            project.initialized = not self._workspace_load_failed
             project.load_failed = self._workspace_load_failed
             self._watch_active_project()
+            self._invalidate_statistics()
             return not self._workspace_load_failed
 
         self._install_form(self.repository.form_definition)
@@ -598,6 +742,7 @@ class MainWindow(QMainWindow):
             self.investigation.case_title.setText("작업 폴더 읽기 오류")
             self.investigation.completion_badge.setText("읽기 오류")
         self._watch_active_project()
+        self._invalidate_statistics()
         return True
 
     def switch_project(self, index: int) -> bool:
@@ -614,6 +759,7 @@ class MainWindow(QMainWindow):
             return self._activate_project(index)
         finally:
             self._switching_project = False
+            self._project_tabs_timer.start()
 
     def open_project(self, folder: str | Path, *, new_tab: bool = True) -> bool:
         """Open an independent workspace, or activate its existing tab."""
@@ -625,6 +771,13 @@ class MainWindow(QMainWindow):
             return False
         for index, project in enumerate(self._projects):
             if project.repository.workspace == path:
+                if project.load_failed and not project.initialized and index == self._active_project_index:
+                    self._switching_project = True
+                    try:
+                        return self._activate_project(index)
+                    finally:
+                        self._switching_project = False
+                        self._project_tabs_timer.start()
                 return self.switch_project(index)
         self._switching_project = True
         previous_index = self._active_project_index
@@ -656,6 +809,7 @@ class MainWindow(QMainWindow):
             return False
         finally:
             self._switching_project = False
+            self._project_tabs_timer.start()
 
     def close_project(self, index: int) -> bool:
         if self._commit_in_progress or self._switching_project or self._video_import_in_progress or len(self._projects) <= 1:
@@ -680,6 +834,7 @@ class MainWindow(QMainWindow):
             return True
         finally:
             self._switching_project = False
+            self._project_tabs_timer.start()
 
     def create_case(self) -> None:
         if not self._save(show_message=False):
@@ -1425,9 +1580,7 @@ class MainWindow(QMainWindow):
             self.case_list.set_cases(self.cases, previous_uid)
             previous_case = self.current_case
             if previous_case:
-                self.playback.set_markers(
-                    previous_case.trigger_frame, previous_case.collision_frame
-                )
+                self._sync_markers(previous_case)
             return
         self.current_uid = uid
         self._mark_case_dirty(target_case)
@@ -1440,6 +1593,7 @@ class MainWindow(QMainWindow):
             self.video_controller.close_video()
             self.video_player.clear()
             self.playback.clear_video()
+            self.speed_panel.set_data([], SpeedEstimate(), 0.0)
             self.investigation.load_values({})
             self.investigation.case_title.setText("사고 없음")
             self.investigation.completion_badge.setObjectName("missingBadge")
@@ -1451,7 +1605,7 @@ class MainWindow(QMainWindow):
             return
         self.investigation.load_values(case.values)
         self._refresh_case_presentation(rebuild_list=False)
-        self.playback.set_markers(case.trigger_frame, case.collision_frame)
+        self._sync_markers(case)
         if open_video and not self._open_active_video():
             self.video_controller.close_video()
             self.video_player.clear()
@@ -1534,7 +1688,7 @@ class MainWindow(QMainWindow):
         removing = case.trigger_frame == frame
         case.set_trigger(None if removing else frame)
         self._mark_case_dirty(case)
-        self.playback.set_markers(case.trigger_frame, case.collision_frame)
+        self._sync_markers(case)
         self._refresh_case_presentation(rebuild_list=True)
         if removing:
             self.statusBar().showMessage("T 트리거 마커를 해제했습니다.", 3000)
@@ -1549,7 +1703,7 @@ class MainWindow(QMainWindow):
         removing = case.collision_frame == frame
         case.set_collision(None if removing else frame)
         self._mark_case_dirty(case)
-        self.playback.set_markers(case.trigger_frame, case.collision_frame)
+        self._sync_markers(case)
         self._refresh_case_presentation(rebuild_list=True)
         if removing:
             self.statusBar().showMessage("충돌 마커를 해제했습니다.", 3000)
@@ -1557,6 +1711,132 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"충돌 시점을 {frame + 1:,}번 프레임에 지정했습니다.", 3000
             )
+
+    def _sync_markers(self, case: InvestigationCase | None = None, *, fps: float | None = None) -> None:
+        """Push T/C and speed points to the timeline and refresh the speed estimate."""
+
+        case = case or self.current_case
+        if case is None:
+            self.playback.set_markers(None, None, [])
+            self.speed_panel.set_data([], SpeedEstimate(), 0.0, context_key=None)
+            self.speed_panel.add_button.setEnabled(False)
+            return
+        points = case.speed_points
+        self.playback.set_markers(
+            case.trigger_frame, case.collision_frame, [point.frame for point in points]
+        )
+        metadata = self.video_controller.metadata
+        matching_video = metadata is not None and str(metadata.path) == case.active_video
+        if fps is None:
+            fps = metadata.reported_fps if matching_video else 0.0
+        context = (str(self.repository.workspace), case.uid, case.active_video)
+        self.speed_panel.set_data(points, estimate_speed(points, fps, case.trigger_frame), fps, context_key=context)
+        self.speed_panel.add_button.setEnabled(matching_video)
+        self.speed_panel.set_apply_available("trigger_vehicle_speed" in self.investigation.editors)
+
+    def _set_speed_panel_visible(self, visible: bool) -> None:
+        self.video_player.canvas.setMinimumHeight(140 if visible else 280)
+        self.speed_scroll.setVisible(visible)
+
+    def _show_speed_panel(self) -> None:
+        if not self.playback.speed_panel_button.isChecked():
+            self.playback.speed_panel_button.setChecked(True)
+
+    def toggle_speed_point(self) -> None:
+        case = self.current_case
+        if case is None or not self.video_controller.is_open:
+            return
+        frame = self.video_controller.current_frame
+        following = next((point for point in case.speed_points if point.frame > frame), None)
+        added = case.toggle_speed_point(frame)
+        self._mark_case_dirty(case)
+        self._sync_markers(case)
+        self._refresh_case_presentation(rebuild_list=True)
+        if added:
+            self._show_speed_panel()
+            number = next(
+                index for index, point in enumerate(case.speed_points, start=1) if point.frame == frame
+            )
+            message = f"속도 지점 {number}을 {frame + 1:,}번 프레임에 추가했습니다."
+            timeout = 3000
+            if following is not None and following.distance_m is not None:
+                message += f" 기존 구간이 나뉘었으므로 {number + 1}번 지점의 거리를 다시 입력해 주세요."
+                timeout = 8000
+            self.statusBar().showMessage(message, timeout)
+        else:
+            self.statusBar().showMessage(f"{frame + 1:,}번 프레임의 속도 지점을 해제했습니다.", 3000)
+
+    def remove_speed_point(self, frame: int) -> None:
+        case = self.current_case
+        if case is None or all(point.frame != frame for point in case.speed_points):
+            return
+        case.toggle_speed_point(frame)
+        self._mark_case_dirty(case)
+        self._sync_markers(case)
+        self._refresh_case_presentation(rebuild_list=True)
+
+    def clear_speed_points(self) -> None:
+        case = self.current_case
+        if case is None or not case.speed_points:
+            return
+        answer = QMessageBox.question(
+            self,
+            "속도 지점 삭제",
+            f"현재 영상의 속도 지점 {len(case.speed_points)}개를 모두 삭제할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        case.clear_speed_points()
+        self._mark_case_dirty(case)
+        self._sync_markers(case)
+        self._refresh_case_presentation(rebuild_list=True)
+
+    def set_speed_distance(self, frame: int, distance_m: float | None) -> None:
+        case = self.current_case
+        if case is None:
+            return
+        case.set_speed_distance(frame, distance_m)
+        self._mark_case_dirty(case)
+        self._sync_markers(case)
+        self._refresh_case_presentation(rebuild_list=True)
+
+    def apply_speed_label(self, label: str) -> None:
+        case = self.current_case
+        editor = self.investigation.editors.get("trigger_vehicle_speed")
+        metadata = self.video_controller.metadata
+        if case is None or editor is None or metadata is None or str(metadata.path) != case.active_video:
+            return
+        estimate = estimate_speed(case.speed_points, metadata.reported_fps, case.trigger_frame)
+        if estimate.label != label:
+            return
+        canonical = self.repository.form_definition.canonical_values(case.values)
+        old_source = canonical.get("trigger_vehicle_speed_source")
+        if (old_source and old_source != "사고영상") or estimate.warnings or estimate.label_uncertain:
+            message = (
+                "거리·프레임으로 계산한 참고용 추정값을 적용할까요?\n"
+                "기존 속도 구분을 변경하고 속도 출처를 ‘사고영상’으로 기록합니다."
+            )
+            if estimate.warnings:
+                message += "\n경고가 있습니다. 측정 지점을 먼저 확인해 주세요."
+            answer = QMessageBox.question(
+                self, "속도 추정값 적용 확인",
+                message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        stored = self.repository.form_definition.stored_value("trigger_vehicle_speed", label)
+        editor.set_value(stored)
+        self._field_changed("trigger_vehicle_speed", stored)
+        source_editor = self.investigation.editors.get("trigger_vehicle_speed_source")
+        if source_editor is not None:
+            source = self.repository.form_definition.stored_value("trigger_vehicle_speed_source", "사고영상")
+            source_editor.set_value(source)
+            self._field_changed("trigger_vehicle_speed_source", source)
+        self.statusBar().showMessage(f"차량 속도 (추정)를 {label}으로 입력했습니다.", 4000)
 
     def save_draft(self) -> None:
         self._save(show_message=True)
@@ -1759,12 +2039,18 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"조사 데이터를 백업했습니다: {destination}", 5000)
 
     def _video_opened(self, metadata: VideoMetadata) -> None:
+        try:
+            stat = metadata.path.stat()
+            self._statistics_media_cache[str(metadata.path)] = (stat.st_size, stat.st_mtime_ns, metadata.reported_fps)
+            self._invalidate_statistics()
+        except OSError:
+            pass
         self.video_player.set_video_name(metadata.path, (metadata.width, metadata.height))
         self.playback.set_video(metadata.total_frames, metadata.fps)
         case = self._opening_case or self.current_case
         self.video_player.set_rotation(case.video_rotation if case else 0)
         if case:
-            self.playback.set_markers(case.trigger_frame, case.collision_frame)
+            self._sync_markers(case, fps=metadata.reported_fps)
         self.statusBar().showMessage(
             f"영상 열기 완료 · {metadata.fps:.2f} FPS · {metadata.total_frames:,} frames", 4000
         )
@@ -1773,6 +2059,8 @@ class MainWindow(QMainWindow):
         self.video_player.canvas.clear()
         self.video_player.set_rotation(0)
         self.playback.clear_video()
+        self.speed_panel.set_data([], SpeedEstimate(), 0.0, context_key=None)
+        self.speed_panel.add_button.setEnabled(False)
 
     def _frame_ready(self, image, frame: int, timestamp: float) -> None:  # type: ignore[no-untyped-def]
         del frame, timestamp
@@ -1812,20 +2100,104 @@ class MainWindow(QMainWindow):
         self.video_controller.seek_seconds(seconds)
 
     def _update_workspace_status(self) -> None:
-        self.case_list.set_project_folder(self.repository.workspace)
-        self.statusBar().setToolTip(str(self.repository.workspace))
-        self.statusBar().showMessage(f"작업 폴더 · {self.repository.workspace}", 4000)
+        # Folder identity lives in the document tab; paths appear in its tooltip.
+        self.statusBar().setToolTip("")
+        self.statusBar().clearMessage()
+
+    def _invalidate_statistics(self) -> None:
+        self._statistics_dirty = True
+        if hasattr(self, "mode_tabs") and self.mode_tabs.currentIndex() == 1:
+            self._statistics_timer.start()
+
+    def _change_workspace_view(self, index: int) -> None:
+        if self._commit_in_progress or self._switching_project:
+            blocked = self.mode_tabs.blockSignals(True)
+            self.mode_tabs.setCurrentIndex(self.workspace_pages.currentIndex())
+            self.mode_tabs.blockSignals(blocked)
+            return
+        self.workspace_pages.setCurrentIndex(index)
+        if index == 1:
+            if self.video_controller.is_playing:
+                self.video_controller.pause()
+            self._refresh_statistics()
+            self._request_statistics_media()
+
+    def _refresh_statistics(self) -> None:
+        if self.mode_tabs.currentIndex() != 1:
+            return
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress:
+            self._statistics_timer.start()
+            return
+        with timed_operation("statistics_refresh", count=len(self.cases)):
+            self.statistics_panel.set_data(
+                self.cases, self.repository.form_definition,
+                {path: record[2] for path, record in self._statistics_media_cache.items() if record[2] > 0},
+                self.repository.workspace,
+            )
+        self._statistics_dirty = False
+        if any(case.active_video and case.active_video not in self._statistics_media_attempted for case in self.cases):
+            self._request_statistics_media()
+
+    def _open_statistics_case(self, uid: str, key: str = "") -> None:
+        if self._commit_in_progress or not any(case.uid == uid for case in self.cases):
+            return
+        if not self._save(show_message=False):
+            return
+        self.mode_tabs.setCurrentIndex(0)
+        self.case_list.search.clear()
+        self.case_list.select_case(uid)
+        self.select_case(uid)
+        if key:
+            key = {"site_location": "site_types", "obstacle_object_types": "obstacle_vehicle_types", "trigger_frame": ""}.get(key, key)
+            if key:
+                self.investigation.focus_field(key)
+
+    def _request_statistics_media(self) -> None:
+        if self._statistics_media_future is not None or self._workspace_load_failed:
+            return
+        paths = list(dict.fromkeys(case.active_video for case in self.cases if case.active_video))
+        if not paths:
+            return
+        self._statistics_media_attempted.update(paths)
+        self._statistics_media_cancel = Event()
+        self._statistics_media_origin = self.repository.workspace
+        self._statistics_media_future = self._statistics_media_worker.submit(
+            probe_video_fps, paths, dict(self._statistics_media_cache), self._statistics_media_cancel,
+        )
+        self._statistics_media_timer.start()
+        self.statusBar().showMessage("영상의 실제 FPS 정보를 확인하고 있습니다…")
+
+    def _finish_statistics_media(self) -> None:
+        future = self._statistics_media_future
+        if future is None or not future.done():
+            return
+        self._statistics_media_timer.stop()
+        self._statistics_media_future = None
+        try:
+            self._statistics_media_cache.update(future.result())
+        except Exception:
+            self.statusBar().showMessage("일부 영상 정보를 확인하지 못했습니다. 파일 상태를 확인해 주세요.", 5000)
+        else:
+            if self.repository.workspace == self._statistics_media_origin:
+                self._invalidate_statistics()
+                self.statusBar().showMessage("영상 통계 정보를 갱신했습니다.", 3000)
+        if (self.repository.workspace != self._statistics_media_origin
+                and self.mode_tabs.currentIndex() == 1):
+            self._request_statistics_media()
 
     def _show_shortcuts(self) -> None:
         QMessageBox.information(
             self,
             "재생 단축키",
-            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nCtrl+S  임시저장",
+            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nM  속도 지점 추가 / 해제\nCtrl+S  임시저장",
         )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self.mode_tabs.currentIndex() != 0:
+            super().keyPressEvent(event)
+            return
         focus = QApplication.focusWidget()
-        if isinstance(focus, (QLineEdit, QComboBox, QSpinBox, QTextEdit)):
+        if isinstance(focus, (QLineEdit, QComboBox, QAbstractSpinBox, QTextEdit)):
             super().keyPressEvent(event)
             return
         key = event.key()
@@ -1840,6 +2212,8 @@ class MainWindow(QMainWindow):
             self._step_seconds(-1)
         elif key == Qt.Key.Key_L:
             self._step_seconds(1)
+        elif key == Qt.Key.Key_M:
+            self.toggle_speed_point()
         else:
             super().keyPressEvent(event)
             return
@@ -1853,7 +2227,21 @@ class MainWindow(QMainWindow):
         if not self._workspace_load_failed and not self._save(show_message=False):
             event.ignore()
             return
+        self._project_tabs_timer.stop()
+        self._save_project_tabs()
         self.video_controller.close_video()
+        self._statistics_timer.stop()
+        self._statistics_media_timer.stop()
+        self._statistics_media_cancel.set()
+        try:
+            if self._statistics_media_future is not None:
+                self._statistics_media_worker.wait(self._statistics_media_future)
+        except Exception:
+            # Optional metadata work must not prevent saving and closing the app.
+            pass
+        finally:
+            self._statistics_media_future = None
+            self._statistics_media_worker.shutdown()
         self._watch_refresh_timer.stop()
         self.folder_watcher.shutdown()
         self._storage_worker.shutdown()

@@ -14,6 +14,9 @@ avat_ai/
 tests/
 *.tmp
 
+# Put all local tests, tools, samples, mockups, reports and patches here.
+/local_dev/
+
 # Local investigation databases, backups, and SQLite sidecar files
 *.db
 *.db-wal
@@ -27,11 +30,3 @@ investigations.json
 
 # Interrupted video import copies
 .avat-import-*.part
-
-# Local UI mockup (not part of the application)
-/AVAT 통계 탭 시안 – 통계 탭 · 클릭 가능한 시안.html
-
-# Local reference documents; the runtime workbook under investigator/assets stays tracked
-/AVAT 데이터 명세서.xlsx
-/docs/VIDEO_CRASH_ANALYSIS.md
-/docs/CSV_SCHEMA.md

@@ -8,9 +8,17 @@
 *.txt text eol=lf
 *.json text eol=lf
 *.csv text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.patch text eol=lf
+*.codepoints text eol=lf
+# Windows launchers require Windows line endings.
+*.cmd text eol=crlf
+*.bat text eol=crlf
 # Explicit rules for files previously containing mixed CRLF/LF endings.
 /README.md text eol=lf
 /investigator/widgets/playback_panel.py text eol=lf
 *.ttf binary
 *.png binary
 *.mp4 binary
+*.xlsx binary

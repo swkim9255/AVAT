@@ -71,8 +71,15 @@ class CaseRepository:
         if not self.workspace.is_dir():
             raise WorkspaceError(f"작업 폴더를 만들 수 없습니다: {self.workspace}")
 
-    def load(self) -> list[InvestigationCase]:
-        self.ensure_workspace()
+    def load(self, *, require_existing: bool = False) -> list[InvestigationCase]:
+        if require_existing:
+            try:
+                if not self.workspace.is_dir():
+                    raise WorkspaceError("저장된 프로젝트 폴더를 찾을 수 없습니다. 폴더나 외장 드라이브 연결 상태를 확인해 주세요.")
+            except OSError as exc:
+                raise WorkspaceError("저장된 프로젝트 폴더에 접근할 수 없습니다. 연결 상태와 읽기 권한을 확인해 주세요.") from exc
+        else:
+            self.ensure_workspace()
         if not self.database_path.exists():
             if self.legacy_database_path.exists():
                 self._migrate_legacy()
@@ -683,6 +690,7 @@ class CaseRepository:
                             if any(
                                 marker.get("trigger_frame") is not None
                                 or bool(marker.get("collision_frames"))
+                                or bool(marker.get("speed_points"))
                                 for marker in case.markers_by_video.values()
                             )
                             else None

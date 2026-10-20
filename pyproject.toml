@@ -31,7 +31,8 @@ include = ["investigator*"]
 investigator = ["assets/material_symbols/*", "assets/fonts/*", "assets/*.xlsx"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["local_dev/tests"]
+pythonpath = [".", "local_dev"]
 qt_api = "pyside6"
 
 [tool.ruff]

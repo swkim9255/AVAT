@@ -8,6 +8,8 @@ from pathlib import Path
 from PySide6.QtCore import QElapsedTimer, QLoggingCategory, QObject, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
+from investigator.ffmpeg_logging import configure_qt_ffmpeg_log_level
+
 
 @lru_cache(maxsize=1)
 def configure_media_logging() -> None:
@@ -35,6 +37,11 @@ class AudioPlayback(QObject):
         self._player.mediaStatusChanged.connect(self._status_changed)
         self._player.errorOccurred.connect(self._error)
         self._last_sync = QElapsedTimer()
+        # Qt installs its native FFmpeg logger when its first player is made.
+        # Set a native logging level after initialization. Python callbacks from
+        # FFmpeg threads can deadlock Qt playback; do not intercept stderr.
+        # Warning diagnostics are quiet, but errors/fatal messages remain visible.
+        configure_qt_ffmpeg_log_level()
 
     def open(self, path: Path) -> None:
         self.close()

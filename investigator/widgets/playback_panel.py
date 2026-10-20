@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import Literal
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPolygon
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPolygon
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStyle,
@@ -21,8 +23,10 @@ from PySide6.QtWidgets import (
 
 from investigator.theme import DANGER, MUTED, PRIMARY, PRIMARY_HOVER, material_icon
 
-MarkerKind = Literal["trigger", "collision"]
+MarkerKind = Literal["trigger", "collision", "speed"]
 COLLISION_HOVER = "#EA580C"
+SPEED_POINT = "#0F766E"
+SPEED_POINT_HOVER = "#14958A"
 MARKER_INTERACTION_SIZE = 25
 
 
@@ -49,18 +53,35 @@ class MarkerSlider(QSlider):
         self.setAccessibleName("영상 타임라인")
         self.trigger_frame: int | None = None
         self.collision_frame: int | None = None
+        self.speed_frames: list[int] = []
         self._hovered_marker: MarkerKind | None = None
-        self.sliderMoved.connect(self.seek_requested)
+        self._hovered_speed_index: int | None = None
+        self._painted_speed_index: int | None = None
+        self._last_seek_requested: int | None = None
+        self._groove_dragging = False
+        self.sliderMoved.connect(self._emit_seek_requested)
 
-    def set_markers(self, trigger: int | None, collision: int | None) -> None:
+    def _emit_seek_requested(self, frame: int) -> None:
+        self._last_seek_requested = int(frame)
+        self.seek_requested.emit(int(frame))
+
+    def set_markers(
+        self,
+        trigger: int | None,
+        collision: int | None,
+        speed_frames: list[int] | None = None,
+    ) -> None:
         self.trigger_frame = trigger
         self.collision_frame = collision
+        self.speed_frames = sorted(int(frame) for frame in (speed_frames or []))
         self._set_hovered_marker(None)
         descriptions = []
         if trigger is not None:
             descriptions.append(f"T 트리거 {int(trigger) + 1:,}번 프레임")
         if collision is not None:
             descriptions.append(f"C 충돌 {int(collision) + 1:,}번 프레임")
+        if self.speed_frames:
+            descriptions.append(f"속도 지점 {len(self.speed_frames)}개")
         marker_description = ", ".join(descriptions) if descriptions else "지정된 마커 없음"
         self.setAccessibleDescription(
             f"{marker_description}. 마커를 클릭하면 해당 프레임으로 이동합니다."
@@ -131,7 +152,10 @@ class MarkerSlider(QSlider):
         if self.trigger_frame is None:
             return None
         x = self._x_for_value(self.trigger_frame)
-        return QRect(x + 14, 1, 24, 18).intersected(self.rect())
+        rect = QRect(x + 14, 1, 12, 18).intersected(self.rect())
+        if any(rect.intersects(self._speed_interaction_rect(frame)) for frame in self.speed_frames):
+            return None
+        return rect
 
     def _collision_label_rect(self) -> QRect | None:
         if self.collision_frame is None:
@@ -139,7 +163,26 @@ class MarkerSlider(QSlider):
         x = self._x_for_value(self.collision_frame)
         return QRect(x + 14, self.height() - 22, 32, 18).intersected(self.rect())
 
+    def _speed_interaction_rect(self, frame: int) -> QRect:
+        x = self._x_for_value(frame)
+        return QRect(x - 8, 2, 16, 24).intersected(self.rect())
+
+    def _speed_point_at(self, position: QPoint) -> int | None:
+        nearest: tuple[int, int] | None = None
+        for index, frame in enumerate(self.speed_frames):
+            rect = self._speed_interaction_rect(frame)
+            if rect.contains(position):
+                distance = abs(rect.center().x() - position.x())
+                if nearest is None or distance < nearest[0]:
+                    nearest = (distance, index)
+        return None if nearest is None else nearest[1]
+
     def _marker_at(self, position: QPoint) -> tuple[MarkerKind, int] | None:
+        if position.y() <= 10:
+            speed_index = self._speed_point_at(position)
+            if speed_index is not None:
+                self._hovered_speed_index = speed_index
+                return "speed", self.speed_frames[speed_index]
         trigger_rect = self._trigger_interaction_rect()
         trigger_label = self._trigger_label_rect()
         if (trigger_rect is not None and trigger_rect.contains(position)) or (
@@ -147,6 +190,10 @@ class MarkerSlider(QSlider):
         ):
             assert self.trigger_frame is not None
             return "trigger", self.trigger_frame
+        speed_index = self._speed_point_at(position)
+        if speed_index is not None:
+            self._hovered_speed_index = speed_index
+            return "speed", self.speed_frames[speed_index]
         collision_rect = self._collision_interaction_rect()
         collision_label = self._collision_label_rect()
         if (collision_rect is not None and collision_rect.contains(position)) or (
@@ -159,15 +206,28 @@ class MarkerSlider(QSlider):
     def _marker_color(self, marker: MarkerKind) -> QColor:
         if marker == "trigger":
             return QColor(PRIMARY_HOVER if self._hovered_marker == marker else PRIMARY)
+        if marker == "speed":
+            return QColor(SPEED_POINT)
         return QColor(COLLISION_HOVER if self._hovered_marker == marker else DANGER)
 
     def _set_hovered_marker(self, marker: MarkerKind | None) -> None:
-        if marker == self._hovered_marker:
+        speed_index = self._hovered_speed_index if marker == "speed" else None
+        if marker == self._hovered_marker and (
+            marker != "speed" or speed_index == self._painted_speed_index
+        ):
             return
         self._hovered_marker = marker
+        self._hovered_speed_index = speed_index
+        self._painted_speed_index = speed_index
         if marker is None:
             self.unsetCursor()
             self.setToolTip("")
+        elif marker == "speed" and speed_index is not None:
+            frame = self.speed_frames[speed_index]
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setToolTip(
+                f"속도 지점 {speed_index + 1} · {int(frame) + 1:,}번 프레임 (클릭하여 이동)"
+            )
         else:
             frame = self.trigger_frame if marker == "trigger" else self.collision_frame
             label = "T 트리거" if marker == "trigger" else "C 충돌"
@@ -178,13 +238,26 @@ class MarkerSlider(QSlider):
     def _seek_to_marker(self, frame: int, event: QMouseEvent) -> None:
         target = max(self.minimum(), min(self.maximum(), int(frame)))
         self.setValue(target)
-        self.seek_requested.emit(target)
+        self._emit_seek_requested(target)
         event.accept()
 
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for index, frame in enumerate(self.speed_frames):
+            painter.save()
+            x = self._x_for_value(frame)
+            hovered = self._hovered_marker == "speed" and self._hovered_speed_index == index
+            color = QColor(SPEED_POINT_HOVER if hovered else SPEED_POINT)
+            painter.setPen(QPen(color, 2 if hovered else 1.5))
+            painter.drawLine(x, 19, x, 25)
+            font = painter.font()
+            font.setPixelSize(10)
+            font.setBold(hovered)
+            painter.setFont(font)
+            painter.drawText(QRect(x - 8, 2, 16, 16), Qt.AlignmentFlag.AlignCenter, str(index + 1))
+            painter.restore()
         if self.trigger_frame is not None:
             painter.save()
             x = self._x_for_value(self.trigger_frame)
@@ -214,7 +287,8 @@ class MarkerSlider(QSlider):
                 )
             )
             painter.setPen(color)
-            painter.drawText(QRect(x + 16, 1, 24, 18), "T")
+            if label_rect := self._trigger_label_rect():
+                painter.drawText(label_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "T")
             painter.restore()
         if self.collision_frame is not None:
             painter.save()
@@ -249,6 +323,17 @@ class MarkerSlider(QSlider):
             painter.restore()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._groove_dragging:
+            # A press away from the handle uses absolute track coordinates;
+            # native handle drags below still retain their original grab offset.
+            if self.isSliderDown() and event.buttons() & Qt.MouseButton.LeftButton:
+                self.setSliderPosition(self._value_at_position(event.position().toPoint()))
+                event.accept()
+                return
+            # Respect cancelled gestures (e.g. an intervening video change) and
+            # never turn a later passive hover into an unintended seek.
+            self._groove_dragging = False
+            self.setSliderDown(False)
         marker = self._marker_at(event.position().toPoint())
         self._set_hovered_marker(marker[0] if marker is not None else None)
         super().mouseMoveEvent(event)
@@ -262,6 +347,7 @@ class MarkerSlider(QSlider):
             super().mousePressEvent(event)
             return
         position = event.position().toPoint()
+        self._groove_dragging = False
         marker = self._marker_at(position)
         if marker is not None:
             self._set_hovered_marker(marker[0])
@@ -275,18 +361,38 @@ class MarkerSlider(QSlider):
         if handle.contains(position):
             super().mousePressEvent(event)
             return
-        start, span, upside_down = self._slider_metrics()
-        slider_position = max(0, min(span, round(event.position().x()) - start))
-        value = QStyle.sliderValueFromPosition(
-            self.minimum(),
-            self.maximum(),
-            slider_position,
-            span,
-            upside_down,
-        )
+        value = self._value_at_position(position)
         self.setValue(value)
-        self.seek_requested.emit(value)
+        # Jump and start dragging in the same press. QSlider's native groove
+        # press never ran, so explicitly own this gesture until mouse release.
+        self._groove_dragging = True
+        self.setSliderDown(True)
+        self._set_hovered_marker(None)
+        self._emit_seek_requested(value)
         event.accept()
+
+    def _value_at_position(self, position: QPoint) -> int:
+        start, span, upside_down = self._slider_metrics()
+        pixel = max(0, min(span, position.x() - start))
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(), pixel, span, upside_down
+        )
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        was_dragging = self.isSliderDown()
+        if self._groove_dragging and event.button() == Qt.MouseButton.LeftButton:
+            # Include the final pointer location even if its last move event
+            # was compressed; unchanged positions do not emit sliderMoved twice.
+            self.setSliderPosition(self._value_at_position(event.position().toPoint()))
+            self._groove_dragging = False
+            self.setSliderDown(False)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+        if was_dragging and self.sliderPosition() != self._last_seek_requested:
+            # Always submit the final drag target, without decoding it twice
+            # when sliderMoved already submitted that same position.
+            self._emit_seek_requested(self.sliderPosition())
 
 
 class PlaybackPanel(QWidget):
@@ -296,6 +402,8 @@ class PlaybackPanel(QWidget):
     toggle_playback_requested = Signal()
     trigger_requested = Signal()
     collision_requested = Signal()
+    speed_point_requested = Signal()
+    speed_panel_toggled = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -303,6 +411,7 @@ class PlaybackPanel(QWidget):
         self._fps = 0.0
         self._total_frames = 0
         self._frame = 0
+        self._requested_frame: int | None = None
         self.setMinimumHeight(196)
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 10, 18, 12)
@@ -314,8 +423,11 @@ class PlaybackPanel(QWidget):
         self.time_label.setStyleSheet("font-size: 14px; font-weight: 650;")
         timeline_header.addWidget(self.time_label)
         timeline_header.addStretch(1)
-        legend = QLabel("◆ T 트리거    ▼ C 충돌", self)
+        legend = QLabel("◆ T 트리거    ▼ C 충돌    1 2 3 속도 지점", self)
         legend.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        legend.setMinimumWidth(0)
+        legend.setWordWrap(True)
+        legend.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         timeline_header.addWidget(legend)
         root.addLayout(timeline_header)
 
@@ -351,9 +463,10 @@ class PlaybackPanel(QWidget):
         controls.addStretch(1)
         root.addLayout(controls)
 
-        bottom = QHBoxLayout()
+        frames = QWidget(self)
+        bottom = QHBoxLayout(frames)
+        bottom.setContentsMargins(0, 0, 0, 0)
         bottom.setSpacing(8)
-        bottom.addStretch(1)
         bottom.addWidget(QLabel("Frame", self))
         self.frame_input = QSpinBox(self)
         self.frame_input.setObjectName("frameInput")
@@ -369,15 +482,37 @@ class PlaybackPanel(QWidget):
         self.go_button.setObjectName("goFrameButton")
         self.go_button.setEnabled(False)
         bottom.addWidget(self.go_button)
-        bottom.addSpacing(8)
+        marks = QWidget(self)
+        marker_row = QHBoxLayout(marks)
+        marker_row.setContentsMargins(0, 0, 0, 0)
+        marker_row.setSpacing(8)
         self.trigger_button = QPushButton(material_icon("flag", PRIMARY), "T 지정", self)
         self.trigger_button.setToolTip("현재 프레임의 트리거 마커 지정/해제")
         self.collision_button = QPushButton(material_icon("car_crash", PRIMARY), "충돌 지정", self)
         self.collision_button.setToolTip("현재 프레임의 충돌 마커 지정/해제")
-        bottom.addWidget(self.trigger_button)
-        bottom.addWidget(self.collision_button)
-        bottom.addStretch(1)
-        root.addLayout(bottom)
+        self.speed_point_button = QPushButton(material_icon("add_location", SPEED_POINT), "속도 지점", self)
+        self.speed_point_button.setToolTip(
+            "현재 프레임에 속도 기준 지점 추가/해제 (M)\n"
+            "차량이 차선 끝, 횡단보도 줄 같은 기준을 지날 때마다 추가하세요."
+        )
+        self.speed_panel_button = QToolButton(self)
+        self.speed_panel_button.setIcon(material_icon("speed", PRIMARY))
+        self.speed_panel_button.setCheckable(True)
+        self.speed_panel_button.setToolTip("속도 추정 패널 열기/닫기")
+        self.speed_panel_button.setAccessibleName("속도 추정 패널")
+        self.speed_panel_button.setFixedSize(36, 34)
+        self.speed_panel_button.setStyleSheet("padding:0; min-height:0;")
+        for button in (self.trigger_button, self.collision_button, self.speed_point_button, self.speed_panel_button):
+            marker_row.addWidget(button)
+        self.input_rows = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.input_rows.setSpacing(10)
+        self.input_rows.addWidget(frames, 0, Qt.AlignmentFlag.AlignCenter)
+        self.input_rows.addWidget(marks, 0, Qt.AlignmentFlag.AlignCenter)
+        centered = QHBoxLayout()
+        centered.addStretch(1)
+        centered.addLayout(self.input_rows)
+        centered.addStretch(1)
+        root.addLayout(centered)
 
         self.back_1s.clicked.connect(lambda: self.relative_seconds_requested.emit(-1.0))
         self.back_10f.clicked.connect(lambda: self.relative_frames_requested.emit(-10))
@@ -388,6 +523,8 @@ class PlaybackPanel(QWidget):
         self.next_1s.clicked.connect(lambda: self.relative_seconds_requested.emit(1.0))
         self.trigger_button.clicked.connect(self.trigger_requested)
         self.collision_button.clicked.connect(self.collision_requested)
+        self.speed_point_button.clicked.connect(self.speed_point_requested)
+        self.speed_panel_button.toggled.connect(self.speed_panel_toggled)
         self.go_button.clicked.connect(
             lambda: self.seek_requested.emit(self.frame_input.value() - 1)
         )
@@ -406,7 +543,14 @@ class PlaybackPanel(QWidget):
         button.setAccessibleName(tooltip)
         return button
 
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        self.input_rows.setDirection(
+            QBoxLayout.Direction.TopToBottom if self.width() < 680 else QBoxLayout.Direction.LeftToRight
+        )
+
     def set_video(self, total_frames: int, fps: float) -> None:
+        self._requested_frame = None
         self._total_frames = max(0, int(total_frames))
         self._fps = max(0.0, float(fps))
         maximum = max(0, self._total_frames - 1)
@@ -420,13 +564,14 @@ class PlaybackPanel(QWidget):
         self._fps = 0.0
         self._total_frames = 0
         self._frame = 0
+        self._requested_frame = None
         self.timeline.setRange(0, 0)
         self.timeline.setValue(0)
         self.frame_input.setRange(1, 1)
         self.frame_input.setValue(1)
         self.frame_total.setText("/ 0")
         self.time_label.setText("00:00.00 / 00:00.00")
-        self.timeline.set_markers(None, None)
+        self.timeline.set_markers(None, None, [])
         self.set_video_enabled(False)
 
     def update_total_frames(self, total_frames: int) -> None:
@@ -449,21 +594,47 @@ class PlaybackPanel(QWidget):
             self.next_1s,
             self.trigger_button,
             self.collision_button,
+            self.speed_point_button,
             self.frame_input,
             self.go_button,
         ):
             widget.setEnabled(enabled)
 
     def set_position(self, frame: int) -> None:
+        """Record a decoded position without pulling an active seek backward."""
+
         self._frame = max(0, int(frame))
+        if self._requested_frame == self._frame:
+            self._requested_frame = None
+        if self.timeline.isSliderDown() or self._requested_frame is not None:
+            return
+        self._display_position(self._frame)
+
+    def set_requested_position(self, frame: int) -> None:
+        """Immediately reflect the user's target while decoding is in flight."""
+
+        target = max(0, int(frame))
+        if self._total_frames:
+            target = min(target, self._total_frames - 1)
+        self._requested_frame = target
+        self._display_position(target)
+
+    def clear_pending_seek(self) -> None:
+        """Restore the last decoded position if a requested seek is cancelled."""
+
+        self._requested_frame = None
+        if not self.timeline.isSliderDown():
+            self._display_position(self._frame)
+
+    def _display_position(self, frame: int) -> None:
         if not self._total_frames:
-            self.timeline.setMaximum(max(self.timeline.maximum(), self._frame))
-            self.frame_input.setMaximum(max(self.frame_input.maximum(), self._frame + 1))
-        self.timeline.blockSignals(True)
-        self.timeline.setValue(self._frame)
-        self.timeline.blockSignals(False)
-        self.frame_input.setValue(self._frame + 1)
-        current_seconds = self._frame / self._fps if self._fps else 0.0
+            self.timeline.setMaximum(max(self.timeline.maximum(), frame))
+            self.frame_input.setMaximum(max(self.frame_input.maximum(), frame + 1))
+        blocked = self.timeline.blockSignals(True)
+        self.timeline.setValue(frame)
+        self.timeline.blockSignals(blocked)
+        self.frame_input.setValue(frame + 1)
+        current_seconds = frame / self._fps if self._fps else 0.0
         if not self._total_frames:
             self.time_label.setText(f"{format_timestamp(current_seconds)} / --:--.--")
         else:
@@ -480,8 +651,13 @@ class PlaybackPanel(QWidget):
         self.play_button.setToolTip(label)
         self.play_button.setAccessibleName(label)
 
-    def set_markers(self, trigger: int | None, collision: int | None) -> None:
-        self.timeline.set_markers(trigger, collision)
+    def set_markers(
+        self,
+        trigger: int | None,
+        collision: int | None,
+        speed_frames: list[int] | None = None,
+    ) -> None:
+        self.timeline.set_markers(trigger, collision, speed_frames)
 
 
 __all__ = ["MarkerSlider", "PlaybackPanel", "format_timestamp"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from investigator.schema import (
     normalize_driver_age,
     validation_errors,
 )
+from investigator.speed_estimation import SpeedPoint, points_from_json, points_to_json
 
 SCHEMA_VERSION = 1
 DEFAULT_INSTITUTION = "samsung"
@@ -148,12 +150,17 @@ class InvestigationCase:
                 collision = collisions[0] if collisions else None
             else:
                 collision = max(0, int(raw_collision))
-            normalized_markers[str(marker_key)] = {
+            normalized_marker: dict[str, Any] = {
                 "trigger_frame": trigger,
                 # Keep the persisted plural key for schema-v1/CSV compatibility,
                 # while normalizing every video to zero or one collision frame.
                 "collision_frames": [] if collision is None else [collision],
             }
+            speed_points = points_from_json(marker_value.get("speed_points"))
+            if speed_points:
+                # Optional key: files without speed points stay byte-identical.
+                normalized_marker["speed_points"] = points_to_json(speed_points)
+            normalized_markers[str(marker_key)] = normalized_marker
         self.markers_by_video = normalized_markers
         normalized_rotations: dict[str, int] = {}
         known_videos = {str(Path(path)).casefold() for path in self.videos}
@@ -215,6 +222,81 @@ class InvestigationCase:
     def collision_frames(self) -> list[int]:
         collision = self.collision_frame
         return [] if collision is None else [collision]
+
+    @property
+    def speed_points(self) -> list[SpeedPoint]:
+        """Speed reference points of the active video, ordered by frame."""
+
+        return points_from_json(self._current_markers().get("speed_points"))
+
+    def _store_speed_points(self, points: list[SpeedPoint]) -> None:
+        marker = self._current_markers()
+        marker["trigger_frame"] = marker.get("trigger_frame")
+        marker["collision_frames"] = list(marker.get("collision_frames", []))[:1]
+        if points:
+            marker["speed_points"] = points_to_json(points)
+        else:
+            marker.pop("speed_points", None)
+        self.markers_by_video[self.marker_key] = marker
+        self.mark_edited()
+
+    def toggle_speed_point(self, frame: int) -> bool:
+        """Add a point at ``frame`` or remove the one already there.
+
+        Returns True when a point was added. A new point inherits the distance
+        of the previous segment, since reference features are usually evenly
+        spaced (lane dashes, crosswalk stripes).
+        """
+
+        frame = max(0, int(frame))
+        points = self.speed_points
+        earlier = [point for point in points if point.frame < frame]
+        later = [point for point in points if point.frame > frame]
+        removed = next((point for point in points if point.frame == frame), None)
+        if removed is not None:
+            if earlier and later:
+                # A→P→B becomes A→B: the distances add up when both are known.
+                following = later[0]
+                merged = (
+                    removed.distance_m + following.distance_m
+                    if removed.distance_m is not None and following.distance_m is not None
+                    else None
+                )
+                later[0] = SpeedPoint(following.frame, merged)
+            elif later:
+                # The new first point has no predecessor.
+                later[0] = SpeedPoint(later[0].frame, None)
+            self._store_speed_points([*earlier, *later])
+            return False
+        inherited = next(
+            (point.distance_m for point in reversed(earlier) if point.distance_m is not None),
+            None,
+        )
+        distance = inherited if earlier else None
+        if later:
+            # Inserting between A and B splits A→B, so B's distance must be re-entered.
+            later[0] = SpeedPoint(later[0].frame, None)
+        self._store_speed_points([*earlier, SpeedPoint(frame, distance), *later])
+        return True
+
+    def set_speed_distance(self, frame: int, distance_m: float | None) -> None:
+        current = self.speed_points
+        if not any(point.frame == int(frame) for point in current):
+            raise ValueError("속도 지점을 먼저 지정해 주세요.")
+        if distance_m is not None:
+            distance_m = float(distance_m)
+            if not math.isfinite(distance_m) or distance_m <= 0:
+                raise ValueError("거리는 0보다 큰 유한한 수여야 합니다.")
+            if current[0].frame == int(frame):
+                raise ValueError("시작 지점에는 이전 구간 거리를 입력할 수 없습니다.")
+        points = [
+            SpeedPoint(point.frame, distance_m) if point.frame == int(frame) else point
+            for point in current
+        ]
+        self._store_speed_points(points)
+
+    def clear_speed_points(self) -> None:
+        self._store_speed_points([])
 
     @property
     def missing(self) -> list[str]:

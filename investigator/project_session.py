@@ -23,3 +23,5 @@ class ProjectSession:
     video_path: str | None = None
     video_frame: int = 0
     pending_video_paths: set[str] = field(default_factory=set)
+    statistics_state: dict[str, Any] = field(default_factory=dict)
+    restored: bool = False

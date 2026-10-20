@@ -15,8 +15,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
-    QSizePolicy,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -137,7 +135,6 @@ class CaseListPanel(QWidget):
     case_reordered = Signal(str, int)
     cases_reordered = Signal(list, int)
     export_requested = Signal()
-    open_project_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -153,31 +150,10 @@ class CaseListPanel(QWidget):
         self._active_uid: str | None = None
         self._active_video_item: QTreeWidgetItem | None = None
         self._navigation_deferred = False
-        self._project_name = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 16, 14, 12)
         root.setSpacing(10)
-        caption = QLabel("프로젝트", self)
-        caption.setObjectName("muted")
-        root.addWidget(caption)
-        project_row = QHBoxLayout()
-        self.project_label = QLabel(self)
-        self.project_label.setObjectName("projectFolderName")
-        self.project_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.project_label.setMinimumWidth(0)
-        self.project_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.project_label.setStyleSheet("font-size: 15px; font-weight: 700;")
-        project_row.addWidget(self.project_label, 1)
-        self.project_open_button = QToolButton(self)
-        self.project_open_button.setIcon(material_icon("folder_open", PRIMARY))
-        self.project_open_button.setAccessibleName("프로젝트 폴더 열기")
-        self.project_open_button.setToolTip("프로젝트 폴더 열기 · 현재 탭 / 새 탭")
-        self.project_open_button.setFixedSize(34, 34)
-        self.project_open_button.setStyleSheet("padding: 0;")
-        self.project_open_button.clicked.connect(self.open_project_requested)
-        project_row.addWidget(self.project_open_button)
-        root.addLayout(project_row)
         title_row = QHBoxLayout()
         title = QLabel("사고 / 영상 목록", self)
         title.setObjectName("sectionTitle")
@@ -251,22 +227,6 @@ class CaseListPanel(QWidget):
         self.export_button.setObjectName("exportCsvButton")
         self.export_button.clicked.connect(self.export_requested)
         root.addWidget(self.export_button)
-
-    def set_project_folder(self, folder: str | Path) -> None:
-        path = Path(folder)
-        self._project_name = path.name or str(path)
-        self.project_label.setToolTip(str(path))
-        self.project_label.setAccessibleName(f"현재 프로젝트: {self._project_name}")
-        self._elide_project_name()
-
-    def _elide_project_name(self) -> None:
-        self.project_label.setText(self.project_label.fontMetrics().elidedText(
-            self._project_name, Qt.TextElideMode.ElideRight, max(1, self.project_label.width())
-        ))
-
-    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        super().resizeEvent(event)
-        self._elide_project_name()
 
     def capture_view_state(self) -> dict:
         return {

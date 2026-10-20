@@ -17,6 +17,7 @@ _icuin = WinDLL(r"C:/Windows/System32/icuin.dll")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402 -- native preload must run first
 
+from investigator.ffmpeg_logging import restore_qt_ffmpeg_log_level  # noqa: E402
 from investigator.main_window import MainWindow  # noqa: E402
 from investigator.theme import apply_theme  # noqa: E402
 
@@ -37,8 +38,16 @@ def main(arguments: list[str] | None = None) -> int:
     app.setStyle("Fusion")
     apply_theme(app)
     window = MainWindow(args.workspace)
+    # Also release native decoders for app.quit()/event-loop exits that bypass
+    # the normal window closeEvent. close_video() is intentionally idempotent.
+    app.aboutToQuit.connect(window.video_controller.close_video)
+    app.aboutToQuit.connect(restore_qt_ffmpeg_log_level)
     window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        window.video_controller.close_video()
+        restore_qt_ffmpeg_log_level()
 
 
 if __name__ == "__main__":
