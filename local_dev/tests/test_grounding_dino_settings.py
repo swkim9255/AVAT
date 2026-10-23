@@ -1,9 +1,10 @@
-"""Grounding DINO settings are opt-in and do not alter existing backends."""
+"""Grounding DINO 기본 설정과 기존 백엔드 설정의 호환성을 검증한다."""
 
 from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings
@@ -24,15 +25,86 @@ def job_for(tmp_path, settings):
     return DetectionJob(DetectionRequest(tmp_path / "clip.mp4", 600, 609, 1, ["vehicle"], "trigger"), settings)
 
 
-def test_new_fields_preserve_old_positional_constructor_and_yoloe_default():
+def test_dino_default_preserves_old_positional_constructor_and_backend_model_mapping():
     legacy = DetectionSettings("python", "model", "cpu", True, "", "sam3")
     assert legacy.backend == "sam3"
     assert legacy.dino_chunk_size == 8
     assert legacy.dino_box_threshold == 0.3
     assert legacy.dino_text_threshold == 0.25
     assert legacy.dino_fp16 is True
-    assert DetectionSettings().backend == "yoloe"
+    assert DetectionSettings().backend == "grounding_dino"
+    assert DetectionSettings().model == process.DINO_BASE_MODEL
     assert process.default_model("grounding_dino") == process.DINO_BASE_MODEL
+    assert process.default_model("yoloe") == process.YOLOE_MODEL
+    assert process.default_model("yoloe").endswith("yoloe-11l-seg.pt")
+    assert process.default_model("sam3") == process.SAM3_MODEL
+
+
+def test_new_preferences_default_to_dino_without_writing_settings(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
+    store = QSettings(str(tmp_path / "new-preferences.ini"), QSettings.Format.IniFormat)
+    restored = DetectionSettings.load(store)
+    assert restored.backend == "grounding_dino"
+    assert restored.model == process.DINO_BASE_MODEL
+    assert not store.allKeys()
+
+
+@pytest.mark.parametrize("backend", ["yoloe", "sam3", "efficientsam3"])
+def test_explicit_existing_backend_preferences_remain_unchanged(qtbot, tmp_path, monkeypatch, backend):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
+    store = QSettings(str(tmp_path / "existing-preferences.ini"), QSettings.Format.IniFormat)
+    configured = DetectionSettings(sys.executable, "existing-model", "cpu", True, backend=backend)
+    configured.save(store)
+    assert DetectionSettings.load(store) == configured
+
+
+def test_old_preferences_without_backend_still_use_sam3(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
+    store = QSettings(str(tmp_path / "legacy-preferences.ini"), QSettings.Format.IniFormat)
+    store.setValue(process.SETTINGS_PYTHON, sys.executable)
+    store.setValue(process.SETTINGS_MODEL, "legacy-sam-model")
+    restored = DetectionSettings.load(store)
+    assert restored.backend == "sam3"
+    assert restored.model == "legacy-sam-model"
+    assert not store.contains(process.SETTINGS_BACKEND)
+
+
+def test_default_dialog_selects_dino_and_keeps_legacy_choices(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(panel, "REPOSITORY_ROOT", tmp_path)
+    dialog = DetectionSettingsDialog(DetectionSettings())
+    qtbot.addWidget(dialog)
+    assert dialog.backend_combo.itemData(0) == "grounding_dino"
+    assert dialog.backend_combo.currentData() == "grounding_dino"
+    assert "기본" in dialog.backend_combo.currentText()
+    assert "기본" not in dialog.backend_combo.itemText(dialog.backend_combo.findData("yoloe"))
+    assert not dialog.dino_options_widget.isHidden()
+    assert dialog.settings().model == process.DINO_BASE_MODEL
+
+
+@pytest.mark.parametrize("message", ["No module named 'torch'", "401 unauthorized"])
+def test_shared_error_messages_do_not_misidentify_dino_as_sam3(message):
+    assert "SAM 3" not in process.friendly_error(message)
+
+
+def test_worker_defaults_to_dino_base_and_fp16(tmp_path, monkeypatch):
+    from investigator.detection_worker import __main__ as cli
+    from investigator.detection_worker import backend as factory
+
+    clip = tmp_path / "unused-clip.mp4"
+    clip.touch()
+    calls = []
+
+    def fake_backend(model, device, half, backend, **options):
+        calls.append((model, device, half, backend, options))
+        return SimpleNamespace(device="cpu", fallback_reason=None)
+
+    monkeypatch.setattr(factory, "create_backend", fake_backend)
+    monkeypatch.setattr(cli, "run", lambda *args: {"detections": []})
+    code = cli.main(["--video", str(clip), "--output", str(tmp_path / "result.json")])
+    assert code == cli.EXIT_OK
+    assert calls == [(process.DINO_BASE_MODEL, "auto", True, "grounding_dino", {
+        "chunk_size": 8, "box_threshold": 0.3, "text_threshold": 0.25,
+    })]
 
 
 def test_dino_qsettings_roundtrip(qtbot, tmp_path, monkeypatch):
@@ -200,3 +272,16 @@ def test_dino_selection_loads_dedicated_preset_without_preference_writes(qtbot, 
     dialog.backend_combo.setCurrentIndex(dialog.backend_combo.findData("yoloe"))
     assert dialog.settings().model == "local-yolo.pt"
     assert dialog.settings().python == "original.exe"
+
+
+def test_dino_selection_uses_main_dino_manifest_if_no_dedicated_preset(qtbot, manifest, monkeypatch):
+    path, data = manifest
+    main_manifest = path.parent / process.RUNTIME_MANIFEST
+    main_manifest.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(panel, "REPOSITORY_ROOT", path.parent)
+    dialog = DetectionSettingsDialog(DetectionSettings(backend="yoloe", model="local-yolo.pt"))
+    qtbot.addWidget(dialog)
+    dialog.backend_combo.setCurrentIndex(dialog.backend_combo.findData("grounding_dino"))
+    assert dialog.settings().model == str(path.parent / "model")
+    assert dialog.settings().python == str(path.parent / "python.exe")
+    assert dialog.settings().offline is True

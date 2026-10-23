@@ -1,9 +1,9 @@
 {
   "version": 1,
   "backend": "grounding_dino",
-  "python": ".venv-yoloe/Scripts/python.exe",
+  "python": ".venv/Scripts/python.exe",
   "model": "runtime/models/grounding-dino-base",
-  "device": "cuda",
+  "device": "auto",
   "offline": true,
   "dino_chunk_size": 8,
   "dino_box_threshold": 0.3,

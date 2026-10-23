@@ -1,8 +1,12 @@
 {
   "version": 1,
-  "backend": "yoloe",
-  "python": ".venv-yoloe/Scripts/python.exe",
-  "model": "runtime/models/yoloe-11l/yoloe-11l-seg.pt",
+  "backend": "grounding_dino",
+  "python": ".venv/Scripts/python.exe",
+  "model": "runtime/models/grounding-dino-base",
   "device": "auto",
-  "offline": true
+  "offline": true,
+  "dino_chunk_size": 8,
+  "dino_box_threshold": 0.3,
+  "dino_text_threshold": 0.25,
+  "dino_fp16": true
 }

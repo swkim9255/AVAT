@@ -17,10 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "requirements.txt"
 DEVELOPMENT = ROOT / "local_dev" / "requirements-dev.txt"
 BASE_ONLY = {"pyside6", "opencv-python", "numpy"}
-DETECTION_ONLY = {
-    "torch", "torchvision", "transformers", "pillow", "ultralytics", "clip",
-    "timm", "einops", "ftfy", "wcwidth", "pycocotools",
-}
+DETECTION_ONLY = {"torch", "torchvision", "transformers", "pillow"}
 DEVELOPMENT_ONLY = {"pytest", "pytest-qt", "ruff"}
 
 
@@ -102,7 +99,10 @@ def test_cuda_wheels_satisfy_public_pytorch_version_pins(name, version):
     assert requirements[name].specifier.contains(version)
 
 
-def test_yoloe_dependencies_and_reproducible_tokenizer():
+def test_grounding_dino_runtime_needs_no_other_backend_or_git_source():
     requirements = _requirements(RUNTIME)
-    assert requirements["ultralytics"].specifier.contains("8.3.253")
-    assert requirements["clip"].url.endswith("@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40")
+    other_backend_dependencies = {
+        "ultralytics", "clip", "timm", "einops", "ftfy", "wcwidth", "pycocotools",
+    }
+    assert not requirements.keys() & other_backend_dependencies
+    assert all(requirement.url is None for requirement in requirements.values())

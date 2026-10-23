@@ -11,7 +11,7 @@
 - OpenCV 기반 재생/일시정지, 영상 소리 출력, ±1/10프레임, ±1초 이동, 프레임 번호 직접 이동
 - 영상마다 트리거 `T` 1개와 충돌 `C` 1개 타임라인 마커 지정·저장
 - 영상별 속도 기준 지점·구간 거리 입력, 구간 평균 속도와 T 시점 속도 추정·그래프
-- 단일 프레임·타임라인 드래그·직접 입력 구간의 객체 검출(기본 YOLOE, 선택 SAM 3·Grounding DINO·EfficientSAM3), 트리거/충돌 관여 객체 라벨링과 조사 탭 반영
+- 단일 프레임·타임라인 드래그·직접 입력 구간의 객체 검출(Grounding DINO), 트리거/충돌 관여 객체 라벨링과 조사 탭 반영
 - 식별 구분을 우측 상단에 고정하고 조사 항목과 자유 텍스트 비고를 9개 탭으로 제공
 - 사고 구분 번호 최대 13자리와 `20-24세`~`95-99세`의 5세 단위 운전 연령 선택
 - 사고 당시 주행거리는 자리수 제한 없이 숫자로 입력
@@ -98,8 +98,8 @@ python main.py --workspace "D:\investigations"
 1. **분석 구간**의 시작/끝 프레임(1부터, 끝 포함)을 직접 입력하거나 **현재 프레임을 시작으로 지정 / 현재 프레임을 끝으로 지정**, **T~C**(트리거~충돌 마커)를 사용합니다. 시작과 끝을 같게 하면 한 프레임만 검출합니다. 재생·탐색은 입력한 구간을 바꾸지 않습니다. 타임라인에서 **Shift+드래그**해도 구간이 선택되며, 선택 구간은 타임라인에 띠로 표시됩니다. **간격**은 구간 안에서 몇 프레임마다 처리할지 정합니다.
 2. 트리거·충돌 역할을 고르지 않고 **공통 객체**로 한 번만 검출합니다. 같은 결과를 `[객체]`·`[충돌]` 양쪽 탭에 각각 반영할 수 있으며, 검출만으로 조사값을 자동 변경하지 않습니다. 기존 저장 객체의 역할 정보는 보존합니다.
 3. **검출 클래스**는 트리거·충돌 관여 객체 합집합을 기반으로 한 **21개 검출 분류·28개 프롬프트**입니다. 차량, 이륜·PM, 자전거, 보행자와 기존 시설물·건물/조경·기타 17종을 검출합니다. `investigator/assets/detection_taxonomy.json`에서 고정 키·프롬프트·허용 세분류·추천값을 관리하며, **조사 양식의 선택지 편집과 독립적**입니다.
-4. **검출 실행**은 별도 프로세스에서 기본 **YOLOE 11-L** 또는 선택한 SAM3/EfficientSAM3/Grounding DINO를 실행합니다. 취소·실패 시 기존 결과는 유지합니다. 성공 결과는 대상 사고의 `investigations.db`에 자동 저장하며, 다른 사고의 미저장 변경은 저장하지 않습니다. 검출은 선택 기능이므로 검출·라벨 편집만으로 조사 완료 상태를 해제하지 않습니다. 저장 실패 시 경고를 확인한 뒤 임시저장으로 다시 저장하세요.
-5. 프레임 간 같은 **대분류** 객체를 기존 위치·크기 규칙으로 연결합니다. `V001`(차량)·`M`(이륜·PM)·`B`(자전거)·`P`(보행자)·`R`(시설·건물)·`A`(동물)·`D`(낙하물) ID를 사용하며, 직접 그린 객체는 `U001`부터입니다. SAM3 영상 메모리 기반 추적은 아닙니다.
+4. **검출 실행**은 별도 프로세스에서 **Grounding DINO**를 실행합니다. 취소·실패 시 기존 결과는 유지합니다. 성공 결과는 대상 사고의 `investigations.db`에 자동 저장하며, 다른 사고의 미저장 변경은 저장하지 않습니다. 검출은 선택 기능이므로 검출·라벨 편집만으로 조사 완료 상태를 해제하지 않습니다. 저장 실패 시 경고를 확인한 뒤 임시저장으로 다시 저장하세요.
+5. 프레임 간 같은 **대분류** 객체를 기존 위치·크기 규칙으로 연결합니다. `V001`(차량)·`M`(이륜·PM)·`B`(자전거)·`P`(보행자)·`R`(시설·건물)·`A`(동물)·`D`(낙하물) ID를 사용하며, 직접 그린 객체는 `U001`부터입니다. 검출 박스의 위치·크기 기반 연결이며 별도의 영상 메모리 추적 모델을 사용하지 않습니다.
 
 표에서 객체를 선택(영상 위 박스를 클릭해도 선택)한 뒤 아래 줄에서 편집합니다.
 
@@ -120,157 +120,50 @@ python main.py --workspace "D:\investigations"
 
 ### 검출 환경 준비
 
-AVAT 본체와 검출은 **하나의 Python 환경에 함께 설치**합니다. 실행용 `requirements.txt` 하나가 공통 PySide6·OpenCV·NumPy와 PyTorch·Torchvision·Transformers·Pillow, 기본 YOLOE·CLIP 토크나이저, EfficientSAM3 추론 라이브러리를 함께 관리합니다. NumPy **2.1.3**, Pillow **11.1.0**, OpenCV **4.11.0.86** 조합을 유지하며 Ultralytics는 **8.3.253**으로 고정합니다. 학습·내보내기 extras는 설치하지 않습니다. 설치 명령은 위 **설치 및 실행**과 같습니다.
+현재 실행·배포 대상과 새 설정의 기본값은 **Grounding DINO**입니다. 기존 YOLOE·SAM3·EfficientSAM3 구현과 테스트, 로컬 가중치 및 호환용 선택지는 보존하지만 이번 설치·배포 구성에 포함하지 않습니다. 기존 사용자 설정을 강제로 덮어쓰지는 않으므로 다른 모델을 저장한 PC에서는 **설정 → 객체 검출 환경…**에서 Grounding DINO로 변경해야 합니다.
 
-패키지로 설치할 때의 `python -m pip install ".[detection]"`도 `requirements.txt`와 같은 의존성을 사용합니다. 자동 검출 없이 재생·조사·수동 박스 편집만 쓰는 PC는 `python -m pip install -e .`로 본체 의존성(PySide6·OpenCV·NumPy)만 설치할 수 있습니다.
+AVAT 본체와 검출은 **하나의 독립 Python 환경에 함께 설치**합니다. 실행용 `requirements.txt`는 PySide6·OpenCV·NumPy와 PyTorch·Torchvision·Transformers·Pillow 및 전이 의존성을 설치합니다. NumPy **2.1.3**, Pillow **11.1.0**, OpenCV **4.11.0.86** 조합을 유지합니다. Ultralytics·CLIP·MobileCLIP 및 다른 모델의 연구 소스나 변환 도구는 Grounding DINO 실행에 필요하지 않습니다. 설치 명령은 위 **설치 및 실행**과 같습니다.
 
-검출용 Python은 다음 순서로 정합니다. **설정 → 객체 검출 환경…**에서 저장한 Python이 있으면 그것을, 없으면 프로그램 폴더(저장소 루트)의 `detection-runtime.json`을, 그 파일도 없으면 앱을 실행한 Python을 사용합니다. 검출은 UI 응답성과 오류 격리를 위해 별도 **프로세스**(`<Python> -m investigator.detection_worker`)로 실행하지만, 별도 **가상환경**은 필수가 아닙니다. 앱과 같은 환경에 `requirements.txt`를 모두 설치했다면 검출용 Python을 따로 지정하지 않아도 됩니다. 기존의 분리 환경 설정도 계속 지원합니다.
+패키지 설치의 `python -m pip install ".[detection]"`도 같은 Grounding DINO 의존성을 사용합니다. 자동 검출 없이 재생·조사·수동 박스 편집만 쓰는 PC는 `python -m pip install -e .`로 본체 의존성(PySide6·OpenCV·NumPy)만 설치할 수 있습니다.
 
-위 설치 명령은 인터넷이 연결된 준비 PC용입니다. 폐쇄망에는 미리 준비한 Windows용 패키지와 로컬 모델이 필요합니다. CUDA 휠은 PC의 드라이버와 맞아야 하며 CPU 전용이면 첫 명령의 index URL을 `https://download.pytorch.org/whl/cpu`로 바꿉니다. GPU를 사용할 수 없으면 CPU로 실행할 수 있지만 오래 걸릴 수 있습니다. 설치와 모델 다운로드는 앱 실행 시 자동으로 수행하지 않습니다. Hugging Face에서 SAM 3(`facebook/sam3`)를 새로 다운로드할 때는 사용 동의와 인증(`hf auth login`)이 필요하지만, 완전한 로컬 모델을 준비한 오프라인 실행에는 로그인하지 않습니다.
+검출은 UI 응답성과 오류 격리를 위해 별도 **프로세스**(`<Python> -m investigator.detection_worker`)에서 실행하지만 별도 가상환경은 필요하지 않습니다. 실행용 라이브러리는 앱을 실행하는 `.venv`에 모두 설치합니다. 검출용 Python은 앱의 사용자 설정, 프로그램 폴더의 `detection-runtime.json`, 앱을 실행한 Python 순서로 정합니다. 이전에 저장한 설정이 파일보다 우선할 수 있으므로 **설정 → 객체 검출 환경…**에서 Grounding DINO와 새 환경의 Python·모델 경로를 확인하세요.
 
-모델은 ID 대신 미리 내려받은 로컬 폴더를 지정할 수 있어 오프라인 PC에서도 사용할 수 있습니다. 로컬 폴더는 `config.json`, processor 설정, tokenizer, 실제 HF 가중치(`model.safetensors` 또는 모든 shard)를 포함해야 합니다. Meta 원본 `sam3.pt`만 지정해서는 실행할 수 없습니다. **오프라인 실행**을 선택하면 모델 다운로드를 차단합니다. 모델 ID를 쓰면 첫 검출 시 모델 다운로드가 필요할 수 있지만 영상 프레임은 외부로 전송하지 않고 지정한 PC에서 처리합니다. 검출은 보조 수단이므로 라벨은 반드시 사람이 확인하세요. 작은 시설물(연석·볼라드·과속방지턱)과 화단·흙더미·도로낙하물은 누락·오검출이 많을 수 있습니다. 구간 내 프레임을 읽지 못하면 이번 검출을 실패 처리하고 기존 라벨을 유지합니다.
+### Grounding DINO 오프라인 설정과 모델
 
-### 현재 samsungfire 작업 공간의 Windows 실행 환경
+프로그램 폴더의 `detection-runtime.example.json`을 `detection-runtime.json`으로 복사해 사용합니다. 기본 예시는 다음과 같습니다.
 
-프로젝트 루트의 `detection-runtime.json`(Git 제외)은 기본 YOLOE 백엔드, 검출용 `.venv-yoloe/Scripts/python.exe`, 로컬 모델 `runtime/models/yoloe-11l/yoloe-11l-seg.pt`, 자동 장치, 오프라인 모드를 지정합니다. 다른 백엔드용 설정은 `detection-runtime.*.json`으로 보관하며 파일 형식은 `detection-runtime*.example.json`을 참고하세요. 앱에서 검출용 Python을 별도로 저장하지 않았다면 이 파일을 자동으로 사용하고, 설정을 읽는 것만으로 사용자 설정을 덮어쓰지 않습니다. 상대 경로는 이 JSON 파일이 있는 폴더 기준입니다. 모델과 실제 실행 설정은 용량·PC별 경로 때문에 Git에서 제외합니다.
-
-검증에 사용한 조합은 Windows Python 3.11.9, PyTorch 2.11.0+cu128, torchvision 0.26.0+cu128, Transformers 5.20.2입니다. 이 작업 공간의 검출용 가상환경은 **독립 환경이 아닙니다.** `.venv-yoloe`는 `.pth` 파일로 `.venv-efficient-sam3`·`.venv-sam3`·`avat_ai/.venv`의 패키지를, `.venv-sam3`는 `avat_ai/.venv`의 PyTorch를 함께 사용합니다. 따라서 `avat_ai/.venv`가 없으면 torch·OpenCV를 불러오지 못해 검출이 실행되지 않으며(2026-10-23 `avat_ai/` 제거 후 확인), 이 가상환경들은 다른 PC로 복사해 쓸 수 없습니다. 다른 PC와 배포에는 아래 **다른 PC·폐쇄망 배포**의 단일 환경을 사용합니다.
-
-Ubuntu에서는 인증된 원본 가중치만 `runtime/checkpoints/sam3.pt`로 복사했습니다. 현재 추론은 Windows에서 실행하며 WSL·Ubuntu·온라인 로그인에 의존하지 않습니다. 원본 Linux 가상환경과 인증 파일은 복사·변경하지 않습니다.
-
-원본 Meta 가중치의 로컬 변환은 다음 명령으로 수행합니다. 공식 Hugging Face 매핑 소스와 CLIP tokenizer는 사전에 로컬에 준비해야 하며, 변환 자체는 네트워크를 사용하지 않습니다. 기존 출력 폴더는 덮어쓰지 않으므로 재변환할 때는 새로운 출력 경로를 지정합니다.
-
-```powershell
-.\.venv-sam3\Scripts\python.exe local_dev/tools/convert_sam3_native.py --checkpoint runtime/checkpoints/sam3.pt --output runtime/models/sam3 --mapping runtime/tools/upstream_sam3_conversion.py --tokenizer runtime/tokenizers/clip
+```json
+{
+  "version": 1,
+  "backend": "grounding_dino",
+  "python": ".venv/Scripts/python.exe",
+  "model": "runtime/models/grounding-dino-base",
+  "device": "auto",
+  "offline": true
+}
 ```
 
-변환은 HF 이미지 모델의 전체 가중치 이름·크기 일치와 strict 로드를 검사합니다. 별도 추적기, SAM2 전용 neck, 현재 HF에서 사용하지 않는 점 입력 전용 projection 및 사전계산 RoPE 버퍼만 명시적으로 제외합니다. 학습 가중치 누락은 허용하지 않습니다. 원본 SHA256·변환기 소스·버전·개수는 모델 폴더의 `provenance.json`에 기록합니다. 기존 `.pt` 원본은 보존합니다.
+상대 경로는 이 JSON 파일이 있는 폴더 기준입니다. Git에 포함되지 않는 실제 설정 파일과 로컬 가중치는 새 PC에서 별도로 준비합니다. `device: "auto"`는 사용 가능한 장치를 선택하며 CPU 추론도 가능하지만 느릴 수 있습니다. CUDA 사용 시에는 대상 드라이버와 호환되는 PyTorch 휠을 준비해야 합니다.
 
-실제 앱과 동일한 `QApplication → DetectionJob → QProcess → SAM 3` 경로를 프로젝트/사용자 설정 변경 없이 확인하려면 다음 명령을 사용합니다. 프레임은 0부터 시작하며, 끝 프레임을 생략하면 한 프레임만 처리합니다. 성공 시 검출 결과의 도메인 병합과 직렬화도 확인합니다.
+`runtime/models/grounding-dino-base/`에는 다음 **7개 파일**을 함께 둡니다. 현재 로컬 파일 합계는 약 **934MB(891MiB)**이며 `model.safetensors` 하나만 복사해서는 실행할 수 없습니다.
 
-```powershell
-.\.venv\Scripts\python.exe local_dev/tools/smoke_native_detection_gui.py --video "영상경로.mp4" --classes vehicle --start-frame 100
-```
+- `config.json`
+- `model.safetensors`
+- `preprocessor_config.json`
+- `special_tokens_map.json`
+- `tokenizer.json`
+- `tokenizer_config.json`
+- `vocab.txt`
 
-실행 API와 인증 안내: [SAM 3 공식 문서](https://huggingface.co/docs/transformers/model_doc/sam3), [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli).
+모델 출처는 `IDEA-Research/grounding-dino-base`입니다. 모델 폴더의 다운로드용 `.cache/`는 실행에 필요하지 않습니다. 로컬 모델 폴더와 `offline: true`를 사용하면 로컬 파일만 읽으며 실행 중 모델 다운로드를 시도하지 않습니다. 파일이 누락되면 미리 보완해야 하며 온라인 모델 ID로 대체하지 않습니다.
 
-### YOLOE 오프라인 모델 준비
+**설정 → 객체 검출 환경…**에서 Python·로컬 모델 경로·오프라인 실행을 확인합니다. 청크 크기(기본 8), 박스 임계값(0.30), 텍스트 임계값(0.25), CUDA FP16 사용 여부도 조정할 수 있습니다. 대분류별 프롬프트는 같은 청크에 유지하며 한 대분류의 프롬프트가 청크 크기보다 많으면 해당 청크만 설정 크기를 초과할 수 있습니다. Grounding DINO는 **박스 전용**이므로 마스크를 만들지 않습니다. 기존 클래스별 임계값, 중복 제거, 위치 기반 추적, 검수 절차는 유지하며 매핑할 수 없는 라벨은 결과 JSON의 `mapping_failures`와 로그에 보존합니다.
 
-`detection-runtime.yoloe.example.json`을 참고해 로컬 `.pt` 파일을 지정합니다.
-모델 폴더에는 `yoloe-11l-seg.pt`와 `mobileclip_blt.ts`를 함께 준비합니다.
-선택한 프롬프트 임베딩은 실행 시작 시 한 번만 준비하고 프레임마다 전체 프롬프트를 한 번에
-추론합니다. 새 프롬프트를 준비하지 않는 배포에서는 검증된
-`yoloe-11l-seg.text-embeddings.npz` 캐시를 인코더 대신 사용할 수 있습니다. 캐시는 모델
-SHA256과 프롬프트 목록·순서를 검증하며, 전체 프롬프트 캐시에서 선택한 부분만 사용할 수도 있습니다.
+검출은 보조 수단이므로 라벨은 반드시 사람이 확인하세요. 작은 시설물과 화단·흙더미·도로낙하물은 누락·오검출이 있을 수 있습니다. 구간 내 프레임을 읽지 못하면 이번 검출을 실패 처리하고 기존 라벨을 유지합니다. 실제 모델 추론과 인터넷이 차단된 대상 PC에서의 동작은 아직 이번 구성으로 검증하지 않았습니다.
 
-캐시 준비 명령(기존 파일은 덮어쓰지 않음):
+### 기존 개발 환경을 재사용할 때
 
-```powershell
-.\.venv-yoloe\Scripts\python.exe local_dev/tools/cache_yoloe_embeddings.py --model runtime/models/yoloe-11l/yoloe-11l-seg.pt
-```
-
-실행 중 패키지·가중치·텍스트 인코더를 자동 다운로드하지 않습니다. YOLOE 마스크는
-원본 크기로 복원하며 현재 Ultralytics 이진 마스크 경로는 마스크 임계값 0.5만 지원합니다.
-현재 `.venv-yoloe`는 검증용으로 기존 torch 환경을 공유하므로 가상환경 폴더만 복사해 배포하지
-마세요. 폐쇄망에는 CLIP을 포함한 Windows 휠과 로컬 모델을 별도로 준비해야 합니다.
-EXE 배포 전 Ultralytics의 AGPL-3.0/Enterprise 라이선스 조건도 확인해야 합니다.
-
-Ultralytics의 설정 파일과 예측 폴더(`save=False`여도 만드는 빈 `runs/<작업>/predict`)는 검출 작업마다
-만드는 임시 폴더 안에만 생기고 작업이 끝나면 지웁니다. 프로젝트 루트에 생긴 `Ultralytics/`·`runs/`는
-이전 앱 실행이나 직접 실행한 실험의 생성물일 수 있습니다. 앱 실행에 필요하지 않지만 사용자 결과물이 없는지 확인한 뒤 정리합니다. 이번 체크포인트에서는 기존 폴더를 삭제하지 않았습니다.
-
-### Grounding DINO (박스 전용)
-
-**설정 → 객체 검출 환경**에서 **Grounding DINO**를 선택합니다. 기본 모델은
-`IDEA-Research/grounding-dino-base`이며 tiny 모델도 지정할 수 있습니다. 오프라인에서는
-`detection-runtime.grounding-dino.example.json`처럼 processor·tokenizer·config·가중치를 포함한
-로컬 모델 폴더를 지정합니다. 기존 검출용 torch·transformers 환경을 그대로 사용합니다.
-
-설정에서 청크 크기(기본 8), 박스 임계값(0.30), 텍스트 임계값(0.25), CUDA FP16 사용 여부를
-조정합니다. 대분류별 프롬프트는 같은 청크에 유지하며 한 대분류의 프롬프트가 청크 크기보다
-많으면 해당 청크만 설정 크기를 초과할 수 있습니다. 기존 클래스별 임계값과 중복 제거·추적·검수
-절차는 유지합니다. 마스크를 만들지 않으므로 segmentation overlay는 오류 없이 건너뜁니다.
-매핑할 수 없는 라벨은 결과 JSON의 `mapping_failures`와 로그에 보존합니다.
-
-```powershell
-.\.venv-yoloe\Scripts\python.exe -m investigator.detection_worker --backend grounding_dino --model runtime/models/grounding-dino-base --device cuda --half --dino-chunk-size 8 --dino-box-threshold 0.3 --dino-text-threshold 0.25 --video "영상경로.mp4" --start-frame 600 --end-frame 610 --frame-step 1 --output runtime/dino-result.json
-```
-
-직전 YOLOE 테스트의 영상 해시·프레임 목록을 검증하고 **Grounding DINO만** 실행하려면
-`python -m local_dev.tools.run_grounding_dino_test --reference 이전테스트.json --output-dir 새결과폴더`를
-사용합니다. 검출 JSON·매핑 실패 로그·박스 프리뷰 3장을 생성하며 다른 모델이나 비교 리포트는
-생성하지 않습니다. 프레임 번호는 0부터 시작합니다.
-
-## EfficientSAM3 비교 모드 (실험)
-
-**설정 → 객체 검출 환경 → 검출 모델**에서 **YOLOE 11-L (기본)**, **SAM3** 또는
-**EfficientSAM3 TV-M (경량·실험)**을 선택합니다. 기존에 명시적으로 저장한 모델 설정은 유지하며,
-모델을 바꾸는 것만으로 기존 검출 결과를 삭제하거나 사고 데이터를 저장하지 않습니다.
-재검출 결과는 기존과 같은 검토·반영 절차를 따릅니다. 두 모델의 신뢰도는 같은 값이라도
-동일한 검출 품질을 뜻하지 않으므로, 경량판의 박스 감소를 정확도 향상으로 해석하지 않습니다.
-
-이 작업 공간에는 별도 `.venv-efficient-sam3` 비교 환경과
-`runtime/models/efficientsam3-tv-m` 가중치, `runtime/efficientsam3` 연구 소스를 준비했습니다.
-`detection-runtime.efficientsam3.json`은 경량 모델 선택 시에만 읽는 로컬 프리셋이며,
-기존 `detection-runtime.json`이나 사용자 설정을 자동 변경하지 않습니다.
-모델·소스·로컬 설정은 Git에 포함하지 않습니다. 다른 PC에서는
-`requirements.txt`로 검출 환경과 추가 추론 라이브러리(timm·einops·ftfy·pycocotools)를 설치하고,
-소스·가중치를 함께 준비해야 합니다. 현재 로컬 비교 환경은 기존 torch 환경을 공유하므로
-가상환경 폴더만 복사하는 배포 방식으로 사용하지 않습니다.
-
-- 연구 소스: `https://github.com/SimonZeng7108/efficientsam3`, 검증 커밋
-  `bd0936c788fed8d51fa799437f05abd97b401b06`.
-- 가중치: Hugging Face `Simon7108528/EfficientSAM3`의
-  `efficientsam3_ft/efficientsam3_tinyvit.pt`.
-- 모델 폴더에 `local_dev/examples/efficientsam3-tv-m.json`을 `avat-efficient.json`이라는
-  이름으로 복사하고 상대 소스·가중치 경로를 맞춥니다. 설정 예시는
-  `detection-runtime.efficientsam3.example.json`입니다.
-- 추론 전 가중치 전체 키·형상을 엄격하게 검사합니다. 일부 가중치가 누락된 상태로
-  임의 초기화 모델을 실행하지 않습니다. 이미지 특징은 프레임당 한 번, 텍스트 특징은
-  프롬프트당 한 번 계산하여 재사용합니다. 이미지 추론은 Windows Python 3.11에서 검증했으며,
-  연구 저장소 전체의 학습·영상 추적 기능이나 EXE 배포 완료를 의미하지 않습니다.
-
-재현 가능한 비교 명령(원본 영상·프로젝트 DB를 변경하지 않음):
-
-```powershell
-.\.venv-efficient-sam3\Scripts\python.exe local_dev/tools/benchmark_detection.py --video "영상경로.mp4" --backends sam3,efficientsam3 --output local_dev/reports/new-comparison.json
-```
-
-각 모델은 별도 프로세스에서 실행하며, 2회 워밍업 후 동일 10개 프레임을 측정합니다.
-모델 로드·워밍업은 제외하고 프레임 읽기, 전처리·추론, 마스크·NMS·폴리곤·추적 시간을
-분리합니다. 최종 파일 저장·DB 반영·UI 갱신은 프레임 시간에 포함하지 않습니다.
-JSON에는 버전·GPU·수치 정밀도·프레임별 시간·박스 결과를 기록하고, 같은 이름의
-폴더에 좌우 비교 이미지 3장을 생성합니다. 기존 출력은 덮어쓰지 않습니다.
-
-사각형 박스 대신 원본 영상 위에 실제 픽셀 영역을 반투명하게 표시하는 비교는 다음과 같습니다.
-
-```powershell
-.\.venv-efficient-sam3\Scripts\python.exe local_dev/tools/compare_segmentation_overlay.py --video "영상경로.mp4" --backends sam3,efficientsam3 --output local_dev/reports/new-overlay --alpha 0.4
-```
-
-동일 프레임·검출 임계값으로 SAM3와 EfficientSAM3를 비교하며, 같은 클래스에는 같은 색상을
-사용합니다. 기본값은 3개 프레임의 전체 21종/차량 단독 비교 이미지 6장입니다. 각 모델의
-원본 해상도 오버레이와 설정 기록도 함께 저장합니다. 새 출력 폴더만 사용하며 프로젝트 데이터나
-원본 영상을 변경하지 않습니다. 프레임은 `--frames 100,600,1000`처럼 0부터 시작하는 번호로 지정합니다.
-
-YOLOE 비교는 `.venv-yoloe`에서 위 명령의 `--backends sam3,yoloe`를 사용합니다.
-기존 33개 프롬프트 재현 설정은 `local_dev/examples/detection-taxonomy-legacy33.json`이며
-`--config`로 지정할 수 있습니다. YOLOE 비교에는 새 28개 프롬프트 설정을 공통으로 사용합니다.
-
-2026-10-23 로컬 RTX 5060 Ti에서 동일 영상의 연속 10프레임(0-based 600~609)을 측정한 결과입니다.
-로드·텍스트 준비·워밍업 제외, 순차 디코딩·추론·후처리·추적 포함이며 모델별 기본 입력 크기를 사용합니다.
-
-| 구성 | 초/프레임 | 프레임별 검출 수의 합 |
-|---|---:|---:|
-| 기존 SAM3 / 33 프롬프트 | 2.3961 | 255 |
-| 변경 SAM3 / 28 프롬프트 | 2.1659 | 269 |
-| YOLOE / 28 프롬프트 | 0.2984 | 22 |
-
-YOLOE는 이 구간에서 차량 16회·보행자 6회만 검출하고 시설물은 검출하지 못했습니다.
-따라서 이 수치는 동일 검출 품질에서의 가속이나 정확도 평가가 아닙니다. 세부 설정·단계별 시간·
-대분류별 검출 수는 `local_dev/reports/yoloe-coarse-20261023-contiguous-final.json` 및
-`yoloe-coarse-20261023-contiguous-legacy33-final.json`에 기록했습니다. 실제 QProcess 경계의
-3프레임 추론·객체 병합/직렬화도 검증했습니다.
+2026-10-23 확인한 과거 `.venv-yoloe`는 삭제된 환경의 패키지를 참조해 `torch`·`cv2`를 찾지 못했습니다. 현재 루트 환경에도 PyTorch가 준비되어 있지 않으므로 **설정 변경만으로 검출이 실행되는 상태는 아닙니다.** 이 연결형 환경을 복사하거나 이름만 바꾸지 말고 위 설치 절차로 독립 `.venv`를 만드세요. 기존 가상환경·다른 모델 가중치는 이번 정리에서 삭제하지 않습니다.
 
 ## 통계 분석
 
@@ -501,90 +394,93 @@ CSV 저장 위치를 선택하면 기존 조사 CSV와 `<CSV 파일명>_속도�
 
 ### 현재 코드 기준으로 확인된 사항
 
-- 앱은 소스 실행(`python main.py`)을 기준으로 만들어져 있으며 EXE 빌드 설정은 아직 없습니다.
-- 영상 디코더와 객체 검출은 각각 별도 프로세스이며, 둘 다 `<Python 실행 파일> -m <모듈>`로 시작합니다(`video_decoder.py`, `detection_process.py`).
-- `detection-runtime.json`에 로컬 모델 경로를 지정하면 YOLOE·SAM 3·Grounding DINO는 로컬 파일만 읽고 자동 다운로드하지 않습니다. YOLOE는 항상 로컬 전용이고, SAM 3·Grounding DINO는 로컬 폴더를 지정하면 `local_files_only`로 읽습니다. `offline: true`이면 Hugging Face 오프라인 환경변수도 설정합니다. 모델 ID(`facebook/sam3`, `IDEA-Research/grounding-dino-base`)를 그대로 쓰면 인터넷이 필요합니다. EfficientSAM3는 연구 소스 폴더도 함께 있어야 하며 폐쇄망 실행은 아직 확인하지 않았습니다.
-- 재생·조사·저장·통계·보고서 기능은 네트워크를 쓰지 않습니다. 글꼴·아이콘·데이터 명세서·Word 서식은 `investigator/assets/`에 포함되어 있습니다.
-
-### 필요한 구성물
-
-| 구분 | 내용 | 비고 |
-|---|---|---|
-| OS | 사용하는 Qt·PyTorch 버전이 지원하는 Windows 64비트 | 대상 PC의 OS·내장 ICU DLL 호환성은 배포 전에 확인 |
-| 런타임 | 사용하는 라이브러리에 맞는 Microsoft Visual C++ 재배포 패키지(x64) | 오프라인 설치 파일 준비 권장 |
-| Python | 3.11~3.13 64비트(검증: 3.11.9) | EXE로 묶으면 대상 PC에 따로 설치하지 않음 |
-| 라이브러리 | `requirements.txt` 전체(PyTorch는 GPU에 맞는 휠) | 개발용 `local_dev/requirements-dev.txt`는 제외 |
-| GPU(선택) | 설치할 PyTorch CUDA 휠과 호환되는 NVIDIA 드라이버 | 대상 PC에서 확인; CPU 실행도 가능하나 느림 |
-| 모델 | 아래 표에서 사용할 백엔드만 | `runtime/models/` 아래 |
-| 설정 | 프로그램 폴더의 `detection-runtime.json` | `offline: true`, 상대 경로 권장 |
-| 사용자 데이터 | 프로젝트 폴더(`investigations.db`·영상), `%LOCALAPPDATA%\AVAT`(탭·로그), 레지스트리 `HKCU\Software\AVAT\AVAT`(검출 설정) | 배포물에 넣지 않음 |
-
-| 백엔드 | 필요한 파일(`runtime/models/` 기준) | 현재 크기 |
-|---|---|---:|
-| YOLOE(기본) | `yoloe-11l/`의 `yoloe-11l-seg.pt`와 유효한 `yoloe-11l-seg.text-embeddings.npz`; 캐시 없이 추론하거나 다시 만들 때는 `mobileclip_blt.ts`와 CLIP 토크나이저도 준비 | 약 71MB(+600MB) |
-| SAM 3 | `sam3/` 전체(`config.json`, `model.safetensors`, processor·tokenizer 파일) | 3.4GB |
-| Grounding DINO | `grounding-dino-base/` 전체 | 0.9GB |
-| EfficientSAM3(실험) | `efficientsam3-tv-m/`와 연구 소스 `runtime/efficientsam3/` | 0.5GB + 0.2GB |
-
-`runtime/checkpoints/`(SAM 3 원본 `sam3.pt`)와 `runtime/tokenizers/`는 모델 변환용이라 실행에는 필요하지 않습니다.
+- 이번 실행·배포 구성은 **Grounding DINO 단일 모델**입니다. 다른 모델 구현을 제거한 것은 아니며, 기존 사용자 설정을 자동으로 바꾸지 않습니다.
+- 앱은 소스 실행(`python main.py`) 기준이며 EXE 빌드 설정은 아직 없습니다. 영상 디코더와 객체 검출은 각각 `<Python 실행 파일> -m <모듈>` 형태의 별도 프로세스입니다.
+- `detection-runtime.json`에 **로컬 모델 폴더**와 `offline: true`를 지정합니다. 예시 파일은 자동으로 실행 설정이 되지 않으므로 실제 파일로 복사해야 합니다. 설정 파일 없이 온라인 모델 ID 기본값에 의존하는 방식은 폐쇄망 배포 절차가 아닙니다.
+- 재생·조사·저장·통계·보고서 기능은 네트워크를 쓰지 않습니다. 글꼴·아이콘·데이터 명세서·Word 서식·검출 분류 JSON은 `investigator/assets/`에 포함되어 있습니다.
 
 ### Git 복제 후 별도로 준비할 항목
 
-이 브랜치는 진행 중인 개발 체크포인트이며, 실행 환경이나 배포 완료본을 포함하지 않습니다. GitHub에서 소스를 받는 것만으로 아래 항목이 설치되지는 않습니다.
+이 브랜치는 **진행 중인 개발 체크포인트**이며 실행 환경·가중치·EXE 배포 완료본은 포함하지 않습니다.
 
-- **독립 실행 환경**: Python과 실행용 라이브러리를 새로 설치합니다. 기존 `.venv-yoloe`는 삭제된 `avat_ai/.venv`의 패키지를 참조하며, 현재 `torch`와 `cv2`를 찾지 못합니다. 기존 가상환경 폴더를 그대로 복사하지 않습니다. 객체 검출이 필요 없는 경우 본체 의존성은 `pyproject.toml`의 PySide6·OpenCV·NumPy이며, 검출까지 쓰려면 `requirements.txt`의 추가 의존성도 필요합니다.
-- **폐쇄망 설치 자료**: 대상 Windows·Python·CPU/GPU 조합에 맞는 전체 의존성 휠과 Python/VC++ 설치 자료, 필요한 GPU 드라이버를 승인된 별도 매체로 준비합니다. `requirements.txt`에는 CLIP의 Git URL이 있으므로 폐쇄망에서 그대로 `pip install -r requirements.txt`를 실행할 수 없습니다. 준비 PC에서 CLIP도 휠로 빌드하고, Git URL을 해당 로컬 휠로 바꾼 오프라인 설치 목록을 만들어 검증합니다. `wheelhouse/`와 `offline_bundle/`는 Git 제외 대상입니다.
-- **사용할 모델만**: 위 표의 모델 폴더를 같은 상대 경로에 별도로 복사합니다. YOLOE 임베딩 캐시는 가중치 SHA-256 및 선택 프롬프트와 일치해야 합니다. 캐시가 있지만 프롬프트가 빠져 있으면 현재 코드는 오류를 내며 텍스트 인코더로 자동 전환하지 않습니다. 이 경우 `local_dev/tools/cache_yoloe_embeddings.py`로 캐시를 다시 준비하고 검증합니다.
-- **실제 실행 설정**: 사용할 `detection-runtime.*.example.json`을 `detection-runtime.json`으로 복사한 뒤 `python`, `model`, `device`를 새 PC에 맞추고 `offline: true`를 유지합니다. 예시의 `.venv-yoloe/Scripts/python.exe`도 실제 새 환경의 경로로 바꿔야 합니다. 기존 사용자 설정이 파일보다 우선할 수 있으므로 앱의 **설정 → 객체 검출 환경…**도 확인합니다.
-- **기존 조사 작업을 이어갈 때만**: 앱을 정상 종료한 뒤 프로젝트 폴더의 DB와 연결 영상을 별도 백업·반입합니다. 새 프로젝트를 시작할 때 기존 DB는 필요하지 않습니다. 영상이 프로젝트 밖에 있다면 해당 파일도 따로 챙기고, 대상 PC에서 연결 경로를 확인합니다. DB·영상·개인 설정은 공개 저장소에 올리지 않습니다.
+| 구분 | 준비할 항목 |
+|---|---|
+| OS·런타임 | 사용하는 Qt·PyTorch가 지원하는 Windows 64비트, 호환되는 Microsoft Visual C++ 재배포 패키지(x64). 대상 PC의 ICU DLL 호환성도 확인 |
+| Python | Python 3.11~3.13 64비트. 이전 개발 환경은 3.11.9를 사용했으며 새 배포 환경은 별도 검증 필요 |
+| 실행 라이브러리 | `requirements.txt` 전체: PySide6·OpenCV·NumPy, torch·torchvision·transformers·Pillow와 전이 의존성 |
+| 폐쇄망 설치 자료 | 대상 Windows·Python·CPU/GPU에 맞는 **전이 의존성까지 포함한 휠 전체**, Python·VC++ 설치 파일, GPU 사용 시 호환 드라이버 |
+| 모델 | `runtime/models/grounding-dino-base/`의 위 7개 파일. 약 934MB이며 다운로드용 `.cache/` 제외 |
+| 실행 설정 | `detection-runtime.example.json`을 복사한 `detection-runtime.json`. `backend: "grounding_dino"`, 올바른 Python·로컬 모델 경로, `device: "auto"`, `offline: true` |
+| 기존 작업을 이어갈 때만 | 앱을 정상 종료한 뒤 백업한 프로젝트 DB와 연결 영상. 프로젝트 밖의 영상도 따로 복사하고 경로 확인 |
 
-`Ultralytics/`, `runs/`, `outputs/`, 캐시·로그, 개발용 테스트·시안·패치는 앱 실행을 위해 반입할 필요가 없습니다. 반면 `investigator/assets/`의 글꼴·아이콘·명세서·보고서 서식·분류 JSON은 이미 Git에 포함되어 있으므로 실행 소스와 함께 유지합니다. 이번 체크포인트에서는 실제 모델 추론과 인터넷이 차단된 대상 PC 검증을 수행하지 않았으며, EXE 패키징도 아직 완료되지 않았습니다.
+GPU가 없으면 CPU 추론도 가능하지만 느릴 수 있습니다. 가상환경 폴더는 PC 간 복사하지 말고 대상 PC에 독립 환경을 설치하세요. 기본 실행 의존성에는 CLIP Git URL이 없으므로 **CLIP 휠을 별도로 빌드할 필요가 없습니다.** `safetensors`, `tokenizers`, `huggingface-hub` 등 전이 의존성은 함께 준비해야 합니다.
+
+다음은 승인된 준비 PC에서 완성한 휠 묶음을 대상 PC로 반입한 뒤의 설치 예입니다. GPU/CPU에 맞는 torch·torchvision 휠을 같은 묶음에 포함하고, 해당 환경에서 오프라인 설치를 먼저 시험하세요.
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-index --find-links .\wheelhouse -r requirements.txt
+Copy-Item .\detection-runtime.example.json .\detection-runtime.json
+.\.venv\Scripts\python.exe main.py
+```
+
+이미 `detection-runtime.json`이 있으면 위 복사 명령으로 덮어쓰지 말고 내용을 직접 확인합니다. 새 PC의 `python`·`model` 경로를 맞춘 뒤 **설정 → 객체 검출 환경…**에서도 이전 사용자 설정이 우선하지 않는지 확인하세요. 새 프로젝트를 시작할 때 기존 DB는 필요하지 않습니다.
+
+**반입하지 않아도 되는 항목**: 다른 모델의 가중치·임베딩 캐시·연구 소스, `runtime/checkpoints/`, `runtime/tokenizers/`, `Ultralytics/`, `runs/`, `outputs/`, 다운로드 캐시·로그, 개발용 테스트·시안·패치. 기존 파일은 이번 정리에서 삭제하지 않습니다. 특히 `Ultralytics/`는 Grounding DINO 실행 의존성이 아닙니다. 폴더 정리는 사용자 결과물이 없는지 확인한 뒤 별도로 진행합니다.
+
+**Git에 올리지 않는 항목**: 실제 모델 가중치·실행 설정, 가상환경, `wheelhouse/`·`offline_bundle/`, 프로젝트 DB·영상·개인 설정입니다. 필요한 파일은 승인된 별도 매체나 내부 저장소로 관리합니다. 새 PC에서 기존 탭·개인 설정을 복사할 필요는 없으며 프로젝트 폴더를 직접 열 수 있습니다.
 
 ### 2026-10-23 체크포인트 검증과 남은 작업
 
-- 별도 작업 폴더의 최신 변경(원본 명세서 복사, YOLOE 임시 출력 경로, 테스트 사용자 설정 격리, 배포 문서)을 `wip/offline-stability-2026-10-23` 브랜치에 보존합니다. 배포 완료 또는 `main` 병합을 의미하지 않습니다.
-- 공유 Python 214개 문법 검사와 핵심 테스트 80개는 통과했습니다. 실제 모델 추론은 실행하지 않았습니다.
-- 가중치가 없는 최신 작업 폴더에서 추가 테스트는 **328 통과·1 건너뜀·10 실패** 시점에 `--maxfail=10`으로 중단했습니다. `test_detection_file_cancel`, `test_detection_gui`, `test_detection_runtime_config`, `test_detection_worker_safety`의 가짜 worker 테스트가 기본 YOLOE 가중치의 존재 검사에 걸립니다. 가중치를 저장소에 넣지 말고, 테스트의 백엔드·모델 설정을 실제 파일에서 독립시키는 후속 수정이 필요합니다.
-- 독립 검출 환경 재구축, 모든 테스트 재검증, 불필요한 생성물·일회성 도구의 정리, 실제 오프라인 추론 검증, 아래 EXE 실행 경로 구현은 다음 작업으로 남습니다. 회귀 테스트 폴더 전체를 불필요한 파일로 보고 삭제하지 않습니다.
+- `wip/offline-stability-2026-10-23` 브랜치에 개발 중 변경을 보존합니다. 배포 완료나 `main` 병합을 의미하지 않습니다.
+- **이전 체크포인트 `121cf53`**에서는 Python 214개 문법 검사와 핵심 테스트 80개가 통과했습니다. 실제 모델 추론은 실행하지 않았으며, 이 수치는 이번 Grounding DINO 기본 설정 변경 후 전체 테스트 통과를 뜻하지 않습니다.
+- 같은 이전 체크포인트의 추가 테스트는 가중치가 없는 작업 폴더에서 **328 통과·1 건너뜀·10 실패** 시점에 중단됐습니다. 당시 가짜 worker 테스트가 기본 YOLOE 가중치의 존재 검사에 걸렸으며, 이번 기본값 변경과 테스트용 로컬 설정 분리 후 아래 최신 테스트에서는 재현되지 않았습니다.
+- **이번 Grounding DINO 구성 변경 후** 공유 Python **215개 문법 검사**와 `local_dev/tests`의 **841개 통과·1개 건너뜀**을 확인했습니다. 실제 GPU 추론 테스트는 제외했으며 가중치가 없는 작업 폴더에서 가짜 worker·사용자 설정 격리를 사용한 결과입니다.
+- 별도로 영상·통계 미디어·CSV 테스트 **44개가 통과**했습니다. 구형 검출 테스트 3개 파일은 **19개 통과·6개 실패**이며, 이전 UI 속성 및 이전 세분류 계약을 기대하는 테스트가 남아 있습니다. 최신 테스트 묶음의 통과를 모든 레거시 테스트 통과로 해석하지 않습니다.
+- 독립 검출 환경 설치, 나머지 레거시 회귀 테스트, **Grounding DINO 실제 추론·폐쇄망 대상 PC 검증**, EXE 실행 경로 구현은 별도 확인이 필요합니다. 설정·문서 수정만으로 실제 모델 실행 검증까지 완료된 것은 아닙니다.
 
-### 권장 배포 방식
-
-라이브러리는 앱과 함께 묶고, 모델과 설정은 앱 옆의 별도 폴더에 둡니다.
+### 현재 권장 소스 배포 구성
 
 ```text
 AVAT\
-├── AVAT.exe 와 라이브러리(_internal\), 또는 실행용 Python과 앱 소스
-├── detection-runtime.json      # 상대 경로로 runtime\models\... 지정
-└── runtime\models\yoloe-11l\   # 사용하는 모델만
+├── main.py, requirements.txt, investigator\ 등 실행 소스·자산
+├── .venv\                           # 대상 PC에 새로 설치
+├── detection-runtime.json           # Grounding DINO·로컬 모델·오프라인
+└── runtime\models\grounding-dino-base\
+    ├── config.json
+    ├── model.safetensors
+    ├── preprocessor_config.json
+    ├── special_tokens_map.json
+    ├── tokenizer.json
+    ├── tokenizer_config.json
+    └── vocab.txt
 ```
 
-1. 인터넷이 되는 준비 PC(대상과 같은 Windows·Python·GPU 세대)에서 만들고 동작을 확인합니다.
-2. 앱 폴더와 모델 폴더를 7-Zip으로 묶고(필요하면 분할) SHA-256 체크섬 목록을 함께 만듭니다.
-3. 승인된 반입 매체나 망연계 절차로 옮기고 체크섬을 확인한 뒤, `C:\AVAT`처럼 쓰기 가능한 로컬 경로에 풉니다(`Program Files`와 긴 경로는 피합니다).
-4. 대상 PC에서 영상 열기·재생·저장·CSV·보고서·검출을 한 번씩 확인합니다.
-
-모델(수 GB)은 EXE 안에 넣지 않습니다. 실행 파일이 커지고, 실행할 때마다 압축 해제와 백신 검사가 오래 걸리며, 모델만 바꿔도 다시 빌드해야 하기 때문입니다. PyInstaller를 쓴다면 단일 파일(onefile)보다 폴더형(onedir: `AVAT.exe` + `_internal\`)을 권장하며, 라이브러리는 `_internal\`에 들어갑니다.
+1. 인터넷이 되는 준비 PC에서 대상 Windows·Python·CPU/GPU에 맞는 휠·모델을 준비하고 네트워크 없이 설치·실행 가능한지 확인합니다.
+2. 실행 소스·번들 자산과 모델·설치 자료를 구분해 묶고 SHA-256 체크섬 목록을 만듭니다.
+3. 승인된 반입 매체나 망연계 절차로 옮겨 체크섬을 확인하고 `C:\AVAT`처럼 쓰기 가능한 로컬 경로에 배치합니다.
+4. 대상 PC에서 영상 열기·재생·저장·CSV·보고서와 Grounding DINO 단일 프레임/구간 검출·취소를 확인합니다.
 
 ### EXE로 묶기 전에 필요한 코드 변경(미적용)
 
-1. **작업 프로세스 실행**: 기본적으로 디코더·검출 프로세스를 `sys.executable -m <모듈>`로 시작합니다. EXE에서는 `sys.executable`이 `AVAT.exe` 자신이며 Python의 `-m` 실행이 자동 지원되지 않아 worker 실행 실패나 잘못된 앱 재실행으로 이어질 수 있습니다. 실행 인자로 `video_decode_worker`·`detection_worker`를 고르는 진입점 또는 별도 Python worker 구성이 필요하며, 창 없는(windowed) EXE는 표준 입출력이 비어 있을 수 있어 worker용 콘솔 EXE도 검토해야 합니다.
-2. **경로 기준**: `detection-runtime.json`과 기본 YOLOE 모델 경로를 소스 폴더(`REPOSITORY_ROOT`) 기준으로 찾습니다. EXE에서는 이 경로가 내부 라이브러리 폴더를 가리키므로 `AVAT.exe`가 있는 폴더 기준으로 바꿔야 합니다.
-3. **단일 환경**: 검출용 Python을 따로 지정하지 않고 `requirements.txt` 전체를 한 번들에 넣습니다. 이 작업 공간의 연결형 가상환경은 쓸 수 없습니다.
-4. **데이터 파일**: `investigator/assets/` 전체와 CLIP 토크나이저 어휘 파일 같은 패키지 데이터를 빌드에 포함하고 대상 PC에서 확인합니다.
-5. **라이선스**: Ultralytics(AGPL-3.0)와 각 모델 가중치의 재배포 조건을 확인합니다.
+1. **작업 프로세스 실행**: 디코더·검출 프로세스가 `sys.executable -m <모듈>`을 사용합니다. EXE의 `sys.executable`은 `AVAT.exe`이므로 worker를 구분하는 진입점 또는 별도 Python worker 구성이 필요합니다. 창 없는 EXE의 표준 입출력도 별도 검토해야 합니다.
+2. **경로 기준**: 실행 설정과 모델 상대 경로를 묶인 내부 라이브러리 폴더가 아닌 `AVAT.exe`가 있는 폴더 기준으로 처리해야 합니다.
+3. **단일 환경**: `requirements.txt`의 Grounding DINO 실행 의존성을 한 번들에 넣고 과거 연결형 가상환경에 의존하지 않도록 합니다.
+4. **데이터 파일**: `investigator/assets/`와 필요한 패키지 데이터를 포함하고, Grounding DINO의 7개 모델 파일은 EXE 옆 별도 모델 폴더로 관리합니다.
+5. **라이선스**: 실제 배포하는 라이브러리·모델의 라이선스와 고지 의무를 확인합니다. 기존 타모델 코드를 보존했다는 이유만으로 해당 의존성까지 번들에 넣지 않습니다.
 
-코드를 바꾸지 않고 옮겨야 한다면, 준비 PC에서 `pip download`로 받은 휠 묶음(wheelhouse)을 대상 PC에 옮겨 Python 3.11 단일 환경을 설치하는 방법이 현재 구조와 그대로 맞습니다. 이때는 대상 PC에 Python을 설치해야 하고, git 소스인 CLIP은 준비 PC에서 휠로 만들어 따로 설치합니다.
+EXE 패키징을 진행할 때는 모델을 실행 파일 안에 포함하지 않고 별도 폴더로 유지합니다. 현재 구현으로 옮기려면 위의 **소스 + 대상 PC에 새로 설치한 Python 환경** 방식을 사용합니다.
 
 ### 코드·배포물 관리
 
-- 진행 중인 소스는 별도 작업 브랜치에 커밋하고, 검증이 끝난 뒤 `main`에 병합합니다. 현재 GitHub 저장소는 공개 상태이며 브랜치도 공개됩니다. 배포가 완료되면 해당 커밋에 태그를 붙입니다.
-- 저장소에는 소스와 작은 설정 예시, 번들 자산을 둡니다. EXE·가상환경·모델 가중치는 이번 커밋에서 제외합니다. [GitHub의 일반 Git 업로드](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)는 100MiB 초과 파일을 차단합니다. 큰 파일을 공개해야 한다면 모델별 재배포 조건과 조직 정책을 먼저 확인하고 Git LFS·Releases의 현행 용량 제한을 별도로 확인합니다. 폐쇄망 배포물은 승인된 내부 저장소에 보관하고 모델 출처와 체크섬을 함께 기록합니다. 가중치의 공개 재배포 가능 여부는 이번 작업에서 승인하거나 검증하지 않았습니다.
+- 진행 중인 소스는 별도 작업 브랜치에 커밋하고 검증이 끝난 뒤 `main`에 병합합니다. 공개 저장소의 작업 브랜치도 공개됩니다.
+- 저장소에는 소스·작은 설정 예시·번들 자산을 두고 실제 가중치·DB·영상은 제외합니다. 모델은 출처·라이선스·체크섬을 함께 기록해 승인된 별도 저장소에서 관리합니다. 가중치의 공개 재배포 가능 여부는 이번 작업에서 승인하거나 검증하지 않았습니다.
 
 ## 저장소 설정
 
 `.gitignore`는 공통 제외 규칙, `.gitattributes`는 줄바꿈·바이너리 처리 규칙, `pyproject.toml`은 패키지·실행 명령과 공통 도구 설정을 관리하므로 저장소에 포함합니다. 개인 작업 경로의 제외 규칙은 Git이 추적하지 않는 `.git/info/exclude`에서 관리합니다. 이 파일은 다른 환경으로 복제되지 않으므로 새 환경에서는 개인 규칙을 별도로 설정해야 합니다.
 
-앱·객체탐지 코드와 함께 `local_dev/`의 테스트·도구·시안·패치·문서와 `runtime/tools/`의 SAM 3 변환 스크립트를 공유합니다. `avat_ai/`는 별도 프로그램이라 이 저장소에 포함하지 않습니다. 가중치·모델 다운로드 자료·가상환경·실제 DB/영상·비밀 설정·생성 결과물(`outputs/`, `runs/`, `Ultralytics/` 등)은 제외합니다. 실행 환경 설정은 `detection-runtime*.example.json` 예시만 공유합니다. 별도 Git 저장소로 복제한 EfficientSAM3, BoT-SORT, BoostTrack 원본은 제외를 유지하며, 필요한 경우 각 프로젝트 안내에 따라 별도로 준비합니다.
+앱·객체탐지 코드와 함께 `local_dev/`의 테스트·도구·시안·패치·문서와 `runtime/tools/`의 기존 연구 도구를 보존합니다. 과거 타모델용 코드·테스트·예시는 보존 자료이며 현재 Grounding DINO 설치·배포에 포함할 의존성이나 준비물을 뜻하지 않습니다. `avat_ai/`는 별도 프로그램이라 이 저장소에 포함하지 않습니다. 가중치·모델 다운로드 자료·가상환경·실제 DB/영상·비밀 설정·생성 결과물(`outputs/`, `runs/`, `Ultralytics/` 등)은 제외합니다. 실행 환경 설정은 `detection-runtime*.example.json` 예시만 공유합니다. 별도 Git 저장소로 복제한 연구 소스는 제외를 유지하며 Grounding DINO 배포에 필요하지 않습니다.
 
 앱 실행에 필요한 코드는 `investigator/`, 번들 자산은 `investigator/assets/`에 둡니다. CSV 내보내기에 쓰이는 데이터 명세서와 글꼴·아이콘 및 해당 라이선스도 배포에 포함합니다.
 
@@ -617,11 +513,11 @@ AVAT\
 │   ├── detection_taxonomy.py        # 검출 분류·프롬프트
 │   ├── detection_process.py         # 검출 worker QProcess 실행·설정(detection-runtime.json)
 │   ├── detection_controller.py      # 메인 창의 구간 검출·라벨 편집 연결
-│   ├── detection_worker/            # YOLOE·SAM 3·Grounding DINO·EfficientSAM3 검출 worker(PySide6 미사용)
+│   ├── detection_worker/            # Grounding DINO worker와 보존된 타모델 구현(PySide6 미사용)
 │   ├── diagnostics.py               # 제한 크기 성능/충돌 로그
 │   ├── theme.py, qt_font_setup.py   # 테마·번들 아이콘/글꼴
 │   ├── assets/                      # 글꼴·아이콘·데이터 명세서·Word 서식·검출 분류
 │   └── widgets/                     # 목록, 조사 폼, 영상, 타임라인, 검출·통계 패널
 ├── local_dev/                       # 개발 전용(테스트·도구·문서), 배포 제외
-└── runtime/                         # 모델·변환 자료(대부분 Git 제외), 배포에는 사용할 모델만
+└── runtime/                         # 모델·기존 연구 자료(Git 제외), 배포 모델은 Grounding DINO만
 ```

@@ -15,18 +15,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 현재 실행·배포 대상은 Grounding DINO입니다. 비교용 백엔드 코드는 별도로 보존합니다.
 detection = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "transformers==5.20.2",
     "pillow==11.1.0",
-    "ultralytics==8.3.253",
-    "clip @ git+https://github.com/ultralytics/CLIP.git@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40",
-    "timm==1.0.27",
-    "einops==0.8.2",
-    "ftfy==6.1.1",
-    "wcwidth==0.2.13",
-    "pycocotools==2.0.11",
 ]
 dev = [
     "pytest>=8,<10",

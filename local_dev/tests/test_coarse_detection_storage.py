@@ -84,7 +84,7 @@ def test_optional_objects_do_not_change_form_statistics_csv_word_or_completed_st
     assert (tmp_path / "after.csv").read_bytes() == before_csv
 
 
-def test_yoloe_manifest_accepts_local_checkpoint_file_and_default_is_yoloe(tmp_path):
+def test_yoloe_manifest_remains_compatible_with_dino_default(tmp_path):
     executable = tmp_path / "python.exe"
     executable.touch()
     checkpoint = tmp_path / "model.pt"
@@ -96,4 +96,4 @@ def test_yoloe_manifest_accepts_local_checkpoint_file_and_default_is_yoloe(tmp_p
     settings, error = _load_runtime_manifest(manifest)
     assert not error and settings.backend == "yoloe"
     assert settings.model == str(checkpoint)
-    assert DetectionSettings().backend == "yoloe"
+    assert DetectionSettings().backend == "grounding_dino"

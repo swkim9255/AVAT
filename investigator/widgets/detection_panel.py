@@ -148,8 +148,8 @@ class DetectionSettingsDialog(QDialog):
         self.setMinimumWidth(520)
         root = QVBoxLayout(self)
         note = QLabel(
-            "YOLOE가 기본 모델입니다. SAM3는 Transformers, EfficientSAM3는 별도 소스·가중치를 사용합니다. "
-            "Grounding DINO는 박스만 검출하며 Base/Tiny를 선택할 수 있습니다. "
+            "기본 실행·배포 모델은 Grounding DINO입니다. 박스만 검출하며 Base/Tiny를 선택할 수 있습니다. "
+            "다른 모델 선택지는 기존 설정 호환용으로 유지되며 이번 배포 준비물에는 포함하지 않습니다. "
             "AVAT 본체와 같은 환경을 사용할 수 있습니다. "
             "별도 지정이 없으면 작업 공간의 detection-runtime.json을 사용하고, "
             "해당 파일도 없으면 AVAT를 실행한 Python을 사용합니다.",
@@ -160,24 +160,24 @@ class DetectionSettingsDialog(QDialog):
         root.addWidget(note)
         form = QFormLayout()
         self.backend_combo = ScrollSafeComboBox(self)
-        self.backend_combo.addItem("YOLOE 11-L (기본)", "yoloe")
+        self.backend_combo.addItem("Grounding DINO (기본 · 박스 전용)", "grounding_dino")
+        self.backend_combo.addItem("YOLOE 11-L", "yoloe")
         self.backend_combo.addItem("SAM3", "sam3")
         self.backend_combo.addItem("EfficientSAM3 TV-M (경량·실험)", "efficientsam3")
-        self.backend_combo.addItem("Grounding DINO (박스 전용)", "grounding_dino")
         self.backend_combo.setCurrentIndex(max(0, self.backend_combo.findData(settings.backend)))
         form.addRow("검출 모델", self.backend_combo)
         self._active_backend = settings.backend
         self._backend_settings = {settings.backend: settings}
         python_row = QHBoxLayout()
         self.python_edit = QLineEdit(settings.python, self)
-        self.python_edit.setPlaceholderText(r"예: C:\avat-sam3\.venv\Scripts\python.exe")
+        self.python_edit.setPlaceholderText(r"예: C:\avat\.venv-grounding-dino\Scripts\python.exe")
         browse = QPushButton("찾기…", self)
         browse.clicked.connect(self._browse)
         python_row.addWidget(self.python_edit, 1)
         python_row.addWidget(browse)
         form.addRow("검출용 Python", python_row)
         self.model_edit = QLineEdit(settings.model, self)
-        self.model_edit.setPlaceholderText(DEFAULT_MODEL)
+        self.model_edit.setPlaceholderText(default_model(settings.backend) or DEFAULT_MODEL)
         form.addRow("모델 (파일·폴더 또는 ID)", self.model_edit)
         self.device_combo = ScrollSafeComboBox(self)
         for label, value in (("자동 (GPU 우선)", "auto"), ("GPU (CUDA)", "cuda"), ("CPU", "cpu")):
@@ -271,7 +271,7 @@ class DetectionSettingsDialog(QDialog):
                 "grounding_dino": "detection-runtime.grounding-dino.json",
             }[backend]
             preset, _error = _load_runtime_manifest(REPOSITORY_ROOT / name)
-            if preset is None and backend == "sam3":
+            if preset is None and backend in {"sam3", "grounding_dino"}:
                 preset, _error = _load_runtime_manifest(REPOSITORY_ROOT / "detection-runtime.json")
             if preset is not None and preset.backend != backend:
                 preset = None

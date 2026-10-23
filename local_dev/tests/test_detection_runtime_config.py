@@ -122,12 +122,13 @@ def test_utf8_bom_manifest_supported(runtime):
     assert not DetectionSettings.load(store).config_error
 
 
-def test_missing_manifest_keeps_legacy_fallback(tmp_path, monkeypatch):
+def test_missing_manifest_uses_grounding_dino_default(tmp_path, monkeypatch):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     settings = DetectionSettings.load(store)
     assert settings.executable == sys.executable
     assert settings.model == process.DEFAULT_MODEL
+    assert settings.backend == "grounding_dino"
     assert settings.device == "auto"
     assert settings.offline is None
     assert not settings.config_error
@@ -159,7 +160,10 @@ def test_offline_environment_is_applied_only_when_enabled(qtbot, tmp_path, monke
     names = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY")
     for name in names:
         monkeypatch.delenv(name, raising=False)
-    job = _job(tmp_path, DetectionSettings(python=sys.executable, offline=offline))
+    model = tmp_path / "grounding-dino"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"grounding-dino"}', encoding="utf-8")
+    job = _job(tmp_path, DetectionSettings(python=sys.executable, model=str(model), offline=offline))
     monkeypatch.setattr(job._process, "start", lambda: None)
     job.start()
     env = job._process.processEnvironment()

@@ -1,4 +1,4 @@
-"""Run the SAM 3 detection worker in a separate Python process (QProcess).
+"""객체 검출 worker를 별도 Python 프로세스(QProcess)에서 실행한다.
 
 The worker can use the same Python environment as AVAT, or an explicitly
 configured interpreter. It reports JSONL events on stdout and writes the
@@ -32,20 +32,21 @@ SETTINGS_DINO_BOX_THRESHOLD = "detection/dino_box_threshold"
 SETTINGS_DINO_TEXT_THRESHOLD = "detection/dino_text_threshold"
 SETTINGS_DINO_FP16 = "detection/dino_fp16"
 RUNTIME_MANIFEST = "detection-runtime.json"
-DEFAULT_BACKEND = "yoloe"
+DEFAULT_BACKEND = "grounding_dino"
 SAM3_MODEL = "facebook/sam3"
 DINO_BASE_MODEL = "IDEA-Research/grounding-dino-base"
 DINO_TINY_MODEL = "IDEA-Research/grounding-dino-tiny"
-DEFAULT_MODEL = str(REPOSITORY_ROOT / "runtime/models/yoloe-11l/yoloe-11l-seg.pt")
+YOLOE_MODEL = str(REPOSITORY_ROOT / "runtime/models/yoloe-11l/yoloe-11l-seg.pt")
+DEFAULT_MODEL = DINO_BASE_MODEL
 
 
 def default_model(backend: str) -> str:
-    return {"yoloe": DEFAULT_MODEL, "sam3": SAM3_MODEL, "efficientsam3": "",
+    return {"yoloe": YOLOE_MODEL, "sam3": SAM3_MODEL, "efficientsam3": "",
             "grounding_dino": DINO_BASE_MODEL}.get(backend, "")
 CANCEL_GRACE_MS = 15_000
 MAX_EVENT_BUFFER = 256 * 1024
 MISSING_RUNTIME_HINT = (
-    "SAM 3 실행 환경(torch·torchvision·transformers)을 찾지 못했습니다. "
+    "객체 검출 실행 환경(torch·torchvision·transformers)을 찾지 못했습니다. "
     "설정 → 객체 검출 환경에서 검출용 Python을 지정해 주세요."
 )
 
@@ -256,7 +257,7 @@ def friendly_error(message: str) -> str:
         return "설치된 transformers가 SAM 3를 지원하지 않습니다. transformers를 최신 버전으로 올려 주세요."
     if "gated" in text.casefold() or "401" in text:
         return (
-            "SAM 3 모델에 접근할 수 없습니다. Hugging Face 사용 동의와 로그인 상태를 확인해 주세요."
+            "검출 모델에 접근할 수 없습니다. 로컬 모델 경로 또는 Hugging Face 접근 권한·로그인 상태를 확인해 주세요."
         )
     if "out of memory" in text.casefold():
         return "GPU 메모리가 부족합니다. 검출 클래스를 줄이거나 CPU 장치를 선택해 주세요."
@@ -360,7 +361,7 @@ class DetectionJob(QObject):
             if self.settings.backend == "efficientsam3" and not self.settings.model.strip():
                 raise ValueError("EfficientSAM3 로컬 모델 폴더를 지정해 주세요.")
             if self.settings.backend == "yoloe":
-                model = Path(self.settings.model or DEFAULT_MODEL)
+                model = Path(self.settings.model or default_model("yoloe"))
                 if not model.is_file() or model.suffix.lower() != ".pt":
                     raise ValueError("YOLOE 로컬 .pt 모델 파일을 지정해 주세요.")
             if self.settings.backend == "grounding_dino":

@@ -37,7 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--end-frame", type=int, default=None, help="이 프레임은 포함하지 않음")
     p.add_argument("--mask-threshold", type=float, default=0.5)
     p.add_argument("--model", default=None, help="모델 ID 또는 로컬 모델 경로")
-    p.add_argument("--backend", choices=["sam3", "efficientsam3", "yoloe", "grounding_dino"], default="yoloe")
+    p.add_argument("--backend", choices=["grounding_dino", "sam3", "efficientsam3", "yoloe"], default="grounding_dino")
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     precision = p.add_mutually_exclusive_group()
     precision.add_argument("--half", action="store_true", default=None, help="CUDA 혼합 정밀도 사용 (DINO: FP16)")
