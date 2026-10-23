@@ -1,6 +1,6 @@
 """Width-aware checkbox groups for narrow investigation columns."""
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QPaintEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -47,13 +47,27 @@ class WrappingCheckBox(QCheckBox):
     def hitButton(self, position) -> bool:
         return self.rect().contains(position)
 
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.FontChange,
+            QEvent.Type.ApplicationFontChange,
+            QEvent.Type.StyleChange,
+        }:
+            # Wrapped height depends on the polished font, not the provisional
+            # font Qt assigned while constructing this control.
+            self.updateGeometry()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         del event
         option = QStyleOptionButton()
         self.initStyleOption(option)
         option.text = ""
         painter = QStylePainter(self)
+        painter.save()
         painter.drawControl(QStyle.ControlElement.CE_CheckBox, option)
+        painter.restore()
+        painter.setFont(self.font())
         self.style().drawItemText(
             painter,
             self.rect().adjusted(self._indicator_space(), 0, 0, 0),

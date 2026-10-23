@@ -1,0 +1,13 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index f7a4692..7eda772 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -50,3 +50,8 @@ line-length = 100
+ [tool.ruff.lint]
+ select = ["E", "F", "I", "UP", "B", "SIM"]
+ ignore = ["E501"]
++
++[tool.ruff.lint.isort]
++# Ultralytics can create an "Ultralytics/" settings folder in the project root;
++# on case-insensitive Windows, ruff would then sort the package as first-party.
++known-third-party = ["ultralytics"]

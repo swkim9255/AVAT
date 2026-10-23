@@ -1,0 +1,4117 @@
+diff --git a/README.md b/README.md
+index 32c326c..2c183c1 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,7 @@
+ - OpenCV 기반 재생/일시정지, 영상 소리 출력, ±1/10프레임, ±1초 이동, 프레임 번호 직접 이동
+ - 영상마다 트리거 `T` 1개와 충돌 `C` 1개 타임라인 마커 지정·저장
+ - 영상별 속도 기준 지점·구간 거리 입력, 구간 평균 속도와 T 시점 속도 추정·그래프
++- 단일 프레임·타임라인 드래그·직접 입력 구간의 SAM 3 객체 검출, 트리거/충돌 관여 객체 라벨링과 조사 탭 반영
+ - 식별 구분을 우측 상단에 고정하고 조사 항목과 자유 텍스트 비고를 9개 탭으로 제공
+ - 사고 구분 번호 최대 13자리와 `20-24세`~`95-99세`의 5세 단위 운전 연령 선택
+ - 사고 당시 주행거리는 자리수 제한 없이 숫자로 입력
+@@ -87,6 +88,42 @@ python main.py --workspace "D:\investigations"
+ 
+ 좁은 창에서는 프레임·마커 버튼을 두 줄로, 측정 표와 그래프를 세로로 배치합니다. 측정 패널 내부만 스크롤하므로 조사 입력 사이드바를 침범하지 않습니다.
+ 
++## 구간 객체 검출과 관여 객체 라벨링
++
++영상 전체가 아니라 **필요한 시점만** 검출합니다. 플레이어 아래 검출 아이콘(▣)으로 **객체 검출 · 라벨링** 패널을 엽니다.
++
++1. **분석 구간**을 정합니다.
++   - **현재 프레임**: 지금 보고 있는 프레임 1장(재생·이동하면 따라갑니다).
++   - **구간**: 시작/끝 프레임(1부터, 끝 포함)을 직접 입력하거나 **시작←현재 / 끝←현재**, **T~C**(트리거~충돌 마커)를 사용합니다. 타임라인에서 **Shift+드래그**해도 구간이 선택되며, 선택 구간은 타임라인에 띠로 표시됩니다. **간격**은 구간 안에서 몇 프레임마다 처리할지 정합니다.
++2. **새 객체 역할**로 `트리거 시점 관여 객체` 또는 `충돌 관여 객체`를 고릅니다. 구간이 T 또는 C 마커 하나만 포함하면 그에 맞게 자동 제안합니다.
++3. **검출 클래스**는 ‘객체’ 탭 장애물과 ‘충돌’ 탭 충돌 대상의 **합집합 26종**(승용·승합·화물·특수·이륜·자전거·PM·어린이·어른·차단기·가드레일·중앙분리대·연석·표지판·전봇대/전신주/가로등·볼라드/시선유도봉·충격흡수시설·과속방지턱·건물 기둥·건물 벽·담벼락·화단·흙더미·가로수·동물·도로낙하물)입니다. 필요한 것만 골라 검출 시간을 줄일 수 있습니다.
++4. **검출 실행**은 별도 프로세스에서 SAM 3를 실행하고 진행률을 표시합니다. **취소**하거나 실패하면 결과를 반영하지 않습니다.
++5. 결과는 같은 객체를 프레임 사이에서 묶어 `V001`(차량)·`M`(이륜)·`B`(자전거)·`K`(PM)·`P`(보행자)·`R`(시설·건물)·`A`(동물)·`D`(낙하물) ID로 표시하고, 직접 그린 객체는 `U001`부터 번호를 붙입니다.
++
++표에서 객체를 선택(영상 위 박스를 클릭해도 선택)한 뒤 아래 줄에서 편집합니다.
++
++- **역할**을 바꾸면 라벨도 대응 항목으로 변환됩니다(예: 충돌 `차량 · 승용` ↔ 객체 탭 `차량 · 승용`).
++- **트리거 시점 관여 객체**의 라벨 목록은 ‘객체’ 탭의 장애물 선택지(차량·보행자·도로시설물·건물/조경·기타), **충돌 관여 객체**는 ‘충돌’ 탭의 충돌 대상 선택지입니다. 양식 설계에서 선택지 이름을 바꿔도 내부 ID로 연결되어 라벨이 유지됩니다.
++- **확인**: 라벨을 고르면 자동으로 확인 상태가 됩니다. 같은 구간을 다시 검출하면 **확인하지 않은 자동 박스만** 교체하고, 확인한 객체·직접 그린 객체는 보존합니다.
++- **사각형 그리기**를 켜고 영상 위를 드래그하면 현재 프레임에 객체를 직접 추가합니다. **이 프레임 박스 삭제 / 객체 삭제**도 가능합니다.
++- **객체 탭에 반영 / 충돌 탭에 반영**은 라벨이 있는 객체의 항목을 해당 탭에 **추가만** 하며(기존 선택은 유지), 객체 탭 반영 시 장애물 유무가 비어 있거나 ‘무’이면 ‘유’로 바꿉니다. 반영 전 추가될 항목을 확인합니다.
++
++검출 객체는 사고의 영상별 선택 항목 `objects_by_video`로 DB에 저장되며 객체가 없는 사고의 저장 형식은 바뀌지 않습니다. CSV에는 조사 탭에 반영한 값만 포함됩니다. 박스 좌표는 원본 영상 픽셀 기준이라 화면 회전과 무관합니다.
++
++### 검출 환경 준비
++
++SAM 3(`facebook/sam3`)는 Hugging Face에서 사용 동의가 필요한 모델이며 GPU(VRAM 16GB 이상 권장) 환경을 권장합니다. 본체와 분리한 가상환경을 만들고 패널의 ⚙(**객체 검출 환경**)에서 그 Python 경로를 지정합니다.
++
++```powershell
++py -3.11 -m venv .venv-sam3
++.\.venv-sam3\Scripts\Activate.ps1
++python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
++python -m pip install -r requirements-detection.txt
++huggingface-cli login
++```
++
++모델은 ID 대신 미리 내려받은 로컬 폴더를 지정할 수 있어 오프라인 PC에서도 사용할 수 있습니다. 영상은 외부로 전송되지 않고 지정한 PC에서만 처리됩니다. 검출은 보조 수단이므로 라벨은 반드시 사람이 확인하세요. 작은 시설물(연석·볼라드·과속방지턱)과 화단·흙더미·도로낙하물은 누락·오검출이 많을 수 있습니다.
++
+ ## 통계 분석
+ 
+ 상단 **조사 / 통계** 탭으로 전환합니다. 현재 프로젝트의 실제 조사 값을 사용하며, 기본 집계 대상은 **완료** 사고입니다. 임시저장 사고를 포함하거나 사고일자 기간, 조사 항목별 조건을 추가할 수 있습니다. 여러 조건은 모두 만족하는 사고만 포함합니다. 아직 저장하지 않은 입력도 화면 집계에 반영되지만 통계 탭을 여는 것만으로 완료 처리하거나 저장 데이터를 변경하지는 않습니다.
+@@ -295,6 +332,10 @@ investigator/
+ ├── video_controller.py    # 비동기 재생/최신 탐색 병합·프레임 캐시
+ ├── video_decoder.py       # Qt 자식 프로세스·공유 프레임 전송
+ ├── video_decode_worker.py # 단일 소유자의 병렬 OpenCV 디코딩
++├── object_detection.py    # 검출 클래스(객체∪충돌)·관여 객체 라벨 모델
++├── detection_process.py   # 검출 worker QProcess 실행·설정
++├── detection_controller.py # 메인 창의 구간 검출·라벨 편집 연결
++├── detection_worker/      # SAM 3 텍스트 프롬프트 검출 worker (PySide6 미사용)
+ ├── theme.py               # 테마와 번들 아이콘/글꼴
+ └── widgets/               # 목록, 조사 폼, 영상, 타임라인
+ ```
+diff --git a/investigator/detection_controller.py b/investigator/detection_controller.py
+new file mode 100644
+index 0000000..7bec11d
+--- /dev/null
++++ b/investigator/detection_controller.py
+@@ -0,0 +1,472 @@
++"""Main-window behaviour for range object detection and role/label editing.
++
++Kept apart from ``main_window.py`` so the detection feature stays readable.
++``DetectionMixin`` relies on MainWindow attributes (cases, repository,
++video_controller, video_player, playback, investigation, statusBar, …).
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++
++from PySide6.QtWidgets import QFrame, QMessageBox, QScrollArea
++
++from investigator.detection_process import (
++    DetectionJob,
++    DetectionRequest,
++    DetectionSettings,
++)
++from investigator.models import InvestigationCase
++from investigator.object_detection import (
++    OBSTACLE_EXISTS_FIELD,
++    ROLE_COLLISION,
++    ROLE_SHORT,
++    ROLE_TITLES,
++    ROLE_TRIGGER,
++    LabelRef,
++    VideoObjects,
++    add_manual_object,
++    delete_box,
++    delete_objects,
++    form_updates,
++    label_text,
++    merge_detection_result,
++    set_objects_label,
++    set_objects_reviewed,
++    set_objects_role,
++)
++from investigator.theme import MUTED
++from investigator.widgets.detection_panel import (
++    ROLE_COLORS,
++    DetectionPanel,
++    DetectionSettingsDialog,
++)
++from investigator.widgets.video_player import OverlayBox
++
++
++@dataclass(slots=True)
++class _JobContext:
++    workspace: Path
++    case_uid: str
++    video_path: str
++    request: DetectionRequest
++
++
++def _same_path(left: str | None, right: str | None) -> bool:
++    if not left or not right:
++        return False
++    return str(Path(left)).casefold() == str(Path(right)).casefold()
++
++
++class DetectionMixin:
++    # -- construction ----------------------------------------------------------
++
++    def _init_detection(self) -> None:
++        self.detection_panel = DetectionPanel(self)
++        self._detection_job: DetectionJob | None = None
++        self._detection_context: _JobContext | None = None
++        self._selected_object_uids: list[str] = []
++        self._overlay_frame = 0
++
++    def _build_detection_area(self, parent, layout) -> None:  # type: ignore[no-untyped-def]
++        self.detection_scroll = QScrollArea(parent)
++        self.detection_scroll.setObjectName("detectionScroll")
++        self.detection_scroll.setFrameShape(QFrame.Shape.NoFrame)
++        self.detection_scroll.setWidgetResizable(True)
++        self.detection_scroll.setMinimumHeight(240)
++        self.detection_scroll.setMaximumHeight(360)
++        self.detection_scroll.setWidget(self.detection_panel)
++        self.detection_scroll.hide()
++        layout.addWidget(self.detection_scroll, 0)
++
++    def _connect_detection_signals(self) -> None:
++        panel = self.detection_panel
++        self.playback.detection_panel_toggled.connect(self._set_detection_panel_visible)
++        self.playback.range_selected.connect(self._timeline_range_selected)
++        panel.range_changed.connect(self._detection_range_changed)
++        panel.run_requested.connect(self.run_detection)
++        panel.cancel_requested.connect(self.cancel_detection)
++        panel.settings_requested.connect(self.edit_detection_settings)
++        panel.seek_requested.connect(self._seek_video)
++        panel.selection_changed.connect(self._object_selection_changed)
++        panel.role_change_requested.connect(self._change_object_role)
++        panel.label_change_requested.connect(self._change_object_label)
++        panel.reviewed_change_requested.connect(self._change_object_reviewed)
++        panel.delete_requested.connect(self._delete_objects)
++        panel.delete_box_requested.connect(self._delete_object_box)
++        panel.draw_mode_toggled.connect(self.video_player.canvas.set_draw_mode)
++        panel.apply_requested.connect(self.apply_objects_to_form)
++        self.video_player.canvas.box_clicked.connect(self._canvas_box_clicked)
++        self.video_player.canvas.box_drawn.connect(self._canvas_box_drawn)
++
++    # -- visibility ------------------------------------------------------------
++
++    def _update_canvas_minimum(self) -> None:
++        compact = self.speed_scroll.isVisibleTo(self) or self.detection_scroll.isVisibleTo(self)
++        self.video_player.canvas.setMinimumHeight(140 if compact else 280)
++
++    def _set_detection_panel_visible(self, visible: bool) -> None:
++        if visible and self.playback.speed_panel_button.isChecked():
++            # Only one panel under the video at a time; opening one closes the other.
++            self.playback.speed_panel_button.setChecked(False)
++        self.detection_scroll.setVisible(visible)
++        self._update_canvas_minimum()
++        if visible:
++            self._refresh_detection()
++            self._detection_range_changed(*self.detection_panel.frame_range)
++        else:
++            self.playback.set_selection_range(None)
++            self.detection_panel.draw_button.setChecked(False)
++            self._update_overlay()
++
++    # -- current state -----------------------------------------------------------
++
++    def _detection_case(self) -> tuple[InvestigationCase | None, bool]:
++        """(current case, whether its active video is the open one)."""
++
++        case = self.current_case
++        metadata = self.video_controller.metadata
++        matching = (
++            case is not None
++            and metadata is not None
++            and _same_path(str(metadata.path), case.active_video)
++        )
++        return case, matching
++
++    def _current_objects(self) -> VideoObjects:
++        case, matching = self._detection_case()
++        return case.video_objects() if case is not None and matching else VideoObjects()
++
++    def _refresh_detection(self) -> None:
++        """Push objects of the open video to the panel and the overlay."""
++
++        objects = self._current_objects()
++        known = {item.uid for item in objects.objects}
++        self._selected_object_uids = [uid for uid in self._selected_object_uids if uid in known]
++        self.detection_panel.set_objects(objects, self.repository.form_definition)
++        self._update_overlay()
++
++    def _detection_video_changed(self) -> None:
++        metadata = self.video_controller.metadata
++        if metadata is None:
++            self.detection_panel.set_video(0, 0.0)
++        else:
++            self.detection_panel.set_video(metadata.total_frames, metadata.reported_fps)
++        self._selected_object_uids = []
++        self.detection_panel.draw_button.setChecked(False)
++        self._refresh_detection()
++
++    def _detection_frame_changed(self, frame: int) -> None:
++        self._overlay_frame = frame
++        self.detection_panel.set_current_frame(frame)
++        self._update_overlay()
++
++    def _update_overlay(self) -> None:
++        canvas = self.video_player.canvas
++        if not self.detection_scroll.isVisibleTo(self):
++            # Boxes are shown only while the detection panel is open.
++            canvas.set_overlay([])
++            return
++        objects = self._current_objects()
++        definition = self.repository.form_definition
++        selected = set(self._selected_object_uids)
++        boxes = []
++        for item, box in objects.at_frame(self._overlay_frame):
++            color = ROLE_COLORS[item.role] if item.label is not None else MUTED
++            text = f"{item.object_id} {label_text(definition, item.role, item.label)}"
++            boxes.append(OverlayBox(item.uid, box.bbox, color, text, item.uid in selected))
++        canvas.set_overlay(boxes)
++
++    def _store_objects(
++        self, case: InvestigationCase, objects: VideoObjects, video_path: str
++    ) -> None:
++        case.set_video_objects(objects, video_path=video_path)
++        self._mark_case_dirty(case)
++        if case is self.current_case:
++            self._refresh_detection()
++
++    def _edit_current_objects(self, change) -> None:  # type: ignore[no-untyped-def]
++        case, matching = self._detection_case()
++        if case is None or not matching:
++            return
++        try:
++            objects = change(case.video_objects())
++        except ValueError as exc:
++            self.statusBar().showMessage(str(exc), 5000)
++            return
++        self._store_objects(case, objects, case.active_video)
++
++    # -- range ---------------------------------------------------------------
++
++    def _timeline_range_selected(self, start: int, end: int) -> None:
++        if self._detection_job is not None:
++            return
++        if not self.playback.detection_panel_button.isChecked():
++            self.playback.detection_panel_button.setChecked(True)
++        self.detection_panel.set_selected_range(start, end)
++        self._detection_range_changed(*self.detection_panel.frame_range)
++
++    def _detection_range_changed(self, start: int, end: int) -> None:
++        if not self.detection_scroll.isVisibleTo(self):
++            return
++        self.playback.set_selection_range(start, end)
++        case = self.current_case
++        if case is None or self._detection_job is not None:
++            return
++        # Suggest the role from the T/C markers the range covers.
++        has_trigger = case.trigger_frame is not None and start <= case.trigger_frame <= end
++        has_collision = case.collision_frame is not None and start <= case.collision_frame <= end
++        if has_collision and not has_trigger:
++            self.detection_panel.set_new_object_role(ROLE_COLLISION)
++        elif has_trigger and not has_collision:
++            self.detection_panel.set_new_object_role(ROLE_TRIGGER)
++
++    # -- running ---------------------------------------------------------------
++
++    def edit_detection_settings(self) -> None:
++        dialog = DetectionSettingsDialog(DetectionSettings.load(), self)
++        if dialog.exec():
++            dialog.settings().save()
++
++    def run_detection(self) -> None:
++        if self._detection_job is not None:
++            return
++        case, matching = self._detection_case()
++        if case is None or not matching:
++            self.statusBar().showMessage("검출할 영상을 먼저 열어 주세요.", 4000)
++            return
++        panel = self.detection_panel
++        start, end = panel.frame_range
++        metadata = self.video_controller.metadata
++        end = min(end, max(0, metadata.total_frames - 1))
++        classes = panel.class_keys
++        if not classes:
++            self.statusBar().showMessage("검출 클래스를 하나 이상 선택해 주세요.", 4000)
++            return
++        if self.video_controller.is_playing:
++            self.video_controller.pause()
++        request = DetectionRequest(
++            video_path=Path(case.active_video),
++            start_frame=start,
++            end_frame=end,
++            frame_step=panel.frame_step,
++            classes=classes,
++            role=panel.new_object_role,
++            case_uid=case.uid,
++            workspace=str(self.repository.workspace),
++        )
++        job = DetectionJob(request, DetectionSettings.load(), self)
++        self._detection_job = job
++        self._detection_context = _JobContext(
++            self.repository.workspace, case.uid, case.active_video, request
++        )
++        job.status.connect(panel.set_status)
++        job.started.connect(lambda total: panel.set_progress(0, total))
++        job.progress.connect(lambda done, total, _frame: panel.set_progress(done, total))
++        job.finished.connect(self._detection_finished)
++        job.failed.connect(self._detection_failed)
++        job.cancelled.connect(self._detection_cancelled)
++        panel.set_running(True)
++        panel.set_status(
++            f"{ROLE_TITLES[request.role]} · {request.start_frame + 1:,}~{request.end_frame + 1:,} "
++            f"프레임 ({request.frame_count:,}장) 검출을 준비합니다…"
++        )
++        job.start()
++
++    def cancel_detection(self) -> None:
++        if self._detection_job is not None:
++            self._detection_job.cancel()
++
++    def _stop_detection(self, *, kill: bool) -> None:
++        job, self._detection_job = self._detection_job, None
++        self._detection_context = None
++        if job is not None:
++            if kill:
++                job.kill()
++            job.deleteLater()
++        self.detection_panel.set_running(False)
++
++    def _confirm_stop_detection(self) -> bool:
++        """Before leaving a project or closing: stop a running job (asks first)."""
++
++        if self._detection_job is None:
++            return True
++        answer = QMessageBox.question(
++            self,
++            "객체 검출 중",
++            "객체 검출이 진행 중입니다. 중단하고 계속할까요?\n중단하면 이번 검출 결과는 저장되지 않습니다.",
++            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
++            QMessageBox.StandardButton.No,
++        )
++        if answer != QMessageBox.StandardButton.Yes:
++            return False
++        self._stop_detection(kill=True)
++        self.detection_panel.set_status("객체 검출을 중단했습니다.")
++        return True
++
++    def _detection_finished(self, document: dict) -> None:
++        context = self._detection_context
++        self._stop_detection(kill=False)
++        if context is None:
++            return
++        case = next((item for item in self.cases if item.uid == context.case_uid), None)
++        if (
++            case is None
++            or self.repository.workspace != context.workspace
++            or not any(_same_path(path, context.video_path) for path in case.videos)
++        ):
++            self.detection_panel.set_status("검출 대상 사고나 영상이 삭제되어 결과를 버렸습니다.")
++            return
++        request = context.request
++        try:
++            objects, added, replaced = merge_detection_result(
++                case.objects_for_video(context.video_path),
++                document,
++                role=request.role,
++                definition=self.repository.form_definition,
++                start_frame=request.start_frame,
++                end_frame=request.end_frame,
++                frame_step=request.frame_step,
++                classes=request.classes,
++            )
++        except (KeyError, TypeError, ValueError) as exc:
++            self.detection_panel.set_status(f"검출 결과를 반영하지 못했습니다: {exc}")
++            return
++        self._store_objects(case, objects, context.video_path)
++        warnings = document.get("warnings") or []
++        message = f"검출 완료 · 새 객체 {added}개"
++        if replaced:
++            message += f" · 이전 자동 검출 {replaced}개 교체"
++        if warnings:
++            message += f" · 경고 {len(warnings)}건"
++        message += f" ({ROLE_SHORT[request.role]} 역할). 라벨을 확인한 뒤 탭에 반영해 주세요."
++        self.detection_panel.set_status(message)
++        self.statusBar().showMessage(message, 6000)
++
++    def _detection_failed(self, message: str) -> None:
++        self._stop_detection(kill=False)
++        self.detection_panel.set_status(message)
++        QMessageBox.warning(self, "객체 검출 실패", message)
++
++    def _detection_cancelled(self) -> None:
++        self._stop_detection(kill=False)
++        self.detection_panel.set_status("검출을 취소했습니다. 결과는 반영하지 않았습니다.")
++
++    # -- editing ---------------------------------------------------------------
++
++    def _object_selection_changed(self, uids: list[str]) -> None:
++        self._selected_object_uids = list(uids)
++        if len(uids) == 1:
++            item = self._current_objects().find(uids[0])
++            if item is not None and item.box_at(self._overlay_frame) is None:
++                self._seek_video(item.nearest_frame(self._overlay_frame))
++        self._update_overlay()
++
++    def _canvas_box_clicked(self, uid: str) -> None:
++        if not self.detection_scroll.isVisibleTo(self):
++            return
++        self.detection_panel.select_uids([uid] if uid else [])
++
++    def _canvas_box_drawn(self, bbox: tuple[float, float, float, float]) -> None:
++        role = self.detection_panel.new_object_role
++        frame = self._overlay_frame
++        created = []
++
++        def change(objects: VideoObjects) -> VideoObjects:
++            result, item = add_manual_object(objects, frame, bbox, role, None)
++            created.append(item)
++            return result
++
++        self._edit_current_objects(change)
++        if created:
++            self.detection_panel.select_uids([created[0].uid])
++            self.statusBar().showMessage(
++                f"{created[0].object_id} 객체를 추가했습니다. 라벨을 선택해 주세요.", 4000
++            )
++
++    def _change_object_role(self, uids: list[str], role: str) -> None:
++        definition = self.repository.form_definition
++        self._edit_current_objects(
++            lambda objects: set_objects_role(objects, uids, role, definition)
++        )
++        self.detection_panel.select_uids(uids)
++
++    def _change_object_label(self, uids: list[str], label: LabelRef | None) -> None:
++        definition = self.repository.form_definition
++        self._edit_current_objects(
++            lambda objects: set_objects_label(objects, uids, label, definition)
++        )
++        self.detection_panel.select_uids(uids)
++
++    def _change_object_reviewed(self, uids: list[str], reviewed: bool) -> None:
++        self._edit_current_objects(lambda objects: set_objects_reviewed(objects, uids, reviewed))
++        self.detection_panel.select_uids(uids)
++
++    def _delete_objects(self, uids: list[str]) -> None:
++        self._edit_current_objects(lambda objects: delete_objects(objects, uids))
++
++    def _delete_object_box(self, uid: str) -> None:
++        frame = self._overlay_frame
++        self._edit_current_objects(lambda objects: delete_box(objects, uid, frame))
++        self.detection_panel.select_uids([uid])
++
++    # -- form ----------------------------------------------------------------
++
++    def apply_objects_to_form(self, role: str) -> None:
++        case, matching = self._detection_case()
++        if case is None or not matching:
++            return
++        definition = self.repository.form_definition
++        objects = case.video_objects().objects
++        updates = [
++            update
++            for update in form_updates(objects, role, definition, case.values)
++            if update.field_key in self.investigation.editors
++        ]
++        canonical = definition.canonical_values(case.values)
++        set_exists = (
++            role == ROLE_TRIGGER
++            and OBSTACLE_EXISTS_FIELD in self.investigation.editors
++            and canonical.get(OBSTACLE_EXISTS_FIELD) != "유"
++            and any(item.role == ROLE_TRIGGER and item.label for item in objects)
++        )
++        tab = "객체" if role == ROLE_TRIGGER else "충돌"
++        if not updates and not set_exists:
++            self.statusBar().showMessage(f"'{tab}' 탭에 새로 추가할 항목이 없습니다.", 4000)
++            return
++        lines = [f"· {text}" for update in updates for text in update.added_texts]
++        if set_exists:
++            lines.insert(0, "· 장애물 유무 → 유")
++        unlabeled = sum(1 for item in objects if item.role == role and item.label is None)
++        message = f"'{tab}' 탭에 다음 항목을 추가합니다 (기존 선택은 유지).\n\n" + "\n".join(lines)
++        if unlabeled:
++            message += f"\n\n라벨 미지정 객체 {unlabeled}개는 제외됩니다."
++        answer = QMessageBox.question(
++            self,
++            f"{tab} 탭에 반영",
++            message,
++            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
++            QMessageBox.StandardButton.Yes,
++        )
++        if answer != QMessageBox.StandardButton.Yes:
++            return
++        if set_exists:
++            stored = definition.stored_value(OBSTACLE_EXISTS_FIELD, "유")
++            self.investigation.editors[OBSTACLE_EXISTS_FIELD].set_value(stored)
++            self._field_changed(OBSTACLE_EXISTS_FIELD, stored)
++        for update in updates:
++            self.investigation.editors[update.field_key].set_value(update.stored_values)
++            self._field_changed(update.field_key, update.stored_values)
++        section = "trigger_objects" if role == ROLE_TRIGGER else "collision_objects"
++        tab_index = next(
++            (i for i, item in enumerate(self.investigation.sections) if item.key == section),
++            None,
++        )
++        if tab_index is not None:
++            self.investigation.tabs.setCurrentIndex(tab_index)
++        added = sum(len(update.added_texts) for update in updates)
++        self.statusBar().showMessage(f"'{tab}' 탭에 {added}개 항목을 추가했습니다.", 4000)
++
++
++__all__ = ["DetectionMixin"]
+diff --git a/investigator/detection_process.py b/investigator/detection_process.py
+new file mode 100644
+index 0000000..df64eb8
+--- /dev/null
++++ b/investigator/detection_process.py
+@@ -0,0 +1,279 @@
++"""Run the SAM 3 detection worker in a separate Python process (QProcess).
++
++The worker usually runs from its own virtual environment with torch and
++transformers installed. It reports JSONL events on stdout and writes the
++result document only on success, so a cancelled or failed run leaves nothing
++behind for the GUI to merge.
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import sys
++import tempfile
++from dataclasses import dataclass, field
++from pathlib import Path
++
++from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QTimer, Signal
++
++from investigator.object_detection import worker_class_config
++
++REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
++SETTINGS_PYTHON = "detection/python"
++SETTINGS_MODEL = "detection/model"
++SETTINGS_DEVICE = "detection/device"
++DEFAULT_MODEL = "facebook/sam3"
++CANCEL_GRACE_MS = 15_000
++MISSING_RUNTIME_HINT = (
++    "SAM 3 실행 환경(torch·transformers)을 찾지 못했습니다. "
++    "설정 → 객체 검출 환경에서 검출용 Python을 지정해 주세요."
++)
++
++
++@dataclass(slots=True)
++class DetectionSettings:
++    python: str = ""
++    model: str = DEFAULT_MODEL
++    device: str = "auto"
++
++    @property
++    def executable(self) -> str:
++        return self.python.strip() or sys.executable
++
++    @classmethod
++    def load(cls, settings: QSettings | None = None) -> DetectionSettings:
++        store = settings or QSettings()
++        device = str(store.value(SETTINGS_DEVICE, "auto") or "auto")
++        return cls(
++            python=str(store.value(SETTINGS_PYTHON, "") or ""),
++            model=str(store.value(SETTINGS_MODEL, DEFAULT_MODEL) or DEFAULT_MODEL),
++            device=device if device in {"auto", "cuda", "cpu"} else "auto",
++        )
++
++    def save(self, settings: QSettings | None = None) -> None:
++        store = settings or QSettings()
++        store.setValue(SETTINGS_PYTHON, self.python.strip())
++        store.setValue(SETTINGS_MODEL, self.model.strip() or DEFAULT_MODEL)
++        store.setValue(SETTINGS_DEVICE, self.device)
++
++
++@dataclass(slots=True)
++class DetectionRequest:
++    video_path: Path
++    start_frame: int  # zero-based, inclusive
++    end_frame: int  # zero-based, inclusive
++    frame_step: int
++    classes: list[str]
++    role: str
++    case_uid: str = ""
++    workspace: str = ""
++    extra_args: list[str] = field(default_factory=list)
++
++    @property
++    def frame_count(self) -> int:
++        return len(range(self.start_frame, self.end_frame + 1, max(1, self.frame_step)))
++
++
++def friendly_error(message: str) -> str:
++    text = message.strip()
++    if "No module named 'torch'" in text or "No module named 'transformers'" in text:
++        return MISSING_RUNTIME_HINT
++    if "Sam3" in text and ("cannot import" in text or "has no attribute" in text):
++        return "설치된 transformers가 SAM 3를 지원하지 않습니다. transformers를 최신 버전으로 올려 주세요."
++    if "gated" in text.casefold() or "401" in text:
++        return (
++            "SAM 3 모델에 접근할 수 없습니다. Hugging Face 사용 동의와 로그인 상태를 확인해 주세요."
++        )
++    if "out of memory" in text.casefold():
++        return "GPU 메모리가 부족합니다. 처리 구간·간격을 줄이거나 클래스 수를 줄여 주세요."
++    return text or "객체 검출 중 알 수 없는 오류가 발생했습니다."
++
++
++class DetectionJob(QObject):
++    started = Signal(int)  # frames to process
++    progress = Signal(int, int, int)  # processed, total, zero-based frame
++    status = Signal(str)
++    finished = Signal(dict)  # worker result document
++    failed = Signal(str)
++    cancelled = Signal()
++
++    def __init__(
++        self,
++        request: DetectionRequest,
++        settings: DetectionSettings,
++        parent: QObject | None = None,
++    ) -> None:
++        super().__init__(parent)
++        self.request = request
++        self.settings = settings
++        self._temp_dir = Path(tempfile.mkdtemp(prefix="avat-detect-"))
++        self._output = self._temp_dir / "result.json"
++        self._buffer = b""
++        self._stderr = b""
++        self._completed = False
++        self._error: str | None = None
++        self._cancel_requested = False
++        self._done = False
++        self._process = QProcess(self)
++        self._process.readyReadStandardOutput.connect(self._read_stdout)
++        self._process.readyReadStandardError.connect(self._read_stderr)
++        self._process.finished.connect(self._process_finished)
++        self._process.errorOccurred.connect(self._process_error)
++        self._kill_timer = QTimer(self)
++        self._kill_timer.setSingleShot(True)
++        self._kill_timer.timeout.connect(self._process.kill)
++
++    @property
++    def is_running(self) -> bool:
++        return self._process.state() != QProcess.ProcessState.NotRunning
++
++    def arguments(self) -> list[str]:
++        config_path = self._temp_dir / "classes.json"
++        config_path.write_text(
++            json.dumps(worker_class_config(self.request.classes), ensure_ascii=False),
++            encoding="utf-8",
++        )
++        request = self.request
++        return [
++            "-m",
++            "investigator.detection_worker",
++            "--video",
++            str(request.video_path),
++            "--output",
++            str(self._output),
++            "--config",
++            str(config_path),
++            "--classes",
++            ",".join(request.classes),
++            "--start-frame",
++            str(request.start_frame),
++            "--end-frame",
++            str(request.end_frame + 1),
++            "--frame-step",
++            str(max(1, request.frame_step)),
++            "--model",
++            self.settings.model or DEFAULT_MODEL,
++            "--device",
++            self.settings.device,
++            "--stdin-cancel",
++            *request.extra_args,
++        ]
++
++    def start(self) -> None:
++        environment = QProcessEnvironment.systemEnvironment()
++        existing = environment.value("PYTHONPATH", "")
++        separator = ";" if sys.platform.startswith("win") else ":"
++        environment.insert(
++            "PYTHONPATH", str(REPOSITORY_ROOT) + (separator + existing if existing else "")
++        )
++        environment.insert("PYTHONIOENCODING", "utf-8")
++        environment.insert("PYTHONUTF8", "1")
++        self._process.setProcessEnvironment(environment)
++        self._process.setWorkingDirectory(str(REPOSITORY_ROOT))
++        self._process.setProgram(self.settings.executable)
++        self._process.setArguments(self.arguments())
++        self.status.emit("검출 프로세스를 시작합니다…")
++        self._process.start()
++
++    def cancel(self) -> None:
++        if not self.is_running:
++            return
++        self._cancel_requested = True
++        self.status.emit("현재 프레임을 마치고 취소합니다…")
++        self._process.write(b"cancel\n")
++        self._kill_timer.start(CANCEL_GRACE_MS)
++
++    def kill(self) -> None:
++        """Stop immediately (application exit or project switch)."""
++
++        self._cancel_requested = True
++        if self.is_running:
++            self._process.kill()
++            self._process.waitForFinished(3000)
++        self._cleanup()
++
++    def _read_stdout(self) -> None:
++        self._buffer += bytes(self._process.readAllStandardOutput())
++        *lines, self._buffer = self._buffer.split(b"\n")
++        for raw in lines:
++            self._handle_line(raw)
++
++    def _read_stderr(self) -> None:
++        # Keep only the tail: model loading can print long progress output.
++        self._stderr = (self._stderr + bytes(self._process.readAllStandardError()))[-8000:]
++
++    def _handle_line(self, raw: bytes) -> None:
++        text = raw.decode("utf-8", errors="replace").strip()
++        if not text:
++            return
++        try:
++            event = json.loads(text)
++        except json.JSONDecodeError:
++            return
++        kind = event.get("type")
++        if kind == "loading_model":
++            self.status.emit(f"모델을 불러오는 중… ({event.get('model_id', '')})")
++        elif kind == "started":
++            total = int(event.get("total_frames", 0))
++            device = str(event.get("device", "")).upper()
++            note = event.get("device_note")
++            self.status.emit(
++                f"{device}에서 {total:,}개 프레임을 처리합니다." + (f" {note}" if note else "")
++            )
++            self.started.emit(total)
++        elif kind == "progress":
++            self.progress.emit(
++                int(event.get("processed", 0)),
++                int(event.get("total", 0)),
++                int(event.get("frame_index", 0)),
++            )
++        elif kind == "warning":
++            self.status.emit(str(event.get("message", "")))
++        elif kind == "completed":
++            self._completed = True
++        elif kind == "error":
++            self._error = friendly_error(str(event.get("message", "")))
++
++    def _process_error(self, error: QProcess.ProcessError) -> None:
++        if error == QProcess.ProcessError.FailedToStart and not self._done:
++            self._finish_failed(
++                f"검출용 Python을 실행할 수 없습니다: {self.settings.executable}\n"
++                "설정 → 객체 검출 환경에서 경로를 확인해 주세요."
++            )
++
++    def _process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
++        if self._done:
++            return
++        self._kill_timer.stop()
++        if self._buffer:
++            self._handle_line(self._buffer)
++            self._buffer = b""
++        if self._completed and exit_code == 0 and self._output.is_file():
++            try:
++                document = json.loads(self._output.read_text(encoding="utf-8"))
++            except (OSError, ValueError) as exc:
++                self._finish_failed(f"검출 결과를 읽지 못했습니다: {exc}")
++                return
++            self._done = True
++            self._cleanup()
++            self.finished.emit(document)
++            return
++        if self._cancel_requested or exit_code == 2:
++            self._done = True
++            self._cleanup()
++            self.cancelled.emit()
++            return
++        stderr = self._stderr.decode("utf-8", errors="replace")
++        self._finish_failed(self._error or friendly_error(stderr[-600:]))
++
++    def _finish_failed(self, message: str) -> None:
++        self._done = True
++        self._cleanup()
++        self.failed.emit(message)
++
++    def _cleanup(self) -> None:
++        shutil.rmtree(self._temp_dir, ignore_errors=True)
++
++
++__all__ = ["DetectionJob", "DetectionRequest", "DetectionSettings", "friendly_error"]
+diff --git a/investigator/detection_worker/__init__.py b/investigator/detection_worker/__init__.py
+new file mode 100644
+index 0000000..0a2736b
+--- /dev/null
++++ b/investigator/detection_worker/__init__.py
+@@ -0,0 +1,12 @@
++"""AVAT SAM 3 텍스트 프롬프트 객체 검출 worker (프로토타입).
++
++PySide6를 불러오지 않는다. AVAT와 다른 가상환경(torch·transformers 설치)에서
++``python -m investigator.detection_worker``로 실행한다.
++
++GUI 프로세스와 분리된 별도 프로세스로 실행되며, 표준 출력으로 JSONL 진행
++이벤트를 내보내고 성공했을 때만 결과 JSON 문서를 원자적으로 저장한다.
++"""
++
++WORKER_NAME = "sam3_prompt_detector"
++WORKER_VERSION = "0.1.0"
++RESULT_SCHEMA_VERSION = 1
+diff --git a/investigator/detection_worker/__main__.py b/investigator/detection_worker/__main__.py
+new file mode 100644
+index 0000000..0ddd61f
+--- /dev/null
++++ b/investigator/detection_worker/__main__.py
+@@ -0,0 +1,105 @@
++"""명령행 진입점: python -m investigator.detection_worker --video ... --output ...
++
++종료 코드: 0 성공, 1 오류, 2 취소, 3 인자 오류.
++"""
++
++from __future__ import annotations
++
++import argparse
++import sys
++import traceback
++from pathlib import Path
++
++from .classes import load_config
++from .events import CancelToken, EventWriter
++from .runner import Cancelled, RunOptions, run, write_atomic
++
++EXIT_OK, EXIT_ERROR, EXIT_CANCELLED, EXIT_USAGE = 0, 1, 2, 3
++
++
++def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
++    p = argparse.ArgumentParser(
++        prog="investigator.detection_worker", description="AVAT SAM 3 텍스트 프롬프트 검출 worker"
++    )
++    p.add_argument("--video", required=True, type=Path)
++    p.add_argument("--output", required=True, type=Path, help="결과 JSON 경로(성공 시에만 생성)")
++    p.add_argument("--config", type=Path, default=None, help="클래스·프롬프트 JSON(기본 내장 설정)")
++    p.add_argument(
++        "--classes", default=None, help="쉼표로 구분한 클래스 key. 생략하면 enabled 클래스"
++    )
++    p.add_argument("--sample-fps", type=float, default=2.0)
++    p.add_argument(
++        "--frame-step", type=int, default=None, help="N프레임마다 처리(--sample-fps 대신)"
++    )
++    p.add_argument("--start-frame", type=int, default=0)
++    p.add_argument("--end-frame", type=int, default=None, help="이 프레임은 포함하지 않음")
++    p.add_argument("--mask-threshold", type=float, default=0.5)
++    p.add_argument("--model", default="facebook/sam3", help="Hugging Face 모델 ID 또는 로컬 폴더")
++    p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
++    p.add_argument("--half", action="store_true", help="CUDA에서 bfloat16 사용")
++    p.add_argument("--no-polygons", action="store_true")
++    p.add_argument("--cancel-file", type=Path, default=None)
++    p.add_argument("--stdin-cancel", action="store_true", help="표준 입력의 'cancel' 줄로 취소")
++    return p.parse_args(argv)
++
++
++def main(argv: list[str] | None = None, backend=None) -> int:
++    events = EventWriter()
++    try:
++        args = parse_args(argv)
++    except SystemExit as exc:
++        return EXIT_USAGE if exc.code else EXIT_OK
++
++    try:
++        config = load_config(args.config)
++        keys = [k.strip() for k in args.classes.split(",") if k.strip()] if args.classes else None
++        classes = config.enabled(keys)
++        if not classes:
++            raise ValueError("선택된 클래스가 없습니다.")
++        if not args.video.is_file():
++            raise ValueError(f"영상 파일이 없습니다: {args.video}")
++    except (ValueError, KeyError, OSError) as exc:
++        events.emit("error", stage="arguments", message=str(exc))
++        return EXIT_USAGE
++
++    cancel = CancelToken(args.cancel_file, watch_stdin=args.stdin_cancel)
++    opts = RunOptions(
++        video_path=args.video,
++        output_path=args.output,
++        sample_fps=args.sample_fps,
++        frame_step=args.frame_step,
++        start_frame=args.start_frame,
++        end_frame=args.end_frame,
++        mask_threshold=args.mask_threshold,
++        include_polygons=not args.no_polygons,
++    )
++    try:
++        device_note = None
++        if backend is None:
++            events.emit("loading_model", model_id=args.model)
++            from .backend import Sam3Backend
++
++            backend = Sam3Backend(args.model, args.device, args.half)
++            device_note = backend.fallback_reason
++        doc = run(opts, backend, config, classes, events, cancel, device_note)
++        if cancel.cancelled:
++            raise Cancelled()
++        write_atomic(doc, args.output)
++        events.emit(
++            "completed",
++            result_path=str(args.output),
++            device=backend.device,
++            detections=len(doc["detections"]),
++            objects=len({d["object_id"] for d in doc["detections"]}),
++        )
++        return EXIT_OK
++    except Cancelled:
++        events.emit("cancelled", message="취소되어 결과를 저장하지 않았습니다.")
++        return EXIT_CANCELLED
++    except Exception as exc:  # noqa: BLE001 - GUI에 오류를 전달하는 최상위 경계
++        events.emit("error", stage="run", message=str(exc), traceback=traceback.format_exc(limit=5))
++        return EXIT_ERROR
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/investigator/detection_worker/backend.py b/investigator/detection_worker/backend.py
+new file mode 100644
+index 0000000..9e3be05
+--- /dev/null
++++ b/investigator/detection_worker/backend.py
+@@ -0,0 +1,112 @@
++"""SAM 3 추론 백엔드.
++
++worker 본체는 `PromptBackend` 프로토콜에만 의존하므로 테스트에서는 가짜
++백엔드로 바꿔 끼울 수 있다. torch/transformers는 실제 백엔드를 만들 때만
++불러온다.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Protocol
++
++import numpy as np
++
++
++@dataclass
++class RawInstance:
++    mask: np.ndarray  # (H, W) bool, 원본 프레임 크기
++    score: float
++    box_xyxy: tuple[float, float, float, float] | None = None
++
++
++class PromptBackend(Protocol):
++    device: str
++    model_id: str
++
++    def predict(
++        self,
++        frame_rgb: np.ndarray,
++        prompts: list[str],
++        threshold: float,
++        mask_threshold: float,
++    ) -> dict[str, list[RawInstance]]:
++        """한 프레임에 여러 텍스트 프롬프트를 적용해 프롬프트별 인스턴스를 돌려준다."""
++        ...
++
++
++class Sam3Backend:
++    """Hugging Face transformers의 Sam3Model을 쓰는 백엔드."""
++
++    def __init__(self, model_id: str = "facebook/sam3", device: str = "auto", half: bool = False):
++        import torch
++        from transformers import Sam3Model, Sam3Processor
++
++        self._torch = torch
++        self.model_id = model_id
++        self.device, self.fallback_reason = _pick_device(torch, device)
++        dtype = torch.bfloat16 if (half and self.device == "cuda") else torch.float32
++        self.processor = Sam3Processor.from_pretrained(model_id)
++        try:
++            self.model = Sam3Model.from_pretrained(model_id, torch_dtype=dtype).to(self.device)
++        except RuntimeError as exc:  # CUDA 초기화·메모리 오류 시 CPU로 대체
++            if self.device != "cuda":
++                raise
++            self.fallback_reason = f"CUDA 로드 실패, CPU로 대체: {exc}"
++            self.device = "cpu"
++            self.model = Sam3Model.from_pretrained(model_id, torch_dtype=torch.float32).to("cpu")
++        self.model.eval()
++        self._dtype = next(self.model.parameters()).dtype
++        self._text_cache: dict[str, object] = {}
++
++    def _text_inputs(self, prompt: str):
++        cached = self._text_cache.get(prompt)
++        if cached is None:
++            cached = self.processor(text=prompt, return_tensors="pt").to(self.device)
++            self._text_cache[prompt] = cached
++        return cached
++
++    def predict(self, frame_rgb, prompts, threshold, mask_threshold):
++        from PIL import Image
++
++        torch = self._torch
++        image = Image.fromarray(frame_rgb)
++        img_inputs = self.processor(images=image, return_tensors="pt").to(self.device)
++        target_sizes = img_inputs.get("original_sizes").tolist()
++        pixel_values = img_inputs.pixel_values.to(self._dtype)
++        results: dict[str, list[RawInstance]] = {}
++        with torch.inference_mode():
++            # 프레임당 비전 특징은 한 번만 계산하고 프롬프트마다 재사용한다.
++            vision_embeds = self.model.get_vision_features(pixel_values=pixel_values)
++            for prompt in prompts:
++                outputs = self.model(vision_embeds=vision_embeds, **self._text_inputs(prompt))
++                post = self.processor.post_process_instance_segmentation(
++                    outputs,
++                    threshold=threshold,
++                    mask_threshold=mask_threshold,
++                    target_sizes=target_sizes,
++                )[0]
++                masks = post["masks"].detach().to("cpu").numpy().astype(bool)
++                scores = post["scores"].detach().float().to("cpu").numpy()
++                boxes = post["boxes"].detach().float().to("cpu").numpy()
++                results[prompt] = [
++                    RawInstance(mask=masks[i], score=float(scores[i]), box_xyxy=tuple(boxes[i]))
++                    for i in range(len(scores))
++                ]
++        return results
++
++
++def _pick_device(torch, requested: str) -> tuple[str, str | None]:
++    if requested == "cpu":
++        return "cpu", None
++    if torch.cuda.is_available():
++        try:
++            torch.zeros(1, device="cuda")
++            return "cuda", None
++        except RuntimeError as exc:
++            if requested == "cuda":
++                raise
++            return "cpu", f"CUDA 초기화 실패, CPU로 대체: {exc}"
++    if requested == "cuda":
++        raise RuntimeError("CUDA를 요청했지만 사용할 수 있는 GPU가 없습니다.")
++    return "cpu", "CUDA를 사용할 수 없어 CPU로 실행합니다(매우 느림)."
+diff --git a/investigator/detection_worker/classes.py b/investigator/detection_worker/classes.py
+new file mode 100644
+index 0000000..f1907b2
+--- /dev/null
++++ b/investigator/detection_worker/classes.py
+@@ -0,0 +1,86 @@
++"""검출 대상 클래스 정의.
++
++각 클래스는 하나 이상의 영어 텍스트 프롬프트를 가진다. 같은 클래스의 여러
++프롬프트 결과는 하나로 합쳐지고 중복 마스크는 제거된다.
++"""
++
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass, field
++from pathlib import Path
++
++
++@dataclass(frozen=True)
++class ClassDef:
++    key: str
++    label: str
++    prompts: tuple[str, ...]
++    object_prefix: str = "R"
++    threshold: float = 0.4
++    enabled: bool = True
++    # 같은 그룹 안의 클래스끼리는 같은 영역을 두고 경쟁한다(예: 건물벽 vs 담벼락).
++    suppression_group: str | None = None
++    min_area_ratio: float = 0.0005
++
++
++@dataclass(frozen=True)
++class ClassConfig:
++    classes: tuple[ClassDef, ...]
++    cross_class_iou: float = 0.6
++    same_class_iou: float = 0.7
++    max_detections_per_prompt: int = 30
++    notes: dict = field(default_factory=dict)
++
++    def enabled(self, keys: list[str] | None = None) -> tuple[ClassDef, ...]:
++        if keys:
++            wanted = set(keys)
++            unknown = wanted - {c.key for c in self.classes}
++            if unknown:
++                raise ValueError(f"알 수 없는 클래스: {', '.join(sorted(unknown))}")
++            return tuple(c for c in self.classes if c.key in wanted)
++        return tuple(c for c in self.classes if c.enabled)
++
++
++def _default_config() -> ClassConfig:
++    # 앱과 같은 클래스 표(검출 대상 = '객체' 탭과 '충돌' 탭 선택지의 합집합)를 쓴다.
++    from investigator.object_detection import DETECTION_CLASSES, worker_class_config
++
++    data = worker_class_config(item.key for item in DETECTION_CLASSES)
++    return _config_from_dict(data)
++
++
++def load_config(path: str | Path | None) -> ClassConfig:
++    """JSON 설정 파일을 읽는다. 없으면 앱의 기본 클래스 표를 쓴다."""
++    if path is None:
++        return _default_config()
++    return _config_from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
++
++
++def _config_from_dict(data: dict) -> ClassConfig:
++    classes = []
++    for item in data["classes"]:
++        prompts = item.get("prompts")
++        if not prompts:
++            raise ValueError(f"클래스 {item.get('key')!r}에 prompts가 없습니다.")
++        classes.append(
++            ClassDef(
++                key=item["key"],
++                label=item.get("label", item["key"]),
++                prompts=tuple(prompts),
++                object_prefix=item.get("object_prefix", "R"),
++                threshold=float(item.get("threshold", 0.4)),
++                enabled=bool(item.get("enabled", True)),
++                suppression_group=item.get("suppression_group"),
++                min_area_ratio=float(item.get("min_area_ratio", 0.0005)),
++            )
++        )
++    keys = [c.key for c in classes]
++    if len(keys) != len(set(keys)):
++        raise ValueError("클래스 key가 중복되었습니다.")
++    return ClassConfig(
++        classes=tuple(classes),
++        cross_class_iou=float(data.get("cross_class_iou", 0.6)),
++        same_class_iou=float(data.get("same_class_iou", 0.7)),
++        max_detections_per_prompt=int(data.get("max_detections_per_prompt", 30)),
++    )
+diff --git a/investigator/detection_worker/events.py b/investigator/detection_worker/events.py
+new file mode 100644
+index 0000000..81ba9f7
+--- /dev/null
++++ b/investigator/detection_worker/events.py
+@@ -0,0 +1,56 @@
++"""GUI 프로세스로 보내는 JSONL 이벤트와 취소 신호 처리."""
++
++from __future__ import annotations
++
++import json
++import sys
++import threading
++import time
++from pathlib import Path
++from typing import TextIO
++
++
++class EventWriter:
++    """한 줄에 JSON 객체 하나. 매 줄마다 flush 해서 QProcess가 바로 읽게 한다."""
++
++    def __init__(self, stream: TextIO | None = None):
++        self._stream = stream or sys.stdout
++        self._lock = threading.Lock()
++
++    def emit(self, event_type: str, **payload) -> None:
++        record = {"type": event_type, "ts": round(time.time(), 3), **payload}
++        line = json.dumps(record, ensure_ascii=False)
++        with self._lock:
++            self._stream.write(line + "\n")
++            self._stream.flush()
++
++
++class CancelToken:
++    """취소 신호: 표준 입력의 `cancel` 줄 또는 취소 파일 존재."""
++
++    def __init__(self, cancel_file: str | Path | None = None, watch_stdin: bool = False):
++        self._event = threading.Event()
++        self._cancel_file = Path(cancel_file) if cancel_file else None
++        if watch_stdin:
++            threading.Thread(target=self._watch_stdin, daemon=True).start()
++
++    def _watch_stdin(self) -> None:
++        try:
++            for line in sys.stdin:
++                if line.strip().lower() == "cancel":
++                    self._event.set()
++                    return
++        except (OSError, ValueError):
++            return
++
++    def cancel(self) -> None:
++        self._event.set()
++
++    @property
++    def cancelled(self) -> bool:
++        if self._event.is_set():
++            return True
++        if self._cancel_file is not None and self._cancel_file.exists():
++            self._event.set()
++            return True
++        return False
+diff --git a/investigator/detection_worker/postprocess.py b/investigator/detection_worker/postprocess.py
+new file mode 100644
+index 0000000..0d98993
+--- /dev/null
++++ b/investigator/detection_worker/postprocess.py
+@@ -0,0 +1,120 @@
++"""마스크 → 박스·폴리곤 변환과 중복 제거."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++
++import cv2
++import numpy as np
++
++from .backend import RawInstance
++from .classes import ClassConfig, ClassDef
++
++
++@dataclass
++class Detection:
++    class_key: str
++    prompt: str
++    score: float
++    bbox_xywh: tuple[float, float, float, float]
++    mask: np.ndarray | None = field(default=None, repr=False)
++    polygon: list[list[float]] = field(default_factory=list)
++    area: int = 0
++
++
++def mask_to_bbox(mask: np.ndarray) -> tuple[float, float, float, float] | None:
++    ys, xs = np.nonzero(mask)
++    if xs.size == 0:
++        return None
++    x0, x1 = int(xs.min()), int(xs.max()) + 1
++    y0, y1 = int(ys.min()), int(ys.max()) + 1
++    return float(x0), float(y0), float(x1 - x0), float(y1 - y0)
++
++
++def mask_to_polygon(mask: np.ndarray, max_points: int = 64) -> list[list[float]]:
++    """가장 큰 외곽선을 단순화한 폴리곤. 나중에 폴리곤 주석으로 쓸 수 있게 보존한다."""
++    contours, _ = cv2.findContours(
++        mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
++    )
++    if not contours:
++        return []
++    contour = max(contours, key=cv2.contourArea)
++    eps = 0.005 * cv2.arcLength(contour, True)
++    approx = cv2.approxPolyDP(contour, eps, True)
++    while len(approx) > max_points:
++        eps *= 1.5
++        approx = cv2.approxPolyDP(contour, eps, True)
++    return [[float(p[0][0]), float(p[0][1])] for p in approx]
++
++
++def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
++    inter = np.logical_and(a, b).sum()
++    if inter == 0:
++        return 0.0
++    union = np.logical_or(a, b).sum()
++    return float(inter) / float(union)
++
++
++def box_iou(a: tuple[float, ...], b: tuple[float, ...]) -> float:
++    ax, ay, aw, ah = a
++    bx, by, bw, bh = b
++    ix = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
++    iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
++    inter = ix * iy
++    union = aw * ah + bw * bh - inter
++    return inter / union if union > 0 else 0.0
++
++
++def _nms(dets: list[Detection], iou_thr: float) -> list[Detection]:
++    kept: list[Detection] = []
++    for det in sorted(dets, key=lambda d: d.score, reverse=True):
++        if all(mask_iou(det.mask, k.mask) <= iou_thr for k in kept):
++            kept.append(det)
++    return kept
++
++
++def build_detections(
++    raw: dict[str, list[RawInstance]],
++    classes: tuple[ClassDef, ...],
++    config: ClassConfig,
++    frame_shape: tuple[int, int],
++) -> list[Detection]:
++    """프롬프트별 원시 결과를 클래스 단위 검출로 정리한다."""
++    h, w = frame_shape
++    frame_area = float(h * w)
++    per_class: dict[str, list[Detection]] = {}
++    for cls in classes:
++        dets: list[Detection] = []
++        for prompt in cls.prompts:
++            instances = sorted(raw.get(prompt, []), key=lambda r: r.score, reverse=True)
++            for inst in instances[: config.max_detections_per_prompt]:
++                if inst.score < cls.threshold:
++                    continue
++                mask = inst.mask.astype(bool)
++                area = int(mask.sum())
++                if area < cls.min_area_ratio * frame_area:
++                    continue
++                bbox = mask_to_bbox(mask)
++                if bbox is None:
++                    continue
++                dets.append(Detection(cls.key, prompt, inst.score, bbox, mask, area=area))
++        per_class[cls.key] = _nms(dets, config.same_class_iou)
++
++    # 같은 suppression_group 안에서는 같은 영역을 두 클래스가 동시에 갖지 않게 한다.
++    groups: dict[str, list[Detection]] = {}
++    for cls in classes:
++        if cls.suppression_group:
++            groups.setdefault(cls.suppression_group, []).extend(per_class[cls.key])
++    suppressed: set[int] = set()
++    for members in groups.values():
++        survivors = _nms(members, config.cross_class_iou)
++        suppressed.update(id(d) for d in members if all(d is not s for s in survivors))
++
++    out: list[Detection] = []
++    for cls in classes:
++        for det in per_class[cls.key]:
++            if id(det) in suppressed:
++                continue
++            det.polygon = mask_to_polygon(det.mask)
++            out.append(det)
++    return out
+diff --git a/investigator/detection_worker/runner.py b/investigator/detection_worker/runner.py
+new file mode 100644
+index 0000000..4d99155
+--- /dev/null
++++ b/investigator/detection_worker/runner.py
+@@ -0,0 +1,209 @@
++"""영상 전체를 샘플링해 SAM 3로 검출하고 결과 문서를 만든다."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import tempfile
++from dataclasses import dataclass
++from datetime import UTC, datetime
++from pathlib import Path
++
++import cv2
++
++from . import RESULT_SCHEMA_VERSION, WORKER_NAME, WORKER_VERSION
++from .backend import PromptBackend
++from .classes import ClassConfig, ClassDef
++from .events import CancelToken, EventWriter
++from .postprocess import build_detections
++from .tracking import SimpleTracker
++
++
++class Cancelled(Exception):
++    pass
++
++
++@dataclass
++class RunOptions:
++    video_path: Path
++    output_path: Path
++    sample_fps: float = 2.0
++    frame_step: int | None = None  # 지정하면 sample_fps 대신 N프레임 간격
++    start_frame: int = 0
++    end_frame: int | None = None  # 포함하지 않음
++    mask_threshold: float = 0.5
++    include_polygons: bool = True
++
++
++def plan_frames(frame_count: int, video_fps: float, opts: RunOptions) -> list[int]:
++    """처리할 프레임 번호 목록. frame_step 또는 sample_fps로 간격을 정한다."""
++    if frame_count <= 0:
++        raise ValueError("영상 프레임 수를 확인할 수 없습니다.")
++    start = max(0, opts.start_frame)
++    end = frame_count if opts.end_frame is None else min(frame_count, opts.end_frame)
++    if start >= end:
++        raise ValueError(f"처리 구간이 비었습니다: start={start}, end={end}")
++    fps = video_fps if video_fps and video_fps > 0 else 30.0
++    if opts.frame_step is not None:
++        step = max(1, int(opts.frame_step))
++    else:
++        step = max(1, round(fps / opts.sample_fps)) if opts.sample_fps > 0 else 1
++    return list(range(start, end, step))
++
++
++def run(
++    opts: RunOptions,
++    backend: PromptBackend,
++    config: ClassConfig,
++    classes: tuple[ClassDef, ...],
++    events: EventWriter,
++    cancel: CancelToken,
++    device_note: str | None = None,
++) -> dict:
++    cap = cv2.VideoCapture(str(opts.video_path))
++    if not cap.isOpened():
++        raise RuntimeError(f"영상을 열 수 없습니다: {opts.video_path}")
++    try:
++        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
++        video_fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
++        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
++        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
++        frames = plan_frames(frame_count, video_fps, opts)
++        prompts = sorted({p for c in classes for p in c.prompts})
++        # 백엔드 단계의 점수 문턱값은 클래스별 문턱값 중 최솟값으로 넓게 잡는다.
++        backend_threshold = min(c.threshold for c in classes)
++
++        events.emit(
++            "started",
++            device=backend.device,
++            device_note=device_note,
++            total_frames=len(frames),
++            video_frame_count=frame_count,
++            video_fps=video_fps,
++            classes=[c.key for c in classes],
++            prompts=prompts,
++        )
++
++        tracker = SimpleTracker()
++        prefix_counters: dict[str, int] = {}
++        object_ids: dict[int, str] = {}
++        records: list[dict] = []
++        class_by_key = {c.key: c for c in classes}
++
++        next_sequential = 0
++        for sample_index, frame_index in enumerate(frames):
++            if cancel.cancelled:
++                raise Cancelled()
++            # 간격이 촘촘하면 순차 읽기가 seek보다 빠르고 정확하다.
++            if frame_index != next_sequential:
++                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
++            ok, frame_bgr = cap.read()
++            next_sequential = frame_index + 1
++            if not ok:
++                events.emit(
++                    "warning", message="프레임을 읽지 못해 건너뜁니다.", frame_index=frame_index
++                )
++                continue
++            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
++            raw = backend.predict(frame_rgb, prompts, backend_threshold, opts.mask_threshold)
++            dets = build_detections(raw, classes, config, frame_rgb.shape[:2])
++            track_ids = tracker.update(sample_index, [(d.class_key, d.bbox_xywh) for d in dets])
++
++            for det, tid in zip(dets, track_ids, strict=True):
++                if tid not in object_ids:
++                    prefix = class_by_key[det.class_key].object_prefix
++                    prefix_counters[prefix] = prefix_counters.get(prefix, 0) + 1
++                    object_ids[tid] = f"{prefix}{prefix_counters[prefix]:03d}"
++                record = {
++                    "frame_index": frame_index,
++                    "timestamp_ms": round(frame_index / video_fps * 1000.0, 1),
++                    "class_key": det.class_key,
++                    "class_label": class_by_key[det.class_key].label,
++                    "bbox_xywh": [round(v, 1) for v in det.bbox_xywh],
++                    "score": round(det.score, 4),
++                    "track_id": tid,
++                    "object_id": object_ids[tid],
++                    "metadata": {
++                        "prompt": det.prompt,
++                        "mask_area_px": det.area,
++                    },
++                }
++                if opts.include_polygons and det.polygon:
++                    record["metadata"]["polygon"] = [
++                        [round(x, 1), round(y, 1)] for x, y in det.polygon
++                    ]
++                records.append(record)
++
++            events.emit(
++                "progress",
++                processed=sample_index + 1,
++                total=len(frames),
++                frame_index=frame_index,
++                detections_in_frame=len(dets),
++            )
++    finally:
++        cap.release()
++
++    return {
++        "schema_version": RESULT_SCHEMA_VERSION,
++        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
++        "provenance": {
++            "source": "automatic_detection",
++            "detector": WORKER_NAME,
++            "detector_version": WORKER_VERSION,
++            "model_id": backend.model_id,
++            "device": backend.device,
++            "tracker": "simple_iou_center_v1",
++            "review_status": "unreviewed",
++        },
++        "video": {
++            "path": str(opts.video_path),
++            "sha256": _sha256(opts.video_path),
++            "frame_count": frame_count,
++            "fps": video_fps,
++            "width": width,
++            "height": height,
++        },
++        "sampling": {
++            "sample_fps": opts.sample_fps,
++            "frame_step": opts.frame_step,
++            "processed_frames": frames,
++            "start_frame": frames[0],
++            "end_frame_exclusive": opts.end_frame if opts.end_frame is not None else frame_count,
++        },
++        "classes": [
++            {
++                "key": c.key,
++                "label": c.label,
++                "prompts": list(c.prompts),
++                "threshold": c.threshold,
++                "object_prefix": c.object_prefix,
++            }
++            for c in classes
++        ],
++        "detections": records,
++    }
++
++
++def _sha256(path: Path) -> str:
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def write_atomic(doc: dict, path: Path) -> None:
++    """임시 파일에 쓰고 fsync 후 교체한다. 중간에 실패하면 기존 파일은 그대로다."""
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as f:
++            json.dump(doc, f, ensure_ascii=False, indent=1)
++            f.flush()
++            os.fsync(f.fileno())
++        os.replace(tmp, path)
++    except BaseException:
++        Path(tmp).unlink(missing_ok=True)
++        raise
+diff --git a/investigator/detection_worker/tracking.py b/investigator/detection_worker/tracking.py
+new file mode 100644
+index 0000000..3d1754a
+--- /dev/null
++++ b/investigator/detection_worker/tracking.py
+@@ -0,0 +1,77 @@
++"""샘플링한 프레임 사이에서 같은 객체를 잇는 단순 IoU 추적기.
++
++구조물은 정지해 있지만 블랙박스 카메라가 움직이므로 화면 위치가 변한다.
++샘플 간격이 넓을수록 IoU가 낮아지므로, IoU와 중심점 거리를 함께 본다.
++AVAT 본체의 추적기로 다시 연결해도 되며, 이 결과는 초기 Track 제안이다.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++from .postprocess import box_iou
++
++
++@dataclass
++class _Track:
++    track_id: int
++    class_key: str
++    bbox: tuple[float, float, float, float]
++    last_sample: int
++
++
++class SimpleTracker:
++    def __init__(self, iou_threshold: float = 0.2, center_ratio: float = 0.6, max_gap: int = 3):
++        self.iou_threshold = iou_threshold
++        self.center_ratio = center_ratio
++        self.max_gap = max_gap
++        self._tracks: list[_Track] = []
++        self._next_id = 1
++
++    def _affinity(self, track: _Track, bbox: tuple[float, float, float, float]) -> float:
++        iou = box_iou(track.bbox, bbox)
++        if iou >= self.iou_threshold:
++            return 1.0 + iou
++        tx, ty, tw, th = track.bbox
++        bx, by, bw, bh = bbox
++        dx = (tx + tw / 2) - (bx + bw / 2)
++        dy = (ty + th / 2) - (by + bh / 2)
++        dist = (dx * dx + dy * dy) ** 0.5
++        scale = max((tw * tw + th * th) ** 0.5, (bw * bw + bh * bh) ** 0.5, 1.0)
++        size_ratio = min(tw * th, bw * bh) / max(tw * th, bw * bh, 1.0)
++        if dist <= self.center_ratio * scale and size_ratio >= 0.3:
++            return 1.0 - dist / (self.center_ratio * scale) * 0.5
++        return 0.0
++
++    def update(
++        self, sample_index: int, items: list[tuple[str, tuple[float, float, float, float]]]
++    ) -> list[int]:
++        """한 샘플 프레임의 (class_key, bbox) 목록에 track_id를 붙여 돌려준다."""
++        self._tracks = [t for t in self._tracks if sample_index - t.last_sample <= self.max_gap]
++        candidates = []
++        for di, (cls, bbox) in enumerate(items):
++            for ti, track in enumerate(self._tracks):
++                if track.class_key != cls:
++                    continue
++                score = self._affinity(track, bbox)
++                if score > 0:
++                    candidates.append((score, di, ti))
++        assigned: dict[int, int] = {}
++        used_tracks: set[int] = set()
++        for _score, di, ti in sorted(candidates, reverse=True):
++            if di in assigned or ti in used_tracks:
++                continue
++            assigned[di] = ti
++            used_tracks.add(ti)
++        ids: list[int] = []
++        for di, (cls, bbox) in enumerate(items):
++            if di in assigned:
++                track = self._tracks[assigned[di]]
++                track.bbox = bbox
++                track.last_sample = sample_index
++            else:
++                track = _Track(self._next_id, cls, bbox, sample_index)
++                self._next_id += 1
++                self._tracks.append(track)
++            ids.append(track.track_id)
++        return ids
+diff --git a/investigator/main_window.py b/investigator/main_window.py
+index ba6fc6b..e06027c 100644
+--- a/investigator/main_window.py
++++ b/investigator/main_window.py
+@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
+     QWidget,
+ )
+ 
++from investigator.detection_controller import DetectionMixin
+ from investigator.diagnostics import timed_operation
+ from investigator.folder_watcher import ProjectFolderWatcher
+ from investigator.form_definition import FormDefinition
+@@ -72,7 +73,7 @@ def default_workspace() -> Path:
+     return base / "사고영상조사"
+ 
+ 
+-class MainWindow(QMainWindow):
++class MainWindow(DetectionMixin, QMainWindow):
+     def __init__(self, workspace: str | Path | None = None, parent: QWidget | None = None,
+                  *, project_tabs_store: ProjectTabsStore | None = None) -> None:
+         super().__init__(parent)
+@@ -145,6 +146,7 @@ class MainWindow(QMainWindow):
+         self.investigation = InvestigationPanel(self)
+         self.playback = PlaybackPanel(self)
+         self.speed_panel = SpeedPanel(self)
++        self._init_detection()
+         self._build_layout()
+         self._build_menu()
+         self._connect_signals()
+@@ -306,6 +308,7 @@ class MainWindow(QMainWindow):
+         self.speed_scroll.setWidget(self.speed_panel)
+         self.speed_scroll.hide()
+         video_layout.addWidget(self.speed_scroll, 0)
++        self._build_detection_area(self.video_workspace, video_layout)
+         self.splitter.addWidget(self.video_workspace)
+         self.splitter.addWidget(self.investigation)
+         self.splitter.setStretchFactor(0, 0)
+@@ -413,6 +416,7 @@ class MainWindow(QMainWindow):
+         self.speed_panel.distance_changed.connect(self.set_speed_distance)
+         self.speed_panel.seek_requested.connect(self._seek_video)
+         self.speed_panel.apply_requested.connect(self.apply_speed_label)
++        self._connect_detection_signals()
+         self.investigation.save_requested.connect(self.save_draft)
+         self.investigation.complete_requested.connect(self.complete_case)
+         self.investigation.next_requested.connect(self.next_case)
+@@ -704,6 +708,8 @@ class MainWindow(QMainWindow):
+         project.statistics_state = self.statistics_panel.capture_state()
+ 
+     def _leave_project(self) -> bool:
++        if not self._confirm_stop_detection():
++            return False
+         if not self._workspace_load_failed and not self._save(show_message=False):
+             return False
+         self._capture_project()
+@@ -1608,6 +1614,7 @@ class MainWindow(QMainWindow):
+             self.video_player.clear()
+             self.playback.clear_video()
+             self.speed_panel.set_data([], SpeedEstimate(), 0.0)
++            self._refresh_detection()
+             self.investigation.load_values({})
+             self.investigation.case_title.setText("사고 없음")
+             self.investigation.completion_badge.setObjectName("missingBadge")
+@@ -1620,6 +1627,7 @@ class MainWindow(QMainWindow):
+         self.investigation.load_values(case.values)
+         self._refresh_case_presentation(rebuild_list=False)
+         self._sync_markers(case)
++        self._refresh_detection()
+         if open_video and not self._open_active_video():
+             self.video_controller.close_video()
+             self.video_player.clear()
+@@ -1732,10 +1740,12 @@ class MainWindow(QMainWindow):
+         case = case or self.current_case
+         if case is None:
+             self.playback.set_markers(None, None, [])
++            self.detection_panel.set_markers(None, None)
+             self.speed_panel.set_data([], SpeedEstimate(), 0.0, context_key=None)
+             self.speed_panel.add_button.setEnabled(False)
+             return
+         points = case.speed_points
++        self.detection_panel.set_markers(case.trigger_frame, case.collision_frame)
+         self.playback.set_markers(
+             case.trigger_frame, case.collision_frame, [point.frame for point in points]
+         )
+@@ -1749,8 +1759,11 @@ class MainWindow(QMainWindow):
+         self.speed_panel.set_apply_available("trigger_vehicle_speed" in self.investigation.editors)
+ 
+     def _set_speed_panel_visible(self, visible: bool) -> None:
+-        self.video_player.canvas.setMinimumHeight(140 if visible else 280)
++        if visible and self.playback.detection_panel_button.isChecked():
++            # Speed and detection panels share the space under the video.
++            self.playback.detection_panel_button.setChecked(False)
+         self.speed_scroll.setVisible(visible)
++        self._update_canvas_minimum()
+ 
+     def _show_speed_panel(self) -> None:
+         if not self.playback.speed_panel_button.isChecked():
+@@ -2108,6 +2121,7 @@ class MainWindow(QMainWindow):
+         self.video_player.set_rotation(case.video_rotation if case else 0)
+         if case:
+             self._sync_markers(case, fps=metadata.reported_fps)
++        self._detection_video_changed()
+         self.statusBar().showMessage(
+             f"영상 열기 완료 · {metadata.fps:.2f} FPS · {metadata.total_frames:,} frames", 4000
+         )
+@@ -2118,10 +2132,12 @@ class MainWindow(QMainWindow):
+         self.playback.clear_video()
+         self.speed_panel.set_data([], SpeedEstimate(), 0.0, context_key=None)
+         self.speed_panel.add_button.setEnabled(False)
++        self._detection_video_changed()
+ 
+     def _frame_ready(self, image, frame: int, timestamp: float) -> None:  # type: ignore[no-untyped-def]
+-        del frame, timestamp
++        del timestamp
+         self.video_player.canvas.set_frame(image)
++        self._detection_frame_changed(frame)
+ 
+     def rotate_video_clockwise(self) -> None:
+         case = self.current_case
+@@ -2281,6 +2297,9 @@ class MainWindow(QMainWindow):
+             event.ignore()
+             self.statusBar().showMessage("저장 작업이 끝난 뒤 종료해 주세요.", 3000)
+             return
++        if not self._confirm_stop_detection():
++            event.ignore()
++            return
+         if not self._workspace_load_failed and not self._save(show_message=False):
+             event.ignore()
+             return
+diff --git a/investigator/models.py b/investigator/models.py
+index f668a2b..58685f6 100644
+--- a/investigator/models.py
++++ b/investigator/models.py
+@@ -10,6 +10,7 @@ from typing import Any
+ from uuid import uuid4
+ 
+ from investigator.form_definition import FormDefinition
++from investigator.object_detection import VideoObjects, normalize_objects_by_video
+ from investigator.schema import (
+     INJURY_GRADE_RULES,
+     INVALID_FORMAT_MESSAGE,
+@@ -54,6 +55,8 @@ class InvestigationCase:
+     active_video_index: int = 0
+     markers_by_video: dict[str, dict[str, Any]] = field(default_factory=dict)
+     rotation_by_video: dict[str, int] = field(default_factory=dict)
++    # Detected/annotated objects per video path; optional in the stored payload.
++    objects_by_video: dict[str, dict[str, Any]] = field(default_factory=dict)
+     status: str = "draft"
+     created_at: str = field(default_factory=utc_now)
+     updated_at: str = field(default_factory=utc_now)
+@@ -173,6 +176,11 @@ class InvestigationCase:
+             if degrees in {90, 180, 270} and normalized_path.casefold() in known_videos:
+                 normalized_rotations[normalized_path] = degrees
+         self.rotation_by_video = normalized_rotations
++        self.objects_by_video = {
++            str(Path(video_path)): payload
++            for video_path, payload in normalize_objects_by_video(self.objects_by_video).items()
++            if str(Path(video_path)).casefold() in known_videos
++        }
+         if self.status not in {"draft", "completed"}:
+             self.status = "draft"
+         if self.form_definition:
+@@ -208,6 +216,30 @@ class InvestigationCase:
+             {"trigger_frame": None, "collision_frames": []},
+         )
+ 
++    def video_objects(self) -> VideoObjects:
++        """Objects of the active video (a copy; store changes with set_video_objects)."""
++
++        path = self.active_video
++        raw = self.objects_by_video.get(path) if path else None
++        return VideoObjects.from_dict(raw) if raw else VideoObjects()
++
++    def set_video_objects(self, objects: VideoObjects, *, video_path: str | None = None) -> None:
++        path = video_path or self.active_video
++        if path is None:
++            raise ValueError("영상이 선택되지 않아 객체를 저장할 수 없습니다.")
++        if str(Path(path)).casefold() not in {str(Path(item)).casefold() for item in self.videos}:
++            raise ValueError("사고에 연결되지 않은 영상입니다.")
++        key = next(item for item in self.videos if str(Path(item)).casefold() == str(Path(path)).casefold())
++        if objects.is_empty():
++            self.objects_by_video.pop(key, None)
++        else:
++            self.objects_by_video[key] = objects.to_dict()
++        self.mark_edited()
++
++    def objects_for_video(self, path: str) -> VideoObjects:
++        raw = self.objects_by_video.get(str(Path(path)))
++        return VideoObjects.from_dict(raw) if raw else VideoObjects()
++
+     @property
+     def trigger_frame(self) -> int | None:
+         value = self._current_markers().get("trigger_frame")
+@@ -394,11 +426,15 @@ class InvestigationCase:
+         for rotation_key in list(self.rotation_by_video):
+             if str(Path(rotation_key).expanduser().resolve()).casefold() == removed_key:
+                 self.rotation_by_video.pop(rotation_key, None)
++        for objects_key in list(self.objects_by_video):
++            if str(Path(objects_key).expanduser().resolve()).casefold() == removed_key:
++                self.objects_by_video.pop(objects_key, None)
+ 
+         if not self.videos:
+             self.active_video_index = 0
+             self.markers_by_video.clear()
+             self.rotation_by_video.clear()
++            self.objects_by_video.clear()
+         elif index < previous_active:
+             self.active_video_index = previous_active - 1
+         elif index == previous_active:
+@@ -448,7 +484,7 @@ class InvestigationCase:
+         self.updated_at = self.completed_at
+ 
+     def to_dict(self) -> dict[str, Any]:
+-        return {
++        result = {
+             "uid": self.uid,
+             "values": normalize_json_value(self.values),
+             "videos": list(self.videos),
+@@ -462,6 +498,10 @@ class InvestigationCase:
+                 "completed_at": self.completed_at,
+             },
+         }
++        if self.objects_by_video:
++            # Optional key: cases without objects keep byte-identical payloads.
++            result["objects_by_video"] = normalize_json_value(self.objects_by_video)
++        return result
+ 
+     @classmethod
+     def from_dict(
+@@ -472,6 +512,7 @@ class InvestigationCase:
+         raw_videos = data.get("videos", [])
+         raw_markers = data.get("markers_by_video", {})
+         raw_rotations = data.get("rotation_by_video", {})
++        raw_objects = data.get("objects_by_video", {})
+         if not isinstance(raw_workflow, dict):
+             raise TypeError("workflow 항목은 JSON 객체여야 합니다.")
+         if not isinstance(raw_values, dict):
+@@ -484,6 +525,8 @@ class InvestigationCase:
+             raise TypeError("markers_by_video 항목은 JSON 객체여야 합니다.")
+         if not isinstance(raw_rotations, dict):
+             raise TypeError("rotation_by_video 항목은 JSON 객체여야 합니다.")
++        if not isinstance(raw_objects, dict):
++            raise TypeError("objects_by_video 항목은 JSON 객체여야 합니다.")
+ 
+         workflow = raw_workflow
+         videos = list(raw_videos)
+@@ -504,6 +547,7 @@ class InvestigationCase:
+             active_video_index=active_video_index,
+             markers_by_video=markers_by_video,
+             rotation_by_video=dict(raw_rotations),
++            objects_by_video=dict(raw_objects),
+             status=str(workflow.get("status") or "draft"),
+             created_at=str(workflow.get("created_at") or utc_now()),
+             updated_at=str(workflow.get("updated_at") or utc_now()),
+diff --git a/investigator/object_detection.py b/investigator/object_detection.py
+new file mode 100644
+index 0000000..8250a7e
+--- /dev/null
++++ b/investigator/object_detection.py
+@@ -0,0 +1,985 @@
++"""Object detection classes, role-dependent labels, and per-video object storage.
++
++Detection classes are the union of the '객체' (trigger objects) and '충돌'
++(collision targets) choices. A detected object is always labelled through the
++current workspace form definition: as a trigger-time obstacle choice or as a
++collision target choice, depending on its role. Labels keep the stable choice
++``id`` so renaming a choice in the form designer does not break saved objects.
++
++This module has no Qt dependency.
++"""
++
++from __future__ import annotations
++
++import math
++from collections.abc import Iterable
++from dataclasses import dataclass, field
++from datetime import UTC, datetime
++from typing import TYPE_CHECKING, Any
++from uuid import uuid4
++
++if TYPE_CHECKING:
++    from investigator.form_definition import FormDefinition
++
++ROLE_TRIGGER = "trigger"
++ROLE_COLLISION = "collision"
++ROLES = (ROLE_TRIGGER, ROLE_COLLISION)
++ROLE_TITLES = {ROLE_TRIGGER: "트리거 시점 관여 객체", ROLE_COLLISION: "충돌 관여 객체"}
++ROLE_SHORT = {ROLE_TRIGGER: "트리거", ROLE_COLLISION: "충돌"}
++
++SOURCE_AUTOMATIC = "automatic_detection"
++SOURCE_MANUAL = "manual"
++
++TRIGGER_TAB = "trigger_objects"
++COLLISION_TAB = "collision_objects"
++TRIGGER_OBJECT_FIELDS = (
++    "obstacle_vehicle_types",
++    "obstacle_pedestrians",
++    "obstacle_road_facilities",
++    "obstacle_building_landscape",
++    "obstacle_other",
++)
++COLLISION_TARGET_FIELD = "collision_targets"
++OBSTACLE_EXISTS_FIELD = "obstacle_exists"
++UNLABELED_TEXT = "라벨 미지정"
++
++
++@dataclass(frozen=True, slots=True)
++class LabelRef:
++    """A form choice identified by its field key and stable choice id."""
++
++    field_key: str
++    choice_id: str
++
++    def to_dict(self) -> dict[str, str]:
++        return {"field": self.field_key, "choice": self.choice_id}
++
++    @classmethod
++    def from_dict(cls, raw: Any) -> LabelRef | None:
++        if raw is None:
++            return None
++        if (
++            not isinstance(raw, dict)
++            or not isinstance(raw.get("field"), str)
++            or not isinstance(raw.get("choice"), str)
++        ):
++            raise TypeError("객체 라벨 형식이 올바르지 않습니다.")
++        return cls(raw["field"], raw["choice"])
++
++
++@dataclass(frozen=True, slots=True)
++class DetectionClass:
++    key: str
++    label: str
++    group: str
++    prompts: tuple[str, ...]
++    object_prefix: str
++    trigger: LabelRef | None
++    collision: LabelRef | None
++    threshold: float = 0.4
++    suppression_group: str | None = None
++    min_area_ratio: float = 0.0005
++
++
++def _t(field_key: str, choice_id: str) -> LabelRef:
++    return LabelRef(field_key, choice_id)
++
++
++def _c(choice_id: str) -> LabelRef:
++    return LabelRef(COLLISION_TARGET_FIELD, choice_id)
++
++
++_VEHICLE = "obstacle_vehicle_types"
++_PEDESTRIAN = "obstacle_pedestrians"
++_FACILITY = "obstacle_road_facilities"
++_BUILDING = "obstacle_building_landscape"
++_OTHER = "obstacle_other"
++_LANDSCAPE = "화단·흙더미·가로수(수목)"
++
++# Union of the default '객체' and '충돌' choices. Choice ids are the defaults of
++# investigator.schema; a workspace whose form removed a choice simply leaves the
++# corresponding default label unassigned for manual selection.
++DETECTION_CLASSES: tuple[DetectionClass, ...] = (
++    DetectionClass(
++        "passenger",
++        "승용",
++        "차량",
++        ("car",),
++        "V",
++        _t(_VEHICLE, "승용"),
++        _c("vehicle.passenger"),
++        suppression_group="vehicle",
++    ),
++    DetectionClass(
++        "van",
++        "승합",
++        "차량",
++        ("van", "bus"),
++        "V",
++        _t(_VEHICLE, "승합"),
++        _c("vehicle.van"),
++        suppression_group="vehicle",
++    ),
++    DetectionClass(
++        "truck",
++        "화물",
++        "차량",
++        ("truck",),
++        "V",
++        _t(_VEHICLE, "화물"),
++        _c("vehicle.truck"),
++        suppression_group="vehicle",
++    ),
++    DetectionClass(
++        "special",
++        "특수",
++        "차량",
++        ("excavator", "tow truck", "fire truck", "ambulance"),
++        "V",
++        _t(_VEHICLE, "특수"),
++        _c("vehicle.special"),
++        suppression_group="vehicle",
++    ),
++    DetectionClass(
++        "motorcycle",
++        "이륜",
++        "차량",
++        ("motorcycle", "scooter"),
++        "M",
++        _t(_VEHICLE, "이륜"),
++        _c("vehicle.motorcycle"),
++        suppression_group="two_wheeler",
++    ),
++    DetectionClass(
++        "bicycle",
++        "자전거",
++        "차량",
++        ("bicycle",),
++        "B",
++        _t(_VEHICLE, "자전거"),
++        _c("vehicle.bicycle"),
++        suppression_group="two_wheeler",
++    ),
++    # The '객체' tab has no PM choice; '기타' is the closest default.
++    DetectionClass(
++        "pm",
++        "PM",
++        "차량",
++        ("electric kick scooter",),
++        "K",
++        _t(_VEHICLE, "기타"),
++        _c("vehicle.pm"),
++        suppression_group="two_wheeler",
++    ),
++    DetectionClass(
++        "child",
++        "어린이",
++        "보행자",
++        ("child",),
++        "P",
++        _t(_PEDESTRIAN, "어린이"),
++        _c("pedestrian.child"),
++        suppression_group="person",
++    ),
++    DetectionClass(
++        "adult",
++        "어른",
++        "보행자",
++        ("adult person",),
++        "P",
++        _t(_PEDESTRIAN, "어른"),
++        _c("pedestrian.adult"),
++        suppression_group="person",
++    ),
++    DetectionClass(
++        "barrier",
++        "차단기",
++        "도로시설물",
++        ("boom barrier",),
++        "R",
++        _t(_FACILITY, "차단기"),
++        _c("facility.barrier"),
++    ),
++    DetectionClass(
++        "guardrail",
++        "가드레일",
++        "도로시설물",
++        ("guardrail",),
++        "R",
++        _t(_FACILITY, "가드레일"),
++        _c("facility.guardrail"),
++    ),
++    DetectionClass(
++        "median",
++        "중앙분리대",
++        "도로시설물",
++        ("median barrier",),
++        "R",
++        _t(_FACILITY, "중앙분리대"),
++        _c("facility.median"),
++    ),
++    DetectionClass(
++        "curb", "연석", "도로시설물", ("curb",), "R", _t(_FACILITY, "연석"), _c("facility.curb")
++    ),
++    DetectionClass(
++        "traffic_sign",
++        "표지판",
++        "도로시설물",
++        ("traffic sign",),
++        "R",
++        _t(_FACILITY, "표지판"),
++        _c("facility.traffic_sign"),
++    ),
++    DetectionClass(
++        "pole_streetlight",
++        "전봇대·전신주·가로등",
++        "도로시설물",
++        ("utility pole", "street lamp"),
++        "R",
++        _t(_FACILITY, "전봇대·전신주·가로등"),
++        _c("facility.pole_streetlight"),
++        threshold=0.35,
++    ),
++    DetectionClass(
++        "bollard_delineator",
++        "볼라드·시선유도봉",
++        "도로시설물",
++        ("bollard", "delineator post"),
++        "R",
++        _t(_FACILITY, "볼라드·시선유도봉"),
++        _c("facility.bollard_delineator"),
++        threshold=0.35,
++    ),
++    DetectionClass(
++        "crash_cushion",
++        "충격흡수시설",
++        "도로시설물",
++        ("crash cushion",),
++        "R",
++        _t(_FACILITY, "충격흡수시설"),
++        _c("facility.crash_cushion"),
++    ),
++    DetectionClass(
++        "speed_bump",
++        "과속방지턱",
++        "도로시설물",
++        ("speed bump",),
++        "R",
++        _t(_FACILITY, "과속방지턱"),
++        _c("facility.speed_bump"),
++    ),
++    DetectionClass(
++        "pillar",
++        "건물 기둥",
++        "건물/조경",
++        ("pillar",),
++        "R",
++        _t(_BUILDING, "건물 기둥"),
++        _c("building.pillar"),
++        suppression_group="wall_like",
++    ),
++    DetectionClass(
++        "building_wall",
++        "건물 벽",
++        "건물/조경",
++        ("building wall",),
++        "R",
++        _t(_BUILDING, "건물 벽"),
++        _c("building.wall"),
++        suppression_group="wall_like",
++        min_area_ratio=0.005,
++    ),
++    DetectionClass(
++        "boundary_wall",
++        "담벼락",
++        "건물/조경",
++        ("wall",),
++        "R",
++        _t(_BUILDING, "담벼락"),
++        _c("building.boundary_wall"),
++        suppression_group="wall_like",
++        min_area_ratio=0.002,
++    ),
++    DetectionClass(
++        "flowerbed",
++        "화단",
++        "건물/조경",
++        ("flower bed",),
++        "R",
++        _t(_BUILDING, _LANDSCAPE),
++        _c("building.flowerbed"),
++        threshold=0.35,
++    ),
++    DetectionClass(
++        "dirtpile",
++        "흙더미",
++        "건물/조경",
++        ("dirt pile",),
++        "R",
++        _t(_BUILDING, _LANDSCAPE),
++        _c("building.dirtpile"),
++        threshold=0.35,
++    ),
++    DetectionClass(
++        "streettree",
++        "가로수(수목)",
++        "건물/조경",
++        ("tree",),
++        "R",
++        _t(_BUILDING, _LANDSCAPE),
++        _c("building.streettree"),
++    ),
++    DetectionClass(
++        "animal", "동물", "기타", ("animal",), "A", _t(_OTHER, "동물"), _c("other.animal")
++    ),
++    DetectionClass(
++        "road_debris",
++        "도로낙하물",
++        "기타",
++        ("debris on road",),
++        "D",
++        _t(_OTHER, "도로낙하물"),
++        _c("other.road_debris"),
++        threshold=0.35,
++    ),
++)
++CLASS_BY_KEY = {item.key: item for item in DETECTION_CLASSES}
++CLASS_GROUPS = tuple(dict.fromkeys(item.group for item in DETECTION_CLASSES))
++MANUAL_PREFIX = "U"
++
++
++def worker_class_config(keys: Iterable[str]) -> dict[str, Any]:
++    """Class/prompt configuration for the detection worker (``--config``)."""
++
++    wanted = set(keys)
++    unknown = wanted - CLASS_BY_KEY.keys()
++    if unknown:
++        raise ValueError(f"알 수 없는 검출 클래스: {', '.join(sorted(unknown))}")
++    return {
++        "cross_class_iou": 0.6,
++        "same_class_iou": 0.7,
++        "max_detections_per_prompt": 30,
++        "classes": [
++            {
++                "key": item.key,
++                "label": item.label,
++                "prompts": list(item.prompts),
++                "object_prefix": item.object_prefix,
++                "threshold": item.threshold,
++                "suppression_group": item.suppression_group,
++                "min_area_ratio": item.min_area_ratio,
++                "enabled": True,
++            }
++            for item in DETECTION_CLASSES
++            if item.key in wanted
++        ],
++    }
++
++
++# ---------------------------------------------------------------------------
++# Role-dependent label options taken from the workspace form definition.
++# ---------------------------------------------------------------------------
++
++
++@dataclass(frozen=True, slots=True)
++class LabelOption:
++    ref: LabelRef
++    text: str
++    group: str
++
++
++def _field_group_title(label: str) -> str:
++    """'장애물(도로시설물)' -> '도로시설물'; '장애물(차량) · 차량 종류' -> '차량'."""
++
++    text = label.split("·")[0].strip()
++    if "(" in text and text.endswith(")"):
++        return text[text.index("(") + 1 : -1].strip() or text
++    return text
++
++
++def label_options(definition: FormDefinition, role: str) -> list[LabelOption]:
++    records = {record["key"]: record for record in definition.records()}
++    options: list[LabelOption] = []
++    if role == ROLE_TRIGGER:
++        for key in TRIGGER_OBJECT_FIELDS:
++            record = records.get(key)
++            if record is None or record.get("kind") != "multi":
++                continue
++            group = _field_group_title(record["label"])
++            for choice in record["choices"]:
++                ref = LabelRef(key, choice.get("id", choice["value"]))
++                options.append(LabelOption(ref, f"{group} · {choice['label']}", group))
++    elif role == ROLE_COLLISION:
++        record = records.get(COLLISION_TARGET_FIELD)
++        if record is not None:
++            for choice in record["choices"]:
++                ref = LabelRef(COLLISION_TARGET_FIELD, choice.get("id", choice["value"]))
++                text = choice["label"]
++                group = text.split("·")[0].strip() if "·" in text else ""
++                options.append(LabelOption(ref, text, group))
++    else:
++        raise ValueError(f"알 수 없는 객체 역할: {role}")
++    return options
++
++
++def label_exists(definition: FormDefinition, role: str, ref: LabelRef | None) -> bool:
++    return ref is not None and any(option.ref == ref for option in label_options(definition, role))
++
++
++def label_text(definition: FormDefinition, role: str | None, ref: LabelRef | None) -> str:
++    if role is None or ref is None:
++        return UNLABELED_TEXT
++    for option in label_options(definition, role):
++        if option.ref == ref:
++            return option.text
++    return f"{UNLABELED_TEXT}(삭제된 항목)"
++
++
++def default_label(definition: FormDefinition, class_key: str | None, role: str) -> LabelRef | None:
++    item = CLASS_BY_KEY.get(class_key or "")
++    if item is None:
++        return None
++    ref = item.trigger if role == ROLE_TRIGGER else item.collision
++    return ref if label_exists(definition, role, ref) else None
++
++
++def convert_label(
++    definition: FormDefinition,
++    ref: LabelRef | None,
++    from_role: str | None,
++    to_role: str,
++    class_key: str | None = None,
++) -> LabelRef | None:
++    """Translate a label when an object's role changes."""
++
++    if from_role == to_role:
++        return ref
++    if class_key in CLASS_BY_KEY:
++        return default_label(definition, class_key, to_role)
++    if ref is None or from_role is None:
++        return None
++    for item in DETECTION_CLASSES:
++        source = item.trigger if from_role == ROLE_TRIGGER else item.collision
++        if source == ref:
++            return default_label(definition, item.key, to_role)
++    return None
++
++
++def class_for_label(role: str, ref: LabelRef | None) -> str | None:
++    """Detection class whose default label for ``role`` is ``ref`` (first match)."""
++
++    for item in DETECTION_CLASSES:
++        if (item.trigger if role == ROLE_TRIGGER else item.collision) == ref:
++            return item.key
++    return None
++
++
++# ---------------------------------------------------------------------------
++# Per-video object storage.
++# ---------------------------------------------------------------------------
++
++
++def utc_now() -> str:
++    return datetime.now(UTC).isoformat(timespec="seconds")
++
++
++def _finite(value: Any, name: str) -> float:
++    number = float(value)
++    if not math.isfinite(number):
++        raise ValueError(f"{name} 값이 유한한 수가 아닙니다.")
++    return number
++
++
++@dataclass(frozen=True, slots=True)
++class ObjectBox:
++    frame: int
++    bbox: tuple[float, float, float, float]  # x, y, width, height in source pixels
++    score: float | None = None
++
++    def to_dict(self) -> dict[str, Any]:
++        result: dict[str, Any] = {"frame": self.frame, "bbox": [round(v, 1) for v in self.bbox]}
++        if self.score is not None:
++            result["score"] = round(self.score, 4)
++        return result
++
++    @classmethod
++    def from_dict(cls, raw: Any) -> ObjectBox:
++        if not isinstance(raw, dict):
++            raise TypeError("객체 박스는 JSON 객체여야 합니다.")
++        bbox = raw.get("bbox")
++        if not isinstance(bbox, list) or len(bbox) != 4:
++            raise TypeError("객체 박스 좌표는 숫자 4개여야 합니다.")
++        x, y, w, h = (_finite(v, "박스 좌표") for v in bbox)
++        if w <= 0 or h <= 0:
++            raise ValueError("객체 박스 크기는 0보다 커야 합니다.")
++        score = raw.get("score")
++        if raw.get("frame") is None:
++            raise TypeError("객체 박스에 프레임 번호가 없습니다.")
++        return cls(
++            max(0, int(raw["frame"])),
++            (x, y, w, h),
++            None if score is None else _finite(score, "신뢰도"),
++        )
++
++
++@dataclass(slots=True)
++class DetectedObject:
++    uid: str
++    object_id: str
++    role: str
++    label: LabelRef | None
++    boxes: list[ObjectBox]
++    class_key: str | None = None
++    source: str = SOURCE_MANUAL
++    run_id: str | None = None
++    reviewed: bool = False
++
++    @property
++    def frames(self) -> list[int]:
++        return sorted({box.frame for box in self.boxes})
++
++    @property
++    def first_frame(self) -> int:
++        return min(box.frame for box in self.boxes)
++
++    @property
++    def last_frame(self) -> int:
++        return max(box.frame for box in self.boxes)
++
++    @property
++    def mean_score(self) -> float | None:
++        scores = [box.score for box in self.boxes if box.score is not None]
++        return sum(scores) / len(scores) if scores else None
++
++    def box_at(self, frame: int) -> ObjectBox | None:
++        return next((box for box in self.boxes if box.frame == frame), None)
++
++    def nearest_frame(self, frame: int) -> int:
++        return min(self.frames, key=lambda candidate: (abs(candidate - frame), candidate))
++
++    def to_dict(self) -> dict[str, Any]:
++        result: dict[str, Any] = {
++            "uid": self.uid,
++            "object_id": self.object_id,
++            "role": self.role,
++            "label": None if self.label is None else self.label.to_dict(),
++            "source": self.source,
++            "reviewed": self.reviewed,
++            "boxes": [box.to_dict() for box in sorted(self.boxes, key=lambda b: b.frame)],
++        }
++        if self.class_key:
++            result["class_key"] = self.class_key
++        if self.run_id:
++            result["run_id"] = self.run_id
++        return result
++
++    @classmethod
++    def from_dict(cls, raw: Any) -> DetectedObject:
++        if not isinstance(raw, dict):
++            raise TypeError("검출 객체는 JSON 객체여야 합니다.")
++        role = raw.get("role")
++        if role not in ROLES:
++            raise ValueError(f"알 수 없는 객체 역할입니다: {role}")
++        raw_boxes = raw.get("boxes")
++        if not isinstance(raw_boxes, list) or not raw_boxes:
++            raise TypeError("검출 객체에는 박스가 하나 이상 필요합니다.")
++        boxes: dict[int, ObjectBox] = {}
++        for item in raw_boxes:
++            box = ObjectBox.from_dict(item)
++            boxes[box.frame] = box
++        source = raw.get("source", SOURCE_MANUAL)
++        if source not in {SOURCE_AUTOMATIC, SOURCE_MANUAL}:
++            raise ValueError(f"알 수 없는 객체 출처입니다: {source}")
++        class_key = raw.get("class_key")
++        return cls(
++            uid=str(raw.get("uid") or uuid4().hex),
++            object_id=str(raw.get("object_id") or ""),
++            role=role,
++            label=LabelRef.from_dict(raw.get("label")),
++            boxes=[boxes[frame] for frame in sorted(boxes)],
++            class_key=class_key if isinstance(class_key, str) and class_key else None,
++            source=source,
++            run_id=str(raw["run_id"]) if raw.get("run_id") else None,
++            reviewed=bool(raw.get("reviewed", False)),
++        )
++
++
++@dataclass(slots=True)
++class DetectionRun:
++    run_id: str
++    role: str
++    start_frame: int
++    end_frame: int  # inclusive
++    frame_step: int
++    classes: list[str]
++    detector: str = ""
++    model_id: str = ""
++    device: str = ""
++    created_at: str = field(default_factory=utc_now)
++    object_count: int = 0
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "run_id": self.run_id,
++            "role": self.role,
++            "start_frame": self.start_frame,
++            "end_frame": self.end_frame,
++            "frame_step": self.frame_step,
++            "classes": list(self.classes),
++            "detector": self.detector,
++            "model_id": self.model_id,
++            "device": self.device,
++            "created_at": self.created_at,
++            "object_count": self.object_count,
++        }
++
++    @classmethod
++    def from_dict(cls, raw: Any) -> DetectionRun:
++        if not isinstance(raw, dict):
++            raise TypeError("검출 실행 기록은 JSON 객체여야 합니다.")
++        if not raw.get("run_id"):
++            raise TypeError("검출 실행 기록에 run_id가 없습니다.")
++        return cls(
++            run_id=str(raw["run_id"]),
++            role=str(raw.get("role", ROLE_TRIGGER)),
++            start_frame=max(0, int(raw.get("start_frame", 0))),
++            end_frame=max(0, int(raw.get("end_frame", 0))),
++            frame_step=max(1, int(raw.get("frame_step", 1))),
++            classes=[str(item) for item in raw.get("classes", [])],
++            detector=str(raw.get("detector", "")),
++            model_id=str(raw.get("model_id", "")),
++            device=str(raw.get("device", "")),
++            created_at=str(raw.get("created_at") or utc_now()),
++            object_count=max(0, int(raw.get("object_count", 0))),
++        )
++
++
++@dataclass(slots=True)
++class VideoObjects:
++    objects: list[DetectedObject] = field(default_factory=list)
++    runs: list[DetectionRun] = field(default_factory=list)
++
++    def is_empty(self) -> bool:
++        return not self.objects and not self.runs
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "objects": [item.to_dict() for item in self.objects],
++            "runs": [run.to_dict() for run in self.runs],
++        }
++
++    @classmethod
++    def from_dict(cls, raw: Any) -> VideoObjects:
++        if not isinstance(raw, dict):
++            raise TypeError("영상 객체 데이터는 JSON 객체여야 합니다.")
++        raw_objects = raw.get("objects", [])
++        raw_runs = raw.get("runs", [])
++        if not isinstance(raw_objects, list) or not isinstance(raw_runs, list):
++            raise TypeError("objects/runs 항목은 배열이어야 합니다.")
++        objects = [DetectedObject.from_dict(item) for item in raw_objects]
++        uids = [item.uid for item in objects]
++        if len(uids) != len(set(uids)):
++            raise ValueError("중복된 객체 UID가 있습니다.")
++        return cls(objects, [DetectionRun.from_dict(item) for item in raw_runs])
++
++    def copy(self) -> VideoObjects:
++        return VideoObjects.from_dict(self.to_dict())
++
++    def find(self, uid: str) -> DetectedObject | None:
++        return next((item for item in self.objects if item.uid == uid), None)
++
++    def at_frame(self, frame: int) -> list[tuple[DetectedObject, ObjectBox]]:
++        result = []
++        for item in self.objects:
++            box = item.box_at(frame)
++            if box is not None:
++                result.append((item, box))
++        return result
++
++
++def normalize_objects_by_video(raw: Any) -> dict[str, dict[str, Any]]:
++    """Validate the persisted mapping, dropping empty per-video entries."""
++
++    if raw is None:
++        return {}
++    if not isinstance(raw, dict):
++        raise TypeError("objects_by_video 항목은 JSON 객체여야 합니다.")
++    result: dict[str, dict[str, Any]] = {}
++    for key, value in raw.items():
++        video_objects = VideoObjects.from_dict(value)
++        if not video_objects.is_empty():
++            result[str(key)] = video_objects.to_dict()
++    return result
++
++
++def next_object_id(prefix: str, objects: Iterable[DetectedObject]) -> str:
++    used = 0
++    for item in objects:
++        if item.object_id.startswith(prefix) and item.object_id[len(prefix) :].isdigit():
++            used = max(used, int(item.object_id[len(prefix) :]))
++    return f"{prefix}{used + 1:03d}"
++
++
++def merge_detection_result(
++    current: VideoObjects,
++    document: dict[str, Any],
++    *,
++    role: str,
++    definition: FormDefinition,
++    start_frame: int,
++    end_frame: int,
++    frame_step: int,
++    classes: list[str],
++) -> tuple[VideoObjects, int, int]:
++    """Merge a worker result document into a copy of ``current``.
++
++    Unreviewed automatic boxes inside the processed range are replaced. Manual
++    and reviewed objects are kept unchanged. Returns (objects, added, replaced).
++    """
++
++    if role not in ROLES:
++        raise ValueError(f"알 수 없는 객체 역할: {role}")
++    if not isinstance(document, dict) or not isinstance(document.get("detections"), list):
++        raise ValueError("검출 결과 문서 형식이 올바르지 않습니다.")
++    result = current.copy()
++    replaced = 0
++    kept: list[DetectedObject] = []
++    for item in result.objects:
++        if item.source == SOURCE_AUTOMATIC and not item.reviewed:
++            remaining = [box for box in item.boxes if not start_frame <= box.frame <= end_frame]
++            if len(remaining) != len(item.boxes):
++                replaced += 1
++            if not remaining:
++                continue
++            item.boxes = remaining
++        kept.append(item)
++    result.objects = kept
++
++    provenance = (
++        document.get("provenance", {}) if isinstance(document.get("provenance"), dict) else {}
++    )
++    run = DetectionRun(
++        run_id=uuid4().hex,
++        role=role,
++        start_frame=start_frame,
++        end_frame=end_frame,
++        frame_step=frame_step,
++        classes=list(classes),
++        detector=str(provenance.get("detector", "")),
++        model_id=str(provenance.get("model_id", "")),
++        device=str(provenance.get("device", "")),
++    )
++    grouped: dict[str, DetectedObject] = {}
++    for det in document["detections"]:
++        if not isinstance(det, dict):
++            raise ValueError("검출 결과 항목 형식이 올바르지 않습니다.")
++        frame = int(det["frame_index"])
++        if not start_frame <= frame <= end_frame:
++            continue
++        class_key = det.get("class_key")
++        if class_key not in CLASS_BY_KEY:
++            continue
++        x, y, w, h = (_finite(v, "박스 좌표") for v in det["bbox_xywh"])
++        if w <= 0 or h <= 0:
++            continue
++        group_key = f"{class_key}:{det.get('object_id') or det.get('track_id') or uuid4().hex}"
++        obj = grouped.get(group_key)
++        if obj is None:
++            prefix = CLASS_BY_KEY[class_key].object_prefix
++            obj = DetectedObject(
++                uid=uuid4().hex,
++                object_id=next_object_id(prefix, [*result.objects, *grouped.values()]),
++                role=role,
++                label=default_label(definition, class_key, role),
++                boxes=[],
++                class_key=class_key,
++                source=SOURCE_AUTOMATIC,
++                run_id=run.run_id,
++            )
++            grouped[group_key] = obj
++        score = det.get("score")
++        box = ObjectBox(frame, (x, y, w, h), None if score is None else _finite(score, "신뢰도"))
++        existing = obj.box_at(frame)
++        if existing is None:
++            obj.boxes.append(box)
++        elif (box.score or 0) > (existing.score or 0):
++            obj.boxes[obj.boxes.index(existing)] = box
++    for obj in grouped.values():
++        obj.boxes.sort(key=lambda b: b.frame)
++    run.object_count = len(grouped)
++    result.objects.extend(grouped.values())
++    result.runs.append(run)
++    return result, len(grouped), replaced
++
++
++def add_manual_object(
++    current: VideoObjects,
++    frame: int,
++    bbox: tuple[float, float, float, float],
++    role: str,
++    label: LabelRef | None,
++) -> tuple[VideoObjects, DetectedObject]:
++    if role not in ROLES:
++        raise ValueError(f"알 수 없는 객체 역할: {role}")
++    x, y, w, h = bbox
++    if w < 2 or h < 2:
++        raise ValueError("사각형이 너무 작습니다.")
++    result = current.copy()
++    item = DetectedObject(
++        uid=uuid4().hex,
++        object_id=next_object_id(MANUAL_PREFIX, result.objects),
++        role=role,
++        label=label,
++        boxes=[ObjectBox(max(0, int(frame)), (x, y, w, h))],
++        class_key=None,
++        source=SOURCE_MANUAL,
++        reviewed=True,
++    )
++    result.objects.append(item)
++    return result, item
++
++
++def set_objects_role(
++    current: VideoObjects, uids: Iterable[str], role: str, definition: FormDefinition
++) -> VideoObjects:
++    result = current.copy()
++    targets = set(uids)
++    for item in result.objects:
++        if item.uid in targets and item.role != role:
++            item.label = convert_label(definition, item.label, item.role, role, item.class_key)
++            item.role = role
++    return result
++
++
++def set_objects_label(
++    current: VideoObjects, uids: Iterable[str], label: LabelRef | None, definition: FormDefinition
++) -> VideoObjects:
++    result = current.copy()
++    targets = set(uids)
++    for item in result.objects:
++        if item.uid not in targets:
++            continue
++        if label is not None and not label_exists(definition, item.role, label):
++            raise ValueError("객체 역할에 맞지 않는 라벨입니다.")
++        item.label = label
++        item.reviewed = True
++    return result
++
++
++def set_objects_reviewed(
++    current: VideoObjects, uids: Iterable[str], reviewed: bool
++) -> VideoObjects:
++    result = current.copy()
++    targets = set(uids)
++    for item in result.objects:
++        if item.uid in targets:
++            item.reviewed = reviewed
++    return result
++
++
++def delete_objects(current: VideoObjects, uids: Iterable[str]) -> VideoObjects:
++    targets = set(uids)
++    result = current.copy()
++    result.objects = [item for item in result.objects if item.uid not in targets]
++    return result
++
++
++def delete_box(current: VideoObjects, uid: str, frame: int) -> VideoObjects:
++    """Remove one frame's box; the object disappears with its last box."""
++
++    result = current.copy()
++    for item in list(result.objects):
++        if item.uid == uid:
++            item.boxes = [box for box in item.boxes if box.frame != frame]
++            if not item.boxes:
++                result.objects.remove(item)
++    return result
++
++
++@dataclass(frozen=True, slots=True)
++class FormUpdate:
++    field_key: str
++    stored_values: list[str]
++    added_texts: list[str]
++
++
++def form_updates(
++    objects: Iterable[DetectedObject],
++    role: str,
++    definition: FormDefinition,
++    values: dict[str, Any],
++) -> list[FormUpdate]:
++    """Choices to add to the '객체' or '충돌' tab for labelled objects of ``role``.
++
++    Additive only: existing selections are never removed.
++    """
++
++    records = {record["key"]: record for record in definition.records()}
++    wanted: dict[str, list[str]] = {}
++    for item in objects:
++        if item.role != role or item.label is None:
++            continue
++        if not label_exists(definition, role, item.label):
++            continue
++        ids = wanted.setdefault(item.label.field_key, [])
++        if item.label.choice_id not in ids:
++            ids.append(item.label.choice_id)
++    canonical = definition.canonical_values(values)
++    updates: list[FormUpdate] = []
++    for field_key, ids in wanted.items():
++        record = records[field_key]
++        existing = canonical.get(field_key)
++        current_ids = list(existing) if isinstance(existing, list) else []
++        new_ids = [choice_id for choice_id in ids if choice_id not in current_ids]
++        if not new_ids:
++            continue
++        merged_ids = [*current_ids, *new_ids]
++        # Keep the form's choice order for a stable CSV/UI presentation.
++        order = [c.get("id", c["value"]) for c in record["choices"]]
++        merged_ids.sort(key=lambda value: order.index(value) if value in order else len(order))
++        texts = [
++            next(c["label"] for c in record["choices"] if c.get("id", c["value"]) == choice_id)
++            for choice_id in new_ids
++        ]
++        updates.append(
++            FormUpdate(
++                field_key,
++                [definition.stored_value(field_key, choice_id) for choice_id in merged_ids],
++                texts,
++            )
++        )
++    return updates
++
++
++__all__ = [
++    "CLASS_BY_KEY",
++    "CLASS_GROUPS",
++    "DETECTION_CLASSES",
++    "ROLES",
++    "ROLE_COLLISION",
++    "ROLE_TITLES",
++    "ROLE_TRIGGER",
++    "DetectedObject",
++    "DetectionClass",
++    "DetectionRun",
++    "FormUpdate",
++    "LabelOption",
++    "LabelRef",
++    "ObjectBox",
++    "VideoObjects",
++    "add_manual_object",
++    "class_for_label",
++    "convert_label",
++    "default_label",
++    "delete_box",
++    "delete_objects",
++    "form_updates",
++    "label_options",
++    "label_text",
++    "merge_detection_result",
++    "normalize_objects_by_video",
++    "set_objects_label",
++    "set_objects_reviewed",
++    "set_objects_role",
++    "worker_class_config",
++]
+diff --git a/investigator/widgets/detection_panel.py b/investigator/widgets/detection_panel.py
+new file mode 100644
+index 0000000..be23def
+--- /dev/null
++++ b/investigator/widgets/detection_panel.py
+@@ -0,0 +1,759 @@
++"""Object detection range, run controls, and role/label editing of detected objects."""
++
++from __future__ import annotations
++
++from PySide6.QtCore import QSettings, QSignalBlocker, Qt, Signal
++from PySide6.QtGui import QColor
++from PySide6.QtWidgets import (
++    QAbstractItemView,
++    QButtonGroup,
++    QCheckBox,
++    QComboBox,
++    QDialog,
++    QDialogButtonBox,
++    QFileDialog,
++    QFormLayout,
++    QGridLayout,
++    QGroupBox,
++    QHBoxLayout,
++    QHeaderView,
++    QLabel,
++    QLineEdit,
++    QProgressBar,
++    QPushButton,
++    QRadioButton,
++    QSpinBox,
++    QTableWidget,
++    QTableWidgetItem,
++    QToolButton,
++    QVBoxLayout,
++    QWidget,
++)
++
++from investigator.detection_process import DEFAULT_MODEL, DetectionSettings
++from investigator.form_definition import FormDefinition
++from investigator.object_detection import (
++    CLASS_BY_KEY,
++    CLASS_GROUPS,
++    DETECTION_CLASSES,
++    ROLE_COLLISION,
++    ROLE_SHORT,
++    ROLE_TITLES,
++    ROLE_TRIGGER,
++    SOURCE_AUTOMATIC,
++    DetectedObject,
++    LabelRef,
++    VideoObjects,
++    label_options,
++    label_text,
++)
++from investigator.theme import DANGER, MUTED, PRIMARY, material_icon
++
++ROLE_COLORS = {ROLE_TRIGGER: PRIMARY, ROLE_COLLISION: DANGER}
++SETTINGS_CLASSES = "detection/classes"
++UID_ROLE = Qt.ItemDataRole.UserRole
++
++
++def selected_class_keys(settings: QSettings | None = None) -> list[str]:
++    stored = (settings or QSettings()).value(SETTINGS_CLASSES, None)
++    if isinstance(stored, str):
++        stored = [stored] if stored else []
++    keys = [key for key in (stored or []) if key in CLASS_BY_KEY]
++    return keys if stored is not None else [item.key for item in DETECTION_CLASSES]
++
++
++class ClassPickerDialog(QDialog):
++    """Choose detection classes (union of the '객체' and '충돌' choices)."""
++
++    def __init__(self, selected: list[str], parent: QWidget | None = None) -> None:
++        super().__init__(parent)
++        self.setWindowTitle("검출 클래스 선택")
++        root = QVBoxLayout(self)
++        hint = QLabel(
++            "'객체' 탭 장애물과 '충돌' 탭 충돌 대상의 합집합입니다. "
++            "클래스가 많을수록 검출 시간이 늘어납니다.",
++            self,
++        )
++        hint.setWordWrap(True)
++        hint.setStyleSheet(f"color: {MUTED};")
++        root.addWidget(hint)
++        self.checkboxes: dict[str, QCheckBox] = {}
++        grid = QGridLayout()
++        for column, group in enumerate(CLASS_GROUPS):
++            box = QGroupBox(group, self)
++            layout = QVBoxLayout(box)
++            for item in DETECTION_CLASSES:
++                if item.group != group:
++                    continue
++                checkbox = QCheckBox(item.label, box)
++                checkbox.setChecked(item.key in selected)
++                checkbox.setToolTip("프롬프트: " + ", ".join(item.prompts))
++                layout.addWidget(checkbox)
++                self.checkboxes[item.key] = checkbox
++            layout.addStretch(1)
++            grid.addWidget(box, 0, column)
++        root.addLayout(grid)
++        shortcuts = QHBoxLayout()
++        select_all = QPushButton("전체 선택", self)
++        select_none = QPushButton("전체 해제", self)
++        select_all.clicked.connect(lambda: self._set_all(True))
++        select_none.clicked.connect(lambda: self._set_all(False))
++        shortcuts.addWidget(select_all)
++        shortcuts.addWidget(select_none)
++        shortcuts.addStretch(1)
++        root.addLayout(shortcuts)
++        buttons = QDialogButtonBox(
++            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
++        )
++        buttons.accepted.connect(self.accept)
++        buttons.rejected.connect(self.reject)
++        root.addWidget(buttons)
++
++    def _set_all(self, checked: bool) -> None:
++        for checkbox in self.checkboxes.values():
++            checkbox.setChecked(checked)
++
++    def selected(self) -> list[str]:
++        return [key for key, checkbox in self.checkboxes.items() if checkbox.isChecked()]
++
++
++class DetectionSettingsDialog(QDialog):
++    def __init__(self, settings: DetectionSettings, parent: QWidget | None = None) -> None:
++        super().__init__(parent)
++        self.setWindowTitle("객체 검출 환경")
++        self.setMinimumWidth(520)
++        root = QVBoxLayout(self)
++        note = QLabel(
++            "SAM 3 검출은 torch·transformers가 설치된 별도 Python 환경에서 실행합니다. "
++            "비워 두면 AVAT를 실행한 Python을 사용합니다.",
++            self,
++        )
++        note.setWordWrap(True)
++        note.setStyleSheet(f"color: {MUTED};")
++        root.addWidget(note)
++        form = QFormLayout()
++        python_row = QHBoxLayout()
++        self.python_edit = QLineEdit(settings.python, self)
++        self.python_edit.setPlaceholderText(r"예: C:\avat-sam3\.venv\Scripts\python.exe")
++        browse = QPushButton("찾기…", self)
++        browse.clicked.connect(self._browse)
++        python_row.addWidget(self.python_edit, 1)
++        python_row.addWidget(browse)
++        form.addRow("검출용 Python", python_row)
++        self.model_edit = QLineEdit(settings.model, self)
++        self.model_edit.setPlaceholderText(DEFAULT_MODEL)
++        form.addRow("모델 (ID 또는 폴더)", self.model_edit)
++        self.device_combo = QComboBox(self)
++        for label, value in (("자동 (GPU 우선)", "auto"), ("GPU (CUDA)", "cuda"), ("CPU", "cpu")):
++            self.device_combo.addItem(label, value)
++        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(settings.device)))
++        form.addRow("장치", self.device_combo)
++        root.addLayout(form)
++        buttons = QDialogButtonBox(
++            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
++        )
++        buttons.accepted.connect(self.accept)
++        buttons.rejected.connect(self.reject)
++        root.addWidget(buttons)
++
++    def _browse(self) -> None:
++        path, _ = QFileDialog.getOpenFileName(self, "검출용 Python 선택", self.python_edit.text())
++        if path:
++            self.python_edit.setText(path)
++
++    def settings(self) -> DetectionSettings:
++        return DetectionSettings(
++            python=self.python_edit.text().strip(),
++            model=self.model_edit.text().strip() or DEFAULT_MODEL,
++            device=str(self.device_combo.currentData()),
++        )
++
++
++class DetectionPanel(QWidget):
++    run_requested = Signal()
++    cancel_requested = Signal()
++    settings_requested = Signal()
++    range_changed = Signal(int, int)  # zero-based, inclusive
++    seek_requested = Signal(int)
++    selection_changed = Signal(list)
++    role_change_requested = Signal(list, str)
++    label_change_requested = Signal(list, object)  # LabelRef | None
++    reviewed_change_requested = Signal(list, bool)
++    delete_requested = Signal(list)
++    delete_box_requested = Signal(str)
++    draw_mode_toggled = Signal(bool)
++    apply_requested = Signal(str)  # role
++
++    def __init__(self, parent: QWidget | None = None) -> None:
++        super().__init__(parent)
++        self.setObjectName("panel")
++        self._total_frames = 0
++        self._fps = 0.0
++        self._current_frame = 0
++        self._trigger: int | None = None
++        self._collision: int | None = None
++        self._objects = VideoObjects()
++        self._definition: FormDefinition = FormDefinition.default()
++        self._running = False
++        self._class_keys = selected_class_keys()
++        self._updating_table = False
++
++        root = QVBoxLayout(self)
++        root.setContentsMargins(16, 8, 16, 8)
++        root.setSpacing(6)
++
++        # -- heading: title, classes, settings --------------------------------------
++        heading = QHBoxLayout()
++        title = QLabel("객체 검출 · 라벨링", self)
++        title.setObjectName("sectionTitle")
++        heading.addWidget(title)
++        heading.addStretch(1)
++        self.classes_button = QPushButton(self)
++        self.classes_button.setIcon(material_icon("category", PRIMARY))
++        heading.addWidget(self.classes_button)
++        self.settings_button = QToolButton(self)
++        self.settings_button.setIcon(material_icon("settings", PRIMARY))
++        self.settings_button.setToolTip("객체 검출 환경 (검출용 Python·모델·장치)")
++        self.settings_button.setAccessibleName("객체 검출 환경")
++        heading.addWidget(self.settings_button)
++        root.addLayout(heading)
++
++        # -- range ---------------------------------------------------------------
++        range_row = QHBoxLayout()
++        range_row.setSpacing(6)
++        self.single_radio = QRadioButton("현재 프레임", self)
++        self.range_radio = QRadioButton("구간", self)
++        self.range_radio.setToolTip("타임라인에서 Shift+드래그로도 구간을 선택할 수 있습니다.")
++        self.single_radio.setChecked(True)
++        self.range_mode = QButtonGroup(self)
++        self.range_mode.addButton(self.single_radio)
++        self.range_mode.addButton(self.range_radio)
++        range_row.addWidget(self.single_radio)
++        range_row.addWidget(self.range_radio)
++        self.start_spin = self._frame_spin(self)
++        self.end_spin = self._frame_spin(self)
++        self.start_spin.setToolTip("시작 프레임 (1부터)")
++        self.end_spin.setToolTip("끝 프레임 (포함)")
++        range_row.addWidget(self.start_spin)
++        range_row.addWidget(QLabel("~", self))
++        range_row.addWidget(self.end_spin)
++        self.step_spin = QSpinBox(self)
++        self.step_spin.setRange(1, 300)
++        self.step_spin.setValue(1)
++        self.step_spin.setPrefix("간격 ")
++        self.step_spin.setMaximumWidth(96)
++        self.step_spin.setToolTip("구간 안에서 몇 프레임마다 검출할지 정합니다.")
++        range_row.addWidget(self.step_spin)
++        self.start_here_button = QPushButton("시작←현재", self)
++        self.end_here_button = QPushButton("끝←현재", self)
++        self.trigger_collision_button = QPushButton("T~C", self)
++        self.trigger_collision_button.setToolTip("트리거 마커부터 충돌 마커까지")
++        for button in (self.start_here_button, self.end_here_button, self.trigger_collision_button):
++            range_row.addWidget(button)
++        range_row.addStretch(1)
++        root.addLayout(range_row)
++
++        # -- role and run ----------------------------------------------------------
++        run_row = QHBoxLayout()
++        run_row.addWidget(QLabel("새 객체 역할", self))
++        self.trigger_role_radio = QRadioButton(ROLE_TITLES[ROLE_TRIGGER], self)
++        self.collision_role_radio = QRadioButton(ROLE_TITLES[ROLE_COLLISION], self)
++        self.trigger_role_radio.setChecked(True)
++        self.role_group = QButtonGroup(self)
++        self.role_group.addButton(self.trigger_role_radio)
++        self.role_group.addButton(self.collision_role_radio)
++        run_row.addWidget(self.trigger_role_radio)
++        run_row.addWidget(self.collision_role_radio)
++        run_row.addStretch(1)
++        self.range_summary = QLabel("", self)
++        self.range_summary.setStyleSheet(f"color: {MUTED};")
++        run_row.addWidget(self.range_summary)
++        self.run_button = QPushButton(material_icon("play_circle", PRIMARY), "검출 실행", self)
++        self.run_button.setObjectName("completeButton")
++        self.cancel_button = QPushButton(material_icon("stop_circle", PRIMARY), "취소", self)
++        self.cancel_button.setEnabled(False)
++        run_row.addWidget(self.run_button)
++        run_row.addWidget(self.cancel_button)
++        root.addLayout(run_row)
++
++        status_row = QHBoxLayout()
++        self.progress = QProgressBar(self)
++        self.progress.setRange(0, 1)
++        self.progress.setValue(0)
++        self.progress.setTextVisible(True)
++        self.progress.setFormat("%v / %m")
++        self.progress.setFixedWidth(150)
++        self.status_label = QLabel("", self)
++        self.status_label.setWordWrap(True)
++        self.status_label.setStyleSheet(f"color: {MUTED};")
++        status_row.addWidget(self.progress)
++        status_row.addWidget(self.status_label, 1)
++        root.addLayout(status_row)
++
++        # -- objects ------------------------------------------------------------
++        list_header = QHBoxLayout()
++        self.objects_title = QLabel("검출 객체 0개", self)
++        self.objects_title.setStyleSheet("font-weight: 650;")
++        list_header.addWidget(self.objects_title)
++        list_header.addStretch(1)
++        self.current_only = QCheckBox("현재 프레임만", self)
++        list_header.addWidget(self.current_only)
++        self.draw_button = QPushButton(
++            material_icon("highlight_alt", PRIMARY), "사각형 그리기", self
++        )
++        self.draw_button.setCheckable(True)
++        self.draw_button.setToolTip(
++            "영상 위를 드래그해 객체를 직접 추가합니다 (새 객체 역할 사용)."
++        )
++        list_header.addWidget(self.draw_button)
++        self.apply_trigger_button = QPushButton(
++            material_icon("playlist_add_check", PRIMARY), "객체 탭에 반영", self
++        )
++        self.apply_trigger_button.setToolTip(
++            "트리거 시점 관여 객체의 라벨을 '객체' 탭 장애물 항목에 추가합니다."
++        )
++        self.apply_collision_button = QPushButton(
++            material_icon("playlist_add_check", PRIMARY), "충돌 탭에 반영", self
++        )
++        self.apply_collision_button.setToolTip(
++            "충돌 관여 객체의 라벨을 '충돌' 탭 충돌 대상에 추가합니다."
++        )
++        list_header.addWidget(self.apply_trigger_button)
++        list_header.addWidget(self.apply_collision_button)
++        root.addLayout(list_header)
++
++        self.table = QTableWidget(0, 7, self)
++        self.table.setHorizontalHeaderLabels(
++            ["ID", "역할", "라벨", "프레임", "박스", "신뢰도", "상태"]
++        )
++        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
++        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
++        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
++        self.table.verticalHeader().hide()
++        self.table.verticalHeader().setDefaultSectionSize(26)
++        self.table.setMinimumHeight(112)
++        self.table.setToolTip("더블클릭하면 객체가 있는 프레임으로 이동합니다.")
++        header = self.table.horizontalHeader()
++        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
++        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
++        root.addWidget(self.table, 1)
++
++        edit_row = QHBoxLayout()
++        self.role_combo = QComboBox(self)
++        self.role_combo.setToolTip("선택한 객체의 역할")
++        for role in (ROLE_TRIGGER, ROLE_COLLISION):
++            self.role_combo.addItem(ROLE_TITLES[role], role)
++        edit_row.addWidget(self.role_combo)
++        self.label_combo = QComboBox(self)
++        self.label_combo.setMinimumContentsLength(14)
++        self.label_combo.setSizeAdjustPolicy(
++            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
++        )
++        edit_row.addWidget(self.label_combo, 1)
++        self.reviewed_button = QPushButton(material_icon("task_alt", PRIMARY), "확인", self)
++        self.reviewed_button.setCheckable(True)
++        self.reviewed_button.setToolTip(
++            "검토 완료 표시. 확인한 자동 객체는 재검출 때 교체되지 않습니다."
++        )
++        self.delete_box_button = QPushButton("이 프레임 박스 삭제", self)
++        self.delete_button = QPushButton(material_icon("delete", DANGER), "객체 삭제", self)
++        edit_row.addWidget(self.reviewed_button)
++        edit_row.addWidget(self.delete_box_button)
++        edit_row.addWidget(self.delete_button)
++        root.addLayout(edit_row)
++
++        self.settings_button.clicked.connect(self.settings_requested)
++        self.single_radio.toggled.connect(self._range_mode_changed)
++        self.start_spin.valueChanged.connect(self._range_edited)
++        self.end_spin.valueChanged.connect(self._range_edited)
++        self.step_spin.valueChanged.connect(self._update_summary)
++        self.start_here_button.clicked.connect(lambda: self._set_range_edge(start=True))
++        self.end_here_button.clicked.connect(lambda: self._set_range_edge(start=False))
++        self.trigger_collision_button.clicked.connect(self._range_trigger_to_collision)
++        self.classes_button.clicked.connect(self._choose_classes)
++        self.run_button.clicked.connect(self.run_requested)
++        self.cancel_button.clicked.connect(self.cancel_requested)
++        self.current_only.toggled.connect(lambda _checked: self._rebuild_table())
++        self.draw_button.toggled.connect(self.draw_mode_toggled)
++        self.table.itemSelectionChanged.connect(self._table_selection_changed)
++        self.table.cellDoubleClicked.connect(self._row_activated)
++        self.role_combo.activated.connect(self._role_chosen)
++        self.label_combo.activated.connect(self._label_chosen)
++        self.reviewed_button.clicked.connect(
++            lambda checked: self._emit_for_selection(self.reviewed_change_requested, bool(checked))
++        )
++        self.delete_button.clicked.connect(lambda: self._emit_for_selection(self.delete_requested))
++        self.delete_box_button.clicked.connect(self._delete_box)
++        self.apply_trigger_button.clicked.connect(lambda: self.apply_requested.emit(ROLE_TRIGGER))
++        self.apply_collision_button.clicked.connect(
++            lambda: self.apply_requested.emit(ROLE_COLLISION)
++        )
++        self._update_classes_button()
++        self._range_mode_changed(True)
++        self._update_editor()
++        self.set_video(0, 0.0)
++
++    @staticmethod
++    def _frame_spin(parent: QWidget) -> QSpinBox:
++        spin = QSpinBox(parent)
++        spin.setRange(1, 1)
++        spin.setGroupSeparatorShown(True)
++        spin.setMinimumWidth(78)
++        spin.setMaximumWidth(96)
++        return spin
++
++    # -- inputs from the main window -------------------------------------------
++
++    def set_video(self, total_frames: int, fps: float) -> None:
++        self._total_frames = max(0, int(total_frames))
++        self._fps = max(0.0, float(fps))
++        maximum = max(1, self._total_frames)
++        for spin in (self.start_spin, self.end_spin):
++            with QSignalBlocker(spin):
++                spin.setRange(1, maximum)
++        with QSignalBlocker(self.start_spin), QSignalBlocker(self.end_spin):
++            self.start_spin.setValue(1)
++            self.end_spin.setValue(1)
++        self.set_current_frame(0)
++        enabled = self._total_frames > 0
++        for widget in (self.single_radio, self.range_radio, self.step_spin, self.draw_button):
++            widget.setEnabled(enabled)
++        self._update_run_enabled()
++
++    def set_current_frame(self, frame: int) -> None:
++        self._current_frame = max(0, int(frame))
++        if self.single_radio.isChecked():
++            self._apply_range(self._current_frame, self._current_frame, emit=True)
++        if self.current_only.isChecked():
++            self._rebuild_table()
++        self._update_editor()
++
++    def set_markers(self, trigger: int | None, collision: int | None) -> None:
++        self._trigger, self._collision = trigger, collision
++        self.trigger_collision_button.setEnabled(
++            trigger is not None and collision is not None and not self._running
++        )
++
++    def set_objects(self, objects: VideoObjects, definition: FormDefinition) -> None:
++        selected = self.selected_uids()
++        self._objects = objects
++        self._definition = definition
++        self._rebuild_table(selected)
++
++    def set_selected_range(self, start: int, end: int) -> None:
++        """Range picked on the timeline (zero-based, inclusive)."""
++
++        with QSignalBlocker(self.range_radio):
++            self.range_radio.setChecked(True)
++        self._range_mode_changed(False)
++        self._apply_range(start, end, emit=False)
++
++    def set_running(self, running: bool) -> None:
++        self._running = running
++        self.cancel_button.setEnabled(running)
++        for widget in (
++            self.single_radio,
++            self.range_radio,
++            self.start_spin,
++            self.end_spin,
++            self.step_spin,
++            self.start_here_button,
++            self.end_here_button,
++            self.classes_button,
++            self.trigger_role_radio,
++            self.collision_role_radio,
++            self.settings_button,
++        ):
++            widget.setEnabled(not running)
++        if running:
++            self.progress.setRange(0, 0)
++        else:
++            self.progress.setRange(0, 1)
++            self.progress.setValue(0)
++        self.set_markers(self._trigger, self._collision)
++        self._range_mode_changed(self.single_radio.isChecked())
++        self._update_run_enabled()
++
++    def set_progress(self, processed: int, total: int) -> None:
++        self.progress.setRange(0, max(1, total))
++        self.progress.setValue(processed)
++
++    def set_status(self, text: str) -> None:
++        self.status_label.setText(text)
++
++    # -- range ---------------------------------------------------------------
++
++    @property
++    def frame_range(self) -> tuple[int, int]:
++        """Zero-based inclusive range."""
++
++        start, end = self.start_spin.value() - 1, self.end_spin.value() - 1
++        return (min(start, end), max(start, end))
++
++    @property
++    def frame_step(self) -> int:
++        return 1 if self.single_radio.isChecked() else self.step_spin.value()
++
++    @property
++    def new_object_role(self) -> str:
++        return ROLE_COLLISION if self.collision_role_radio.isChecked() else ROLE_TRIGGER
++
++    def set_new_object_role(self, role: str) -> None:
++        (
++            self.collision_role_radio if role == ROLE_COLLISION else self.trigger_role_radio
++        ).setChecked(True)
++
++    @property
++    def class_keys(self) -> list[str]:
++        return list(self._class_keys)
++
++    def _range_mode_changed(self, single: bool) -> None:
++        editable = not single and not self._running
++        for widget in (
++            self.start_spin,
++            self.end_spin,
++            self.step_spin,
++            self.start_here_button,
++            self.end_here_button,
++        ):
++            widget.setEnabled(editable and self._total_frames > 0)
++        if single:
++            self._apply_range(self._current_frame, self._current_frame, emit=True)
++        else:
++            self._update_summary()
++
++    def _apply_range(self, start: int, end: int, *, emit: bool) -> None:
++        start, end = sorted((max(0, int(start)), max(0, int(end))))
++        with QSignalBlocker(self.start_spin), QSignalBlocker(self.end_spin):
++            self.start_spin.setValue(start + 1)
++            self.end_spin.setValue(end + 1)
++        self._update_summary()
++        if emit:
++            self.range_changed.emit(*self.frame_range)
++
++    def _range_edited(self) -> None:
++        self._update_summary()
++        self.range_changed.emit(*self.frame_range)
++
++    def _set_range_edge(self, *, start: bool) -> None:
++        low, high = self.frame_range
++        if start:
++            low = self._current_frame
++            high = max(high, low)
++        else:
++            high = self._current_frame
++            low = min(low, high)
++        self._apply_range(low, high, emit=True)
++
++    def _range_trigger_to_collision(self) -> None:
++        if self._trigger is None or self._collision is None:
++            return
++        self.range_radio.setChecked(True)
++        self._apply_range(self._trigger, self._collision, emit=True)
++
++    def processed_frame_count(self) -> int:
++        start, end = self.frame_range
++        return len(range(start, end + 1, self.frame_step))
++
++    def _update_summary(self) -> None:
++        start, end = self.frame_range
++        count = self.processed_frame_count()
++        if self.single_radio.isChecked():
++            text = f"{start + 1:,}번 프레임"
++        else:
++            seconds = (end - start + 1) / self._fps if self._fps else 0.0
++            text = f"{end - start + 1:,}프레임 ({seconds:.1f}초) · 처리 {count:,}장"
++        self.range_summary.setText(text)
++
++    # -- classes -------------------------------------------------------------
++
++    def _choose_classes(self) -> None:
++        dialog = ClassPickerDialog(self._class_keys, self)
++        if dialog.exec() == QDialog.DialogCode.Accepted:
++            self._class_keys = dialog.selected()
++            QSettings().setValue(SETTINGS_CLASSES, self._class_keys)
++            self._update_classes_button()
++            self._update_run_enabled()
++
++    def _update_classes_button(self) -> None:
++        self.classes_button.setText(f"검출 클래스 {len(self._class_keys)}/{len(DETECTION_CLASSES)}")
++        names = ", ".join(CLASS_BY_KEY[key].label for key in self._class_keys) or "선택 없음"
++        self.classes_button.setToolTip(names)
++
++    def _update_run_enabled(self) -> None:
++        self.run_button.setEnabled(
++            not self._running and self._total_frames > 0 and bool(self._class_keys)
++        )
++
++    # -- object table ----------------------------------------------------------
++
++    def _visible_objects(self) -> list[DetectedObject]:
++        items = self._objects.objects
++        if self.current_only.isChecked():
++            items = [item for item in items if item.box_at(self._current_frame) is not None]
++        return sorted(items, key=lambda item: (item.first_frame, item.object_id))
++
++    def _rebuild_table(self, selected: list[str] | None = None) -> None:
++        selected = self.selected_uids() if selected is None else selected
++        self._updating_table = True
++        try:
++            visible = self._visible_objects()
++            self.table.setRowCount(len(visible))
++            for row, item in enumerate(visible):
++                score = item.mean_score
++                frames = (
++                    f"{item.first_frame + 1:,}"
++                    if item.first_frame == item.last_frame
++                    else f"{item.first_frame + 1:,}~{item.last_frame + 1:,}"
++                )
++                status = (
++                    "확인"
++                    if item.reviewed
++                    else ("자동" if item.source == SOURCE_AUTOMATIC else "수동")
++                )
++                cells = [
++                    item.object_id,
++                    ROLE_SHORT[item.role],
++                    label_text(self._definition, item.role, item.label),
++                    frames,
++                    str(len(item.boxes)),
++                    "-" if score is None else f"{score:.2f}",
++                    status,
++                ]
++                for column, text in enumerate(cells):
++                    cell = QTableWidgetItem(text)
++                    cell.setData(UID_ROLE, item.uid)
++                    if column == 1:
++                        cell.setForeground(QColor(ROLE_COLORS[item.role]))
++                    if column == 2 and item.label is None:
++                        cell.setForeground(QColor(DANGER))
++                    self.table.setItem(row, column, cell)
++            self.table.clearSelection()
++            wanted = set(selected)
++            for row in range(self.table.rowCount()):
++                if self.table.item(row, 0).data(UID_ROLE) in wanted:
++                    self._add_row_selection(row)
++        finally:
++            self._updating_table = False
++        unlabeled = sum(1 for item in self._objects.objects if item.label is None)
++        total = len(self._objects.objects)
++        self.objects_title.setText(
++            f"검출 객체 {total}개" + (f" · 라벨 미지정 {unlabeled}개" if unlabeled else "")
++        )
++        self.apply_trigger_button.setEnabled(
++            any(i.role == ROLE_TRIGGER and i.label for i in self._objects.objects)
++        )
++        self.apply_collision_button.setEnabled(
++            any(i.role == ROLE_COLLISION and i.label for i in self._objects.objects)
++        )
++        self._update_editor()
++
++    def _add_row_selection(self, row: int) -> None:
++        model = self.table.selectionModel()
++        index = self.table.model().index(row, 0)
++        model.select(
++            index,
++            model.SelectionFlag.Select | model.SelectionFlag.Rows,
++        )
++
++    def selected_uids(self) -> list[str]:
++        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
++        return [self.table.item(row, 0).data(UID_ROLE) for row in rows if self.table.item(row, 0)]
++
++    def select_uids(self, uids: list[str]) -> None:
++        if not uids and not self.selected_uids():
++            return
++        self._rebuild_table(list(uids))
++        rows = [
++            row
++            for row in range(self.table.rowCount())
++            if self.table.item(row, 0).data(UID_ROLE) in uids
++        ]
++        if rows:
++            self.table.scrollToItem(self.table.item(rows[0], 0))
++        self.selection_changed.emit(self.selected_uids())
++
++    def _table_selection_changed(self) -> None:
++        if self._updating_table:
++            return
++        self._update_editor()
++        self.selection_changed.emit(self.selected_uids())
++
++    def _row_activated(self, row: int, _column: int) -> None:
++        uid = self.table.item(row, 0).data(UID_ROLE)
++        item = self._objects.find(uid)
++        if item is not None:
++            self.seek_requested.emit(item.nearest_frame(self._current_frame))
++
++    def _selected_objects(self) -> list[DetectedObject]:
++        return [item for uid in self.selected_uids() if (item := self._objects.find(uid))]
++
++    def _update_editor(self) -> None:
++        items = self._selected_objects()
++        has_selection = bool(items)
++        for widget in (self.role_combo, self.reviewed_button, self.delete_button):
++            widget.setEnabled(has_selection)
++        self.delete_box_button.setEnabled(
++            len(items) == 1 and items[0].box_at(self._current_frame) is not None
++        )
++        roles = {item.role for item in items}
++        with QSignalBlocker(self.role_combo):
++            if len(roles) == 1:
++                self.role_combo.setCurrentIndex(self.role_combo.findData(next(iter(roles))))
++            else:
++                self.role_combo.setCurrentIndex(-1)
++        with QSignalBlocker(self.label_combo):
++            self.label_combo.clear()
++            if len(roles) == 1:
++                role = next(iter(roles))
++                self.label_combo.addItem("라벨 미지정", None)
++                for option in label_options(self._definition, role):
++                    self.label_combo.addItem(
++                        option.text, (option.ref.field_key, option.ref.choice_id)
++                    )
++                labels = {item.label for item in items}
++                if len(labels) == 1:
++                    label = next(iter(labels))
++                    data = None if label is None else (label.field_key, label.choice_id)
++                    index = self.label_combo.findData(data)
++                    self.label_combo.setCurrentIndex(index if index >= 0 else 0)
++                else:
++                    self.label_combo.setCurrentIndex(-1)
++                self.label_combo.setEnabled(True)
++                self.label_combo.setToolTip(
++                    "'객체' 탭 장애물 항목" if role == ROLE_TRIGGER else "'충돌' 탭 충돌 대상"
++                )
++            else:
++                self.label_combo.setEnabled(False)
++                self.label_combo.setToolTip("역할이 같은 객체를 선택하면 라벨을 바꿀 수 있습니다.")
++        with QSignalBlocker(self.reviewed_button):
++            self.reviewed_button.setChecked(has_selection and all(item.reviewed for item in items))
++
++    def _emit_for_selection(self, signal, *args) -> None:  # type: ignore[no-untyped-def]
++        uids = self.selected_uids()
++        if uids:
++            signal.emit(uids, *args)
++
++    def _role_chosen(self, index: int) -> None:
++        role = self.role_combo.itemData(index)
++        if role:
++            self._emit_for_selection(self.role_change_requested, role)
++
++    def _label_chosen(self, index: int) -> None:
++        data = self.label_combo.itemData(index)
++        label = None if data is None else LabelRef(data[0], data[1])
++        self._emit_for_selection(self.label_change_requested, label)
++
++    def _delete_box(self) -> None:
++        uids = self.selected_uids()
++        if len(uids) == 1:
++            self.delete_box_requested.emit(uids[0])
++
++
++__all__ = [
++    "ClassPickerDialog",
++    "DetectionPanel",
++    "DetectionSettingsDialog",
++    "ROLE_COLORS",
++    "selected_class_keys",
++]
+diff --git a/investigator/widgets/playback_panel.py b/investigator/widgets/playback_panel.py
+index 721e7bf..7e1b761 100644
+--- a/investigator/widgets/playback_panel.py
++++ b/investigator/widgets/playback_panel.py
+@@ -25,6 +25,7 @@ from investigator.theme import DANGER, MUTED, PRIMARY, PRIMARY_HOVER, material_i
+ 
+ MarkerKind = Literal["trigger", "collision", "speed"]
+ COLLISION_HOVER = "#EA580C"
++SELECTION_RANGE = "#1F5FBF"
+ SPEED_POINT = "#0F766E"
+ SPEED_POINT_HOVER = "#14958A"
+ MARKER_INTERACTION_SIZE = 25
+@@ -44,6 +45,8 @@ def format_timestamp(seconds: float) -> str:
+ 
+ class MarkerSlider(QSlider):
+     seek_requested = Signal(int)
++    # Inclusive zero-based frame range chosen with Shift+drag for object detection.
++    range_selected = Signal(int, int)
+ 
+     def __init__(self, parent: QWidget | None = None) -> None:
+         super().__init__(Qt.Orientation.Horizontal, parent)
+@@ -59,8 +62,24 @@ class MarkerSlider(QSlider):
+         self._painted_speed_index: int | None = None
+         self._last_seek_requested: int | None = None
+         self._groove_dragging = False
++        self.selection_range: tuple[int, int] | None = None
++        self._range_anchor: int | None = None
+         self.sliderMoved.connect(self._emit_seek_requested)
+ 
++    def set_selection_range(self, start: int | None, end: int | None = None) -> None:
++        """Show (or clear) the detection range without emitting a signal."""
++
++        if start is None:
++            self.selection_range = None
++        else:
++            end = start if end is None else end
++            self.selection_range = (min(int(start), int(end)), max(int(start), int(end)))
++        self.update()
++
++    @property
++    def selecting_range(self) -> bool:
++        return self._range_anchor is not None
++
+     def _emit_seek_requested(self, frame: int) -> None:
+         self._last_seek_requested = int(frame)
+         self.seek_requested.emit(int(frame))
+@@ -245,6 +264,18 @@ class MarkerSlider(QSlider):
+         super().paintEvent(event)
+         painter = QPainter(self)
+         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
++        if self.selection_range is not None:
++            painter.save()
++            start, end = self.selection_range
++            left = self._x_for_value(start)
++            right = self._x_for_value(end)
++            band = QRect(left - 2, self.height() // 2 - 9, max(4, right - left + 4), 18)
++            fill = QColor(SELECTION_RANGE)
++            fill.setAlpha(46)
++            painter.setBrush(fill)
++            painter.setPen(QPen(QColor(SELECTION_RANGE), 1.2))
++            painter.drawRoundedRect(band, 4, 4)
++            painter.restore()
+         for index, frame in enumerate(self.speed_frames):
+             painter.save()
+             x = self._x_for_value(frame)
+@@ -323,6 +354,13 @@ class MarkerSlider(QSlider):
+             painter.restore()
+ 
+     def mouseMoveEvent(self, event: QMouseEvent) -> None:
++        if self._range_anchor is not None:
++            if event.buttons() & Qt.MouseButton.LeftButton:
++                value = self._value_at_position(event.position().toPoint())
++                self.set_selection_range(self._range_anchor, value)
++                event.accept()
++                return
++            self._range_anchor = None
+         if self._groove_dragging:
+             # A press away from the handle uses absolute track coordinates;
+             # native handle drags below still retain their original grab offset.
+@@ -348,6 +386,12 @@ class MarkerSlider(QSlider):
+             return
+         position = event.position().toPoint()
+         self._groove_dragging = False
++        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
++            # Shift+drag chooses a detection range instead of seeking.
++            self._range_anchor = self._value_at_position(position)
++            self.set_selection_range(self._range_anchor, self._range_anchor)
++            event.accept()
++            return
+         marker = self._marker_at(position)
+         if marker is not None:
+             self._set_hovered_marker(marker[0])
+@@ -379,6 +423,14 @@ class MarkerSlider(QSlider):
+         )
+ 
+     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
++        if self._range_anchor is not None and event.button() == Qt.MouseButton.LeftButton:
++            value = self._value_at_position(event.position().toPoint())
++            start, end = sorted((self._range_anchor, value))
++            self._range_anchor = None
++            self.set_selection_range(start, end)
++            self.range_selected.emit(start, end)
++            event.accept()
++            return
+         was_dragging = self.isSliderDown()
+         if self._groove_dragging and event.button() == Qt.MouseButton.LeftButton:
+             # Include the final pointer location even if its last move event
+@@ -404,6 +456,8 @@ class PlaybackPanel(QWidget):
+     collision_requested = Signal()
+     speed_point_requested = Signal()
+     speed_panel_toggled = Signal(bool)
++    detection_panel_toggled = Signal(bool)
++    range_selected = Signal(int, int)
+ 
+     def __init__(self, parent: QWidget | None = None) -> None:
+         super().__init__(parent)
+@@ -423,7 +477,7 @@ class PlaybackPanel(QWidget):
+         self.time_label.setStyleSheet("font-size: 14px; font-weight: 650;")
+         timeline_header.addWidget(self.time_label)
+         timeline_header.addStretch(1)
+-        legend = QLabel("◆ T 트리거    ▼ C 충돌    1 2 3 속도 지점", self)
++        legend = QLabel("◆ T 트리거    ▼ C 충돌    1 2 3 속도 지점    ▬ 검출 구간(Shift+드래그)", self)
+         legend.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+         legend.setMinimumWidth(0)
+         legend.setWordWrap(True)
+@@ -436,6 +490,7 @@ class PlaybackPanel(QWidget):
+         self.timeline.setRange(0, 0)
+         self.timeline.setEnabled(False)
+         self.timeline.seek_requested.connect(self.seek_requested)
++        self.timeline.range_selected.connect(self.range_selected)
+         root.addWidget(self.timeline)
+ 
+         controls = QHBoxLayout()
+@@ -502,7 +557,21 @@ class PlaybackPanel(QWidget):
+         self.speed_panel_button.setAccessibleName("속도 추정 패널")
+         self.speed_panel_button.setFixedSize(36, 34)
+         self.speed_panel_button.setStyleSheet("padding:0; min-height:0;")
+-        for button in (self.trigger_button, self.collision_button, self.speed_point_button, self.speed_panel_button):
++        self.detection_panel_button = QToolButton(self)
++        self.detection_panel_button.setObjectName("detectionPanelButton")
++        self.detection_panel_button.setIcon(material_icon("frame_inspect", PRIMARY))
++        self.detection_panel_button.setCheckable(True)
++        self.detection_panel_button.setToolTip("객체 검출·라벨링 패널 열기/닫기")
++        self.detection_panel_button.setAccessibleName("객체 검출 패널")
++        self.detection_panel_button.setFixedSize(36, 34)
++        self.detection_panel_button.setStyleSheet("padding:0; min-height:0;")
++        for button in (
++            self.trigger_button,
++            self.collision_button,
++            self.speed_point_button,
++            self.speed_panel_button,
++            self.detection_panel_button,
++        ):
+             marker_row.addWidget(button)
+         self.input_rows = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+         self.input_rows.setSpacing(10)
+@@ -525,6 +594,7 @@ class PlaybackPanel(QWidget):
+         self.collision_button.clicked.connect(self.collision_requested)
+         self.speed_point_button.clicked.connect(self.speed_point_requested)
+         self.speed_panel_button.toggled.connect(self.speed_panel_toggled)
++        self.detection_panel_button.toggled.connect(self.detection_panel_toggled)
+         self.go_button.clicked.connect(
+             lambda: self.seek_requested.emit(self.frame_input.value() - 1)
+         )
+@@ -572,6 +642,7 @@ class PlaybackPanel(QWidget):
+         self.frame_total.setText("/ 0")
+         self.time_label.setText("00:00.00 / 00:00.00")
+         self.timeline.set_markers(None, None, [])
++        self.timeline.set_selection_range(None)
+         self.set_video_enabled(False)
+ 
+     def update_total_frames(self, total_frames: int) -> None:
+@@ -659,5 +730,12 @@ class PlaybackPanel(QWidget):
+     ) -> None:
+         self.timeline.set_markers(trigger, collision, speed_frames)
+ 
++    def set_selection_range(self, start: int | None, end: int | None = None) -> None:
++        self.timeline.set_selection_range(start, end)
++
++    @property
++    def total_frames(self) -> int:
++        return self._total_frames
++
+ 
+ __all__ = ["MarkerSlider", "PlaybackPanel", "format_timestamp"]
+diff --git a/investigator/widgets/video_player.py b/investigator/widgets/video_player.py
+index 4d963a0..566cdca 100644
+--- a/investigator/widgets/video_player.py
++++ b/investigator/widgets/video_player.py
+@@ -2,15 +2,19 @@
+ 
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
+ from pathlib import Path
+ 
+-from PySide6.QtCore import QRect, QSize, Qt, Signal
++from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+ from PySide6.QtGui import (
+     QColor,
+     QDragEnterEvent,
+     QDropEvent,
++    QFontMetrics,
+     QImage,
++    QMouseEvent,
+     QPainter,
++    QPen,
+     QPixmap,
+     QTransform,
+ )
+@@ -20,8 +24,21 @@ from investigator.theme import MUTED, PRIMARY, VIDEO_BACKGROUND, material_icon
+ from investigator.video_import import VIDEO_EXTENSIONS
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class OverlayBox:
++    """An object box in source-video pixel coordinates (x, y, width, height)."""
++
++    uid: str
++    bbox: tuple[float, float, float, float]
++    color: str
++    text: str
++    selected: bool = False
++
++
+ class VideoCanvas(QWidget):
+     files_dropped = Signal(list)
++    box_clicked = Signal(str)  # empty string: clicked outside every box
++    box_drawn = Signal(object)  # (x, y, width, height) in source-video pixels
+ 
+     def __init__(self, parent: QWidget | None = None) -> None:
+         super().__init__(parent)
+@@ -33,6 +50,180 @@ class VideoCanvas(QWidget):
+         self._source_image: QImage | None = None
+         self._rotation_degrees = 0
+         self._placeholder_icon = material_icon("video_file", "#94A3B8")
++        self._overlay: list[OverlayBox] = []
++        self._draw_mode = False
++        self._draw_start: QPointF | None = None
++        self._draw_current: QPointF | None = None
++
++    # -- object overlay -------------------------------------------------------
++
++    def set_overlay(self, boxes: list[OverlayBox]) -> None:
++        self._overlay = list(boxes)
++        self.update()
++
++    @property
++    def overlay(self) -> list[OverlayBox]:
++        return list(self._overlay)
++
++    def set_draw_mode(self, enabled: bool) -> None:
++        self._draw_mode = bool(enabled)
++        self._draw_start = self._draw_current = None
++        if enabled:
++            self.setCursor(Qt.CursorShape.CrossCursor)
++        else:
++            self.unsetCursor()
++        self.update()
++
++    @property
++    def draw_mode(self) -> bool:
++        return self._draw_mode
++
++    def _source_size(self) -> tuple[int, int] | None:
++        if self._source_image is None or self._source_image.isNull():
++            return None
++        return self._source_image.width(), self._source_image.height()
++
++    def _image_rect(self) -> tuple[QRectF, float] | None:
++        """Displayed image rectangle and the source-to-widget scale."""
++
++        if self._image is None or self._image.isNull():
++            return None
++        width, height = self._image.width(), self._image.height()
++        scale = min(self.width() / width, self.height() / height)
++        shown_w, shown_h = int(width * scale), int(height * scale)
++        x = (self.width() - shown_w) // 2
++        y = (self.height() - shown_h) // 2
++        return QRectF(x, y, shown_w, shown_h), shown_w / width
++
++    def source_to_widget(self, x: float, y: float) -> QPointF | None:
++        size = self._source_size()
++        geometry = self._image_rect()
++        if size is None or geometry is None:
++            return None
++        width, height = size
++        rotation = self._rotation_degrees
++        if rotation == 90:
++            dx, dy = height - y, x
++        elif rotation == 180:
++            dx, dy = width - x, height - y
++        elif rotation == 270:
++            dx, dy = y, width - x
++        else:
++            dx, dy = x, y
++        target, scale = geometry
++        return QPointF(target.x() + dx * scale, target.y() + dy * scale)
++
++    def widget_to_source(self, point: QPointF) -> QPointF | None:
++        size = self._source_size()
++        geometry = self._image_rect()
++        if size is None or geometry is None:
++            return None
++        width, height = size
++        target, scale = geometry
++        dx = (point.x() - target.x()) / scale
++        dy = (point.y() - target.y()) / scale
++        rotation = self._rotation_degrees
++        if rotation == 90:
++            x, y = dy, height - dx
++        elif rotation == 180:
++            x, y = width - dx, height - dy
++        elif rotation == 270:
++            x, y = width - dy, dx
++        else:
++            x, y = dx, dy
++        return QPointF(min(max(x, 0.0), width), min(max(y, 0.0), height))
++
++    def _box_widget_rect(self, bbox: tuple[float, float, float, float]) -> QRectF | None:
++        x, y, w, h = bbox
++        first = self.source_to_widget(x, y)
++        second = self.source_to_widget(x + w, y + h)
++        if first is None or second is None:
++            return None
++        return QRectF(first, second).normalized()
++
++    def _paint_overlay(self, painter: QPainter) -> None:
++        metrics = QFontMetrics(painter.font())
++        ordered = sorted(self._overlay, key=lambda box: box.selected)
++        for box in ordered:
++            rect = self._box_widget_rect(box.bbox)
++            if rect is None:
++                continue
++            color = QColor(box.color)
++            painter.save()
++            if box.selected:
++                fill = QColor(color)
++                fill.setAlpha(42)
++                painter.fillRect(rect, fill)
++            painter.setPen(QPen(color, 3 if box.selected else 2))
++            painter.setBrush(Qt.BrushStyle.NoBrush)
++            painter.drawRect(rect)
++            text = metrics.elidedText(box.text, Qt.TextElideMode.ElideRight, 260)
++            tag = QRectF(0, 0, metrics.horizontalAdvance(text) + 10, metrics.height() + 4)
++            top = rect.top() - tag.height()
++            tag.moveTo(rect.left(), top if top >= 0 else rect.top())
++            painter.fillRect(tag, color)
++            painter.setPen(QColor("#FFFFFF"))
++            painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, text)
++            painter.restore()
++        if self._draw_start is not None and self._draw_current is not None:
++            painter.save()
++            painter.setPen(QPen(QColor("#FACC15"), 2, Qt.PenStyle.DashLine))
++            painter.drawRect(QRectF(self._draw_start, self._draw_current).normalized())
++            painter.restore()
++
++    def box_at(self, point: QPointF) -> str:
++        hits = []
++        for box in self._overlay:
++            rect = self._box_widget_rect(box.bbox)
++            if rect is not None and rect.adjusted(-3, -3, 3, 3).contains(point):
++                hits.append((rect.width() * rect.height(), box.uid))
++        return min(hits)[1] if hits else ""
++
++    def mousePressEvent(self, event: QMouseEvent) -> None:
++        if event.button() != Qt.MouseButton.LeftButton or self._image is None:
++            super().mousePressEvent(event)
++            return
++        point = event.position()
++        geometry = self._image_rect()
++        if self._draw_mode and geometry is not None and geometry[0].contains(point):
++            self._draw_start = self._draw_current = point
++            event.accept()
++            return
++        if not self._draw_mode:
++            self.box_clicked.emit(self.box_at(point))
++            event.accept()
++            return
++        super().mousePressEvent(event)
++
++    def mouseMoveEvent(self, event: QMouseEvent) -> None:
++        if self._draw_start is not None:
++            geometry = self._image_rect()
++            point = event.position()
++            if geometry is not None:
++                area = geometry[0]
++                point = QPointF(
++                    min(max(point.x(), area.left()), area.right()),
++                    min(max(point.y(), area.top()), area.bottom()),
++                )
++            self._draw_current = point
++            self.update()
++            event.accept()
++            return
++        super().mouseMoveEvent(event)
++
++    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
++        if self._draw_start is not None and event.button() == Qt.MouseButton.LeftButton:
++            start = self.widget_to_source(self._draw_start)
++            end = self.widget_to_source(self._draw_current or self._draw_start)
++            self._draw_start = self._draw_current = None
++            self.update()
++            if start is not None and end is not None:
++                rect = QRectF(start, end).normalized()
++                if rect.width() >= 4 and rect.height() >= 4:
++                    self.box_drawn.emit((rect.x(), rect.y(), rect.width(), rect.height()))
++            event.accept()
++            return
++        super().mouseReleaseEvent(event)
+ 
+     def set_frame(self, image: QImage) -> None:
+         self._source_image = image.copy()
+@@ -66,6 +257,8 @@ class VideoCanvas(QWidget):
+     def clear(self) -> None:
+         self._source_image = None
+         self._image = None
++        self._overlay = []
++        self._draw_start = self._draw_current = None
+         self.update()
+ 
+     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+@@ -103,6 +296,9 @@ class VideoCanvas(QWidget):
+         x = (available.width() - scaled.width()) // 2
+         y = (available.height() - scaled.height()) // 2
+         painter.drawPixmap(x, y, scaled)
++        if self._overlay or self._draw_start is not None:
++            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
++            self._paint_overlay(painter)
+ 
+     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+         urls = event.mimeData().urls()
+@@ -182,4 +378,4 @@ class VideoPlayerPanel(QWidget):
+         self.set_video_name(None)
+ 
+ 
+-__all__ = ["VIDEO_EXTENSIONS", "VideoCanvas", "VideoPlayerPanel"]
++__all__ = ["VIDEO_EXTENSIONS", "OverlayBox", "VideoCanvas", "VideoPlayerPanel"]
+diff --git a/requirements-detection.txt b/requirements-detection.txt
+new file mode 100644
+index 0000000..fcc9511
+--- /dev/null
++++ b/requirements-detection.txt
+@@ -0,0 +1,10 @@
++# SAM 3 객체 검출 worker 전용 의존성 (AVAT 본체 .venv와 분리한 가상환경 권장).
++# worker는 PySide6를 쓰지 않으며 `python -m investigator.detection_worker`로 실행됩니다.
++# PyTorch는 CUDA 버전에 맞는 휠을 먼저 설치하세요. 예(CUDA 12.6):
++#   pip install torch --index-url https://download.pytorch.org/whl/cu126
++torch>=2.7
++transformers>=5.0
++accelerate
++pillow
++numpy>=1.24,<3
++opencv-python>=4.9,<5

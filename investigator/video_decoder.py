@@ -19,7 +19,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 from PySide6.QtGui import QImage
 
-LOGGER = logging.getLogger("avat.video_decoder")
+# Under the "investigator" logger so failures reach %LOCALAPPDATA%/AVAT/logs.
+LOGGER = logging.getLogger("investigator.video_decoder")
 MAX_FRAME_BYTES = 256 * 1024 * 1024
 
 
@@ -45,6 +46,7 @@ class ProcessDecoder(QObject):
         self._closing = False
         self._reported_failure = False
         self._busy = False
+        self._private_names: tuple[str, ...] = ()
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
         self._watchdog.setInterval(15_000)
@@ -54,8 +56,16 @@ class ProcessDecoder(QObject):
     def pid(self) -> int | None:
         return int(self.process.processId()) or None
 
+    def _redact(self, text: str) -> str:
+        # Diagnostic logs never contain video paths or filenames.
+        for name in self._private_names:
+            text = text.replace(name, "<video>")
+        return text
+
     def open(self, path: Path, threads: int = 0) -> tuple[dict, QImage] | None:
         """Bound only initial file opening; all subsequent requests are async."""
+        names = {str(path), path.as_posix(), path.name}
+        self._private_names = tuple(sorted(filter(None, names), key=len, reverse=True))
         self.process.setWorkingDirectory(str(Path(__file__).resolve().parent.parent))
         self.process.start(sys.executable, [
             "-u", "-m", "investigator.video_decode_worker", "--path", str(path),
@@ -72,7 +82,7 @@ class ProcessDecoder(QObject):
             if self.process.state() == QProcess.ProcessState.NotRunning:
                 break
         if self._opening is None:
-            LOGGER.warning("decoder_open_failed path=%s error=%s", path.name, self._error)
+            LOGGER.warning("decoder_open_failed threads=%s error=%s", threads, self._redact(self._error))
             self.close()
         return self._opening
 
@@ -155,7 +165,7 @@ class ProcessDecoder(QObject):
                 elif event == "error":
                     self._busy = False
                     self._watchdog.stop()
-                    LOGGER.warning("decoder_request_error pid=%s %s", self.pid, message)
+                    LOGGER.warning("decoder_request_error pid=%s %s", self.pid, self._redact(str(message)))
                     if isinstance(message.get("request_id"), int):
                         self.request_failed.emit(int(message["request_id"]), str(message["message"]))
                     else:
@@ -172,7 +182,7 @@ class ProcessDecoder(QObject):
         # Drain Qt's buffer even for noisy/damaged files; do not retain a log FIFO.
         text = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
         if text.strip():
-            LOGGER.warning("decoder_stderr pid=%s %s", self.pid, text[-4000:].strip())
+            LOGGER.warning("decoder_stderr pid=%s %s", self.pid, self._redact(text[-4000:].strip()))
 
     def _process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.ProcessError.FailedToStart:
@@ -188,7 +198,7 @@ class ProcessDecoder(QObject):
         self._watchdog.stop()
         if not self._closing and not self._reported_failure:
             self._reported_failure = True
-            LOGGER.warning("decoder_failed pid=%s %s", self.pid, message)
+            LOGGER.warning("decoder_failed pid=%s %s", self.pid, self._redact(message))
             self.failed.emit(message)
 
     def _timed_out(self) -> None:

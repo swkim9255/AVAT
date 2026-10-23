@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from threading import Event
@@ -29,6 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from investigator.case_numbering import build_case_number_map, case_number_sort_key
+from investigator.detection_controller import DetectionMixin
 from investigator.diagnostics import timed_operation
 from investigator.folder_watcher import ProjectFolderWatcher
 from investigator.form_definition import FormDefinition
@@ -40,6 +44,7 @@ from investigator.schema import (
     INVALID_FORMAT_MESSAGE,
     MISSING_VALUE_MESSAGE,
 )
+from investigator.speed_csv import speed_csv_path
 from investigator.speed_estimation import SpeedEstimate, estimate_speed
 from investigator.statistics_media import probe_video_fps
 from investigator.storage import CaseRepository, WorkspaceError, data_specification_path
@@ -63,6 +68,7 @@ from investigator.widgets.speed_panel import SpeedPanel
 from investigator.widgets.statistics_panel import StatisticsPanel
 from investigator.widgets.video_import_dialog import VideoImportDialog
 from investigator.widgets.video_player import VideoPlayerPanel
+from investigator.widgets.video_tools_splitter import VideoToolsSplitter
 from investigator.widgets.workspace_menu import ProjectTabBar, ViewModeSwitch, WorkspaceMenuBar
 
 
@@ -72,7 +78,25 @@ def default_workspace() -> Path:
     return base / "사고영상조사"
 
 
-class MainWindow(QMainWindow):
+def _video_number_sort_key(path: str) -> tuple:
+    """Sort numbered clips naturally (1, 2, 10), without renaming files."""
+    def natural(value: str) -> tuple:
+        return tuple(
+            (1, int(part)) if part.isdecimal() else (0, part.casefold())
+            for part in re.split(r"([0-9]+)", value)
+        )
+
+    parsed = parse_accident_video_name(path)
+    return (
+        0 if parsed else 1,
+        int(parsed[0]) if parsed else 0,
+        parsed[1] if parsed else 0,
+        natural(Path(path).name),
+        natural(path),
+    )
+
+
+class MainWindow(DetectionMixin, QMainWindow):
     def __init__(self, workspace: str | Path | None = None, parent: QWidget | None = None,
                  *, project_tabs_store: ProjectTabsStore | None = None) -> None:
         super().__init__(parent)
@@ -145,6 +169,7 @@ class MainWindow(QMainWindow):
         self.investigation = InvestigationPanel(self)
         self.playback = PlaybackPanel(self)
         self.speed_panel = SpeedPanel(self)
+        self._init_detection()
         self._build_layout()
         self._build_menu()
         self._connect_signals()
@@ -287,6 +312,7 @@ class MainWindow(QMainWindow):
         self.mode_tabs = self.view_mode  # Preserve index-based view routing.
         self.splitter = QSplitter(Qt.Orientation.Horizontal, root_widget)
         self.splitter.setObjectName("mainSplitter")
+        self.splitter.setHandleWidth(8)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self.case_list)
         self.video_workspace = QWidget(self.splitter)
@@ -294,20 +320,35 @@ class MainWindow(QMainWindow):
         video_layout = QVBoxLayout(self.video_workspace)
         video_layout.setContentsMargins(0, 0, 0, 0)
         video_layout.setSpacing(1)
-        video_layout.addWidget(self.video_player, 1)
-        video_layout.addWidget(self.playback, 0)
+        self.video_tool_splitter = VideoToolsSplitter(self.video_workspace)
+        video_layout.addWidget(self.video_tool_splitter, 1)
+        self.video_playback_area = QWidget(self.video_workspace)
+        playback_layout = QVBoxLayout(self.video_playback_area)
+        playback_layout.setContentsMargins(0, 0, 0, 0)
+        playback_layout.setSpacing(1)
+        playback_layout.addWidget(self.video_player, 1)
+        playback_layout.addWidget(self.playback, 0)
+        self.video_tool_splitter.add_video_area(self.video_playback_area)
         self.speed_scroll = QScrollArea(self.video_workspace)
         self.speed_scroll.setObjectName("speedScroll")
         self.speed_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.speed_scroll.setWidgetResizable(True)
         self.speed_scroll.setMinimumWidth(0)
-        self.speed_scroll.setMinimumHeight(180)
-        self.speed_scroll.setMaximumHeight(340)
+        self.speed_scroll.setMinimumHeight(140)
         self.speed_scroll.setWidget(self.speed_panel)
         self.speed_scroll.hide()
-        video_layout.addWidget(self.speed_scroll, 0)
+        self.video_tool_splitter.add_tool_panel("speed", self.speed_scroll, default_height=300)
+        self._build_detection_area(self.video_workspace, video_layout)
+        video_layout.removeWidget(self.detection_scroll)
+        self.detection_scroll.setMaximumHeight(16777215)
+        self.video_tool_splitter.add_tool_panel("detection", self.detection_scroll, default_height=340)
         self.splitter.addWidget(self.video_workspace)
         self.splitter.addWidget(self.investigation)
+        for index, title in ((1, "사고 목록 너비 조절"), (2, "조사 입력 너비 조절")):
+            handle = self.splitter.handle(index)
+            handle.setCursor(Qt.CursorShape.SplitHCursor)
+            handle.setAccessibleName(title)
+            handle.setToolTip("드래그하여 " + title)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 5)
         self.splitter.setStretchFactor(2, 3)
@@ -366,6 +407,9 @@ class MainWindow(QMainWindow):
         self.edit_form_action = QAction("조사 항목 편집…", self)
         self.edit_form_action.triggered.connect(self.edit_form)
         settings_menu.addAction(self.edit_form_action)
+        self.detection_settings_action = QAction("객체 검출 환경…", self)
+        self.detection_settings_action.triggered.connect(self.edit_detection_settings)
+        settings_menu.addAction(self.detection_settings_action)
 
         help_menu = self.menuBar().addMenu("도움말")
         shortcuts_action = QAction("재생 단축키", self)
@@ -391,6 +435,7 @@ class MainWindow(QMainWindow):
         self.case_list.delete_video_requested.connect(self.delete_video)
         self.case_list.case_reordered.connect(self.reorder_case)
         self.case_list.cases_reordered.connect(self.reorder_cases)
+        self.case_list.sort_ascending_requested.connect(self.sort_cases_ascending)
         self.case_list.export_requested.connect(self.export_csv)
         self.case_list.report_export_requested.connect(self.export_reports)
         self.video_player.files_dropped.connect(self._import_dropped_videos)
@@ -413,6 +458,7 @@ class MainWindow(QMainWindow):
         self.speed_panel.distance_changed.connect(self.set_speed_distance)
         self.speed_panel.seek_requested.connect(self._seek_video)
         self.speed_panel.apply_requested.connect(self.apply_speed_label)
+        self._connect_detection_signals()
         self.investigation.save_requested.connect(self.save_draft)
         self.investigation.complete_requested.connect(self.complete_case)
         self.investigation.next_requested.connect(self.next_case)
@@ -572,6 +618,7 @@ class MainWindow(QMainWindow):
         )
         self.case_list.export_button.setEnabled(enabled and bool(self.cases))
         self.case_list.report_export_button.setEnabled(enabled and bool(self.cases))
+        self.case_list.sort_button.setEnabled(enabled and bool(self.cases))
         self.report_export_action.setEnabled(enabled and bool(self.cases))
         self.investigation.setEnabled(has_case)
         self.investigation.save_button.setEnabled(has_case)
@@ -704,6 +751,8 @@ class MainWindow(QMainWindow):
         project.statistics_state = self.statistics_panel.capture_state()
 
     def _leave_project(self) -> bool:
+        if not self._confirm_stop_detection():
+            return False
         if not self._workspace_load_failed and not self._save(show_message=False):
             return False
         self._capture_project()
@@ -897,6 +946,62 @@ class MainWindow(QMainWindow):
         self._order_dirty = True
         self.statusBar().showMessage(f"사고 {len(moving)}개의 표시 순서를 변경했습니다.", 3000)
 
+    def sort_cases_ascending(self) -> None:
+        """Save numeric display order without reopening playback or editing IDs."""
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress:
+            self.statusBar().showMessage("현재 작업이 끝난 뒤 정렬해 주세요.", 4000)
+            return
+        if self._workspace_load_failed:
+            self.statusBar().showMessage("읽기 오류가 없는 작업 폴더를 먼저 선택해 주세요.", 5000)
+            return
+        if not self.cases:
+            return
+
+        state = self.case_list.capture_view_state()
+        previous_videos = {case.uid: tuple(case.videos) for case in self.cases}
+        reordered = sorted(self.cases, key=case_number_sort_key)
+        changed = [case.uid for case in reordered] != [case.uid for case in self.cases]
+        if changed:
+            self.cases[:] = reordered
+            self._dirty = True
+            self._order_dirty = True
+        by_uid = {case.uid: case for case in self.cases}
+        for case in self.cases:
+            videos = sorted(case.videos, key=_video_number_sort_key)
+            if videos == case.videos:
+                continue
+            active_path = case.active_video
+            case.videos[:] = videos
+            if active_path in videos:
+                case.active_video_index = videos.index(active_path)
+            # Attachments and annotations are keyed by path. Only their display
+            # order and active index change; completed investigations stay so.
+            self._mark_case_dirty(case)
+            changed = True
+
+        def remap(target):  # type: ignore[no-untyped-def]
+            if target is None:
+                return None
+            uid, index = target
+            if index < 0:
+                return target
+            old_videos = previous_videos.get(uid, ())
+            case = by_uid.get(uid)
+            if case is None or not 0 <= index < len(old_videos):
+                return None
+            return uid, case.videos.index(old_videos[index])
+
+        state["current"] = remap(state.get("current"))
+        state["selected"] = [
+            replacement for target in state.get("selected", [])
+            if (replacement := remap(target)) is not None
+        ]
+        if changed:
+            self.case_list.set_cases(self.cases, self.current_uid)
+            self.case_list.restore_view_state(state)
+        if self._save(show_message=False):
+            self.statusBar().showMessage("사고와 영상을 번호 오름차순으로 정렬하고 저장했습니다.", 5000)
+
     def choose_videos(self) -> None:
         filters = "영상 파일 (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv *.webm);;모든 파일 (*.*)"
         files, _ = QFileDialog.getOpenFileNames(self, "조사 영상 선택", QDir.homePath(), filters)
@@ -978,7 +1083,7 @@ class MainWindow(QMainWindow):
     def _is_default_case_shell(case: InvestigationCase) -> bool:
         """Return whether *case* only contains the legacy automatic 001 identity."""
 
-        return case.status == "draft" and case.values == {
+        return not case.objects_by_video and case.status == "draft" and case.values == {
             "institution": DEFAULT_INSTITUTION,
             "accident_classification": "001",
         }
@@ -1541,7 +1646,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "영상 삭제",
-            f"{video_name} 영상을 사고 목록에서 삭제하고 해당 영상의 마커도 삭제하시겠습니까?\n\n"
+            f"{video_name} 영상을 사고 목록에서 삭제하고 해당 영상의 마커와 객체 라벨도 삭제하시겠습니까?\n\n"
             "원본 영상 파일은 삭제되지 않습니다.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1608,6 +1713,7 @@ class MainWindow(QMainWindow):
             self.video_player.clear()
             self.playback.clear_video()
             self.speed_panel.set_data([], SpeedEstimate(), 0.0)
+            self._refresh_detection()
             self.investigation.load_values({})
             self.investigation.case_title.setText("사고 없음")
             self.investigation.completion_badge.setObjectName("missingBadge")
@@ -1620,6 +1726,7 @@ class MainWindow(QMainWindow):
         self.investigation.load_values(case.values)
         self._refresh_case_presentation(rebuild_list=False)
         self._sync_markers(case)
+        self._refresh_detection()
         if open_video and not self._open_active_video():
             self.video_controller.close_video()
             self.video_player.clear()
@@ -1732,10 +1839,12 @@ class MainWindow(QMainWindow):
         case = case or self.current_case
         if case is None:
             self.playback.set_markers(None, None, [])
+            self.detection_panel.set_markers(None, None)
             self.speed_panel.set_data([], SpeedEstimate(), 0.0, context_key=None)
             self.speed_panel.add_button.setEnabled(False)
             return
         points = case.speed_points
+        self.detection_panel.set_markers(case.trigger_frame, case.collision_frame)
         self.playback.set_markers(
             case.trigger_frame, case.collision_frame, [point.frame for point in points]
         )
@@ -1749,8 +1858,11 @@ class MainWindow(QMainWindow):
         self.speed_panel.set_apply_available("trigger_vehicle_speed" in self.investigation.editors)
 
     def _set_speed_panel_visible(self, visible: bool) -> None:
-        self.video_player.canvas.setMinimumHeight(140 if visible else 280)
-        self.speed_scroll.setVisible(visible)
+        if visible and self.playback.detection_panel_button.isChecked():
+            # Speed and detection panels share the space under the video.
+            self.playback.detection_panel_button.setChecked(False)
+        self.video_tool_splitter.set_tool_visible("speed", visible)
+        self._update_canvas_minimum()
 
     def _show_speed_panel(self) -> None:
         if not self.playback.speed_panel_button.isChecked():
@@ -1854,6 +1966,45 @@ class MainWindow(QMainWindow):
 
     def save_draft(self) -> None:
         self._save(show_message=True)
+
+    def _save_detection_case(self, case: InvestigationCase) -> bool:
+        """Checkpoint one detection target without saving unrelated edits.
+
+        A finished detector result must survive an abnormal exit before the
+        user presses draft save. Use the existing serialized storage worker,
+        and do not rewrite project selection/order or replace the live case.
+        """
+        if (
+            self._commit_in_progress
+            or self._workspace_load_failed
+            or not any(item is case for item in self.cases)
+        ):
+            return False
+        repository = self.repository
+        revision = self._case_revisions.get(case.uid, 0)
+        try:
+            snapshot = self._copy_case(case)
+            self._disk_operation(
+                repository.save_changes, [snapshot], allow_edit=False,
+            )
+        except (WorkspaceError, OSError) as exc:
+            # Diagnostics must not contain case values, paths, or raw results.
+            logging.getLogger(__name__).warning(
+                "detection_result_save_failed type=%s", type(exc).__name__,
+            )
+            self.statusBar().showMessage(
+                "검출 결과를 저장하지 못했습니다. 임시저장으로 다시 저장해 주세요.",
+                10000,
+            )
+            return False
+        # The nested Qt event loop still processes timers/signals. Never clear
+        # newer edits or touch the state of a project opened by such a callback.
+        if self.repository is repository and any(item is case for item in self.cases):
+            self._persisted_uids.add(case.uid)
+            if self._case_revisions.get(case.uid, 0) == revision:
+                self._dirty_cases.discard(case.uid)
+            self._dirty = bool(self._dirty_cases) or self._order_dirty
+        return True
 
     def _save(
         self,
@@ -2030,6 +2181,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "CSV 내보내기 오류", str(exc))
             return
         message = f"CSV를 저장했습니다: {destination}"
+        message += f" · 속도 분석: {speed_csv_path(destination).name}"
         if include_specification:
             message += f" · 데이터 명세서: {data_specification_path(destination).name}"
         self.statusBar().showMessage(message, 8000)
@@ -2044,7 +2196,9 @@ class MainWindow(QMainWindow):
         selected = self.case_list.selected_case_uids()
         if not selected and self.current_uid:
             selected = [self.current_uid]
-        options = ReportExportDialog(self.cases, selected, self)
+        options = ReportExportDialog(
+            self.cases, selected, self, definition=self.repository.form_definition
+        )
         if options.exec() != QDialog.DialogCode.Accepted:
             return
         selected_uids = set(options.selected_uids())
@@ -2059,6 +2213,7 @@ class MainWindow(QMainWindow):
         if not folder:
             return
         snapshots = [self._copy_case(case) for case in self.cases if case.uid in selected_uids]
+        report_number_by_uid = build_case_number_map(self.cases)
         if not snapshots:
             return
         self.statusBar().showMessage(f"사고 분석 보고서 {len(snapshots)}건을 생성하고 있습니다…")
@@ -2068,6 +2223,7 @@ class MainWindow(QMainWindow):
                 snapshots,
                 Path(folder),
                 form_definition=self.repository.form_definition,
+                report_number_by_uid=report_number_by_uid,
             )
         except (ReportExportError, OSError, ValueError) as exc:
             self.statusBar().showMessage("사고 분석 보고서 내보내기에 실패했습니다.", 5000)
@@ -2108,6 +2264,7 @@ class MainWindow(QMainWindow):
         self.video_player.set_rotation(case.video_rotation if case else 0)
         if case:
             self._sync_markers(case, fps=metadata.reported_fps)
+        self._detection_video_changed()
         self.statusBar().showMessage(
             f"영상 열기 완료 · {metadata.fps:.2f} FPS · {metadata.total_frames:,} frames", 4000
         )
@@ -2118,10 +2275,12 @@ class MainWindow(QMainWindow):
         self.playback.clear_video()
         self.speed_panel.set_data([], SpeedEstimate(), 0.0, context_key=None)
         self.speed_panel.add_button.setEnabled(False)
+        self._detection_video_changed()
 
     def _frame_ready(self, image, frame: int, timestamp: float) -> None:  # type: ignore[no-untyped-def]
-        del frame, timestamp
+        del timestamp
         self.video_player.canvas.set_frame(image)
+        self._detection_frame_changed(frame)
 
     def rotate_video_clockwise(self) -> None:
         case = self.current_case
@@ -2246,7 +2405,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "재생 단축키",
-            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nM  속도 지점 추가 / 해제\nCtrl+S  임시저장",
+            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nM  속도 지점 추가 / 해제\nCtrl+S  임시저장\n\n객체 검출 패널의 박스 편집\nCtrl+Z  실행 취소\nCtrl+Y / Ctrl+Shift+Z  다시 실행\n(텍스트 입력 중에는 해당 입력의 실행 취소/다시 실행)",
         )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -2280,6 +2439,9 @@ class MainWindow(QMainWindow):
         if self._commit_in_progress or self._video_import_in_progress:
             event.ignore()
             self.statusBar().showMessage("저장 작업이 끝난 뒤 종료해 주세요.", 3000)
+            return
+        if not self._confirm_stop_detection():
+            event.ignore()
             return
         if not self._workspace_load_failed and not self._save(show_message=False):
             event.ignore()

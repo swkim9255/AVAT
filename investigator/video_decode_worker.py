@@ -23,6 +23,17 @@ import cv2
 import numpy as np
 
 
+def _software_decoding_params() -> list[int]:
+    """Request CPU decoding explicitly, so no D3D11/DXVA path enters the GPU driver.
+
+    OpenCV's FFmpeg backend already defaults to software decoding; pinning it
+    keeps another OpenCV build or OPENCV_FFMPEG_CAPTURE_OPTIONS from changing it.
+    """
+    hw_property = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
+    software = getattr(cv2, "VIDEO_ACCELERATION_NONE", None)
+    return [] if hw_property is None or software is None else [hw_property, software]
+
+
 def _open_capture(path: str, threads: int) -> cv2.VideoCapture:
     """Open exactly one FFmpeg capture, with parallelism selected at open time."""
     if threads < 0:
@@ -32,10 +43,13 @@ def _open_capture(path: str, threads: int) -> cv2.VideoCapture:
         raise RuntimeError("OpenCV does not support configuring FFmpeg decoder threads.")
     capture = None
     try:
-        if thread_property is None:
-            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
+        params = _software_decoding_params()
+        if thread_property is not None:
+            params += [thread_property, threads]
+        if params:
+            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
         else:
-            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, [thread_property, threads])
+            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
         if not capture.isOpened():
             raise RuntimeError("영상을 열 수 없습니다.")
         return capture
@@ -48,6 +62,16 @@ def _open_capture(path: str, threads: int) -> cv2.VideoCapture:
 
 def _positive_float(value: float) -> float:
     return float(value) if math.isfinite(value) and value > 0 else 0.0
+
+
+def _codec_tag(capture: cv2.VideoCapture) -> str:
+    """Four-character codec tag (for example avc1, hev1) for diagnostics only."""
+    with suppress(Exception):
+        tag = int(capture.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode("ascii")
+        tag = tag.strip("\0 ")
+        if tag.isprintable():
+            return tag
+    return ""
 
 
 class DecoderSession:
@@ -65,6 +89,7 @@ class DecoderSession:
             self.total_frames = int(_positive_float(self.capture.get(cv2.CAP_PROP_FRAME_COUNT)))
             thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
             self.threads = int(self.capture.get(thread_property)) if thread_property is not None else 0
+            self.codec = _codec_tag(self.capture)
         except Exception:
             self.capture.release()
             raise
@@ -84,6 +109,7 @@ class DecoderSession:
             "shape": list(self._shape),
             "frame": 0,
             "threads": self.threads,
+            "codec": self.codec,
         }
 
     def _decode(self, frame: int) -> bool:
@@ -175,6 +201,20 @@ def _suppress_windows_error_dialogs() -> None:
             ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
 
 
+def _lower_process_priority() -> None:
+    if os.name == "nt":
+        # Parallel decoding can briefly occupy every core while scrubbing.
+        # Below-normal priority lets the GUI, audio and system services run
+        # first; it changes nothing while any core is idle.
+        import ctypes
+
+        with suppress(Exception):
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL
+
+
 def run(path: str, threads: int, source: TextIO, output: TextIO) -> int:
     session = None
     try:
@@ -222,6 +262,7 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=0)
     args = parser.parse_args()
     _suppress_windows_error_dialogs()
+    _lower_process_priority()
     return run(args.path, args.threads, sys.stdin, sys.stdout)
 
 

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "special_vehicle_types": {"excavator": "굴착기", "tow_truck": "견인차", "fire_truck": "소방차", "ambulance": "구급차"},
+  "classes": [
+    {"key": "vehicle", "label": "차량", "group": "차량", "object_prefix": "V", "prompts": ["car", "van", "bus", "truck", "excavator"], "prompt_defaults": {"car": "passenger", "van": "van", "bus": "van", "truck": "truck", "excavator": "special"}, "nms_iou": 0.6, "subtypes": [
+      {"key": "passenger", "label": "승용", "trigger": ["obstacle_vehicle_types", "승용"], "collision": ["collision_targets", "vehicle.passenger"]},
+      {"key": "van", "label": "승합", "trigger": ["obstacle_vehicle_types", "승합"], "collision": ["collision_targets", "vehicle.van"]},
+      {"key": "truck", "label": "화물", "trigger": ["obstacle_vehicle_types", "화물"], "collision": ["collision_targets", "vehicle.truck"]},
+      {"key": "special", "label": "특수", "trigger": ["obstacle_vehicle_types", "특수"], "collision": ["collision_targets", "vehicle.special"]}
+    ]},
+    {"key": "two_wheeler", "suppression_group": "two_wheeler", "label": "이륜·PM", "group": "차량", "object_prefix": "M", "prompts": ["motorcycle", "scooter"], "default_subtype": "motorcycle", "subtypes": [
+      {"key": "motorcycle", "label": "이륜", "trigger": ["obstacle_vehicle_types", "이륜"], "collision": ["collision_targets", "vehicle.motorcycle"]},
+      {"key": "pm", "label": "PM", "trigger": ["obstacle_vehicle_types", "PM"], "collision": ["collision_targets", "vehicle.pm"]}
+    ]},
+    {"key": "bicycle", "suppression_group": "two_wheeler", "label": "자전거", "group": "차량", "object_prefix": "B", "prompts": ["bicycle"], "subtypes": [{"key": "bicycle", "label": "자전거", "trigger": ["obstacle_vehicle_types", "자전거"], "collision": ["collision_targets", "vehicle.bicycle"]}]},
+    {"key": "pedestrian", "label": "보행자", "group": "보행자", "object_prefix": "P", "prompts": ["person"], "subtypes": [
+      {"key": "child", "label": "어린이", "trigger": ["obstacle_pedestrians", "어린이"], "collision": ["collision_targets", "pedestrian.child"]},
+      {"key": "adult", "label": "어른", "trigger": ["obstacle_pedestrians", "어른"], "collision": ["collision_targets", "pedestrian.adult"]}
+    ]},
+    {"key": "barrier", "label": "차단기", "group": "도로시설물", "object_prefix": "R", "prompts": ["boom barrier"], "subtypes": [{"key": "barrier", "label": "차단기", "trigger": ["obstacle_road_facilities", "차단기"], "collision": ["collision_targets", "facility.barrier"]}]},
+    {"key": "guardrail", "label": "가드레일", "group": "도로시설물", "object_prefix": "R", "prompts": ["guardrail"], "subtypes": [{"key": "guardrail", "label": "가드레일", "trigger": ["obstacle_road_facilities", "가드레일"], "collision": ["collision_targets", "facility.guardrail"]}]},
+    {"key": "median", "label": "중앙분리대", "group": "도로시설물", "object_prefix": "R", "prompts": ["median barrier"], "subtypes": [{"key": "median", "label": "중앙분리대", "trigger": ["obstacle_road_facilities", "중앙분리대"], "collision": ["collision_targets", "facility.median"]}]},
+    {"key": "curb", "label": "연석", "group": "도로시설물", "object_prefix": "R", "prompts": ["curb"], "subtypes": [{"key": "curb", "label": "연석", "trigger": ["obstacle_road_facilities", "연석"], "collision": ["collision_targets", "facility.curb"]}]},
+    {"key": "traffic_sign", "label": "표지판", "group": "도로시설물", "object_prefix": "R", "prompts": ["traffic sign"], "subtypes": [{"key": "traffic_sign", "label": "표지판", "trigger": ["obstacle_road_facilities", "표지판"], "collision": ["collision_targets", "facility.traffic_sign"]}]},
+    {"key": "pole_streetlight", "label": "전봇대·전신주·가로등", "group": "도로시설물", "object_prefix": "R", "prompts": ["utility pole", "street lamp"], "threshold": 0.35, "subtypes": [{"key": "pole_streetlight", "label": "전봇대·전신주·가로등", "trigger": ["obstacle_road_facilities", "전봇대·전신주·가로등"], "collision": ["collision_targets", "facility.pole_streetlight"]}]},
+    {"key": "bollard_delineator", "label": "볼라드·시선유도봉", "group": "도로시설물", "object_prefix": "R", "prompts": ["bollard", "delineator post"], "threshold": 0.35, "subtypes": [{"key": "bollard_delineator", "label": "볼라드·시선유도봉", "trigger": ["obstacle_road_facilities", "볼라드·시선유도봉"], "collision": ["collision_targets", "facility.bollard_delineator"]}]},
+    {"key": "crash_cushion", "label": "충격흡수시설", "group": "도로시설물", "object_prefix": "R", "prompts": ["crash cushion"], "subtypes": [{"key": "crash_cushion", "label": "충격흡수시설", "trigger": ["obstacle_road_facilities", "충격흡수시설"], "collision": ["collision_targets", "facility.crash_cushion"]}]},
+    {"key": "speed_bump", "label": "과속방지턱", "group": "도로시설물", "object_prefix": "R", "prompts": ["speed bump"], "subtypes": [{"key": "speed_bump", "label": "과속방지턱", "trigger": ["obstacle_road_facilities", "과속방지턱"], "collision": ["collision_targets", "facility.speed_bump"]}]},
+    {"key": "pillar", "suppression_group": "wall_like", "label": "건물 기둥", "group": "건물/조경", "object_prefix": "R", "prompts": ["pillar"], "subtypes": [{"key": "pillar", "label": "건물 기둥", "trigger": ["obstacle_building_landscape", "건물 기둥"], "collision": ["collision_targets", "building.pillar"]}]},
+    {"key": "building_wall", "suppression_group": "wall_like", "label": "건물 벽", "group": "건물/조경", "object_prefix": "R", "prompts": ["building wall"], "min_area_ratio": 0.005, "subtypes": [{"key": "building_wall", "label": "건물 벽", "trigger": ["obstacle_building_landscape", "건물 벽"], "collision": ["collision_targets", "building.wall"]}]},
+    {"key": "boundary_wall", "suppression_group": "wall_like", "label": "담벼락", "group": "건물/조경", "object_prefix": "R", "prompts": ["wall"], "min_area_ratio": 0.002, "subtypes": [{"key": "boundary_wall", "label": "담벼락", "trigger": ["obstacle_building_landscape", "담벼락"], "collision": ["collision_targets", "building.boundary_wall"]}]},
+    {"key": "flowerbed", "label": "화단", "group": "건물/조경", "object_prefix": "R", "prompts": ["flower bed"], "threshold": 0.35, "subtypes": [{"key": "flowerbed", "label": "화단", "trigger": ["obstacle_building_landscape", "화단·흙더미·가로수(수목)"], "collision": ["collision_targets", "building.flowerbed"]}]},
+    {"key": "dirtpile", "label": "흙더미", "group": "건물/조경", "object_prefix": "R", "prompts": ["dirt pile"], "threshold": 0.35, "subtypes": [{"key": "dirtpile", "label": "흙더미", "trigger": ["obstacle_building_landscape", "화단·흙더미·가로수(수목)"], "collision": ["collision_targets", "building.dirtpile"]}]},
+    {"key": "streettree", "label": "가로수(수목)", "group": "건물/조경", "object_prefix": "R", "prompts": ["tree"], "subtypes": [{"key": "streettree", "label": "가로수(수목)", "trigger": ["obstacle_building_landscape", "화단·흙더미·가로수(수목)"], "collision": ["collision_targets", "building.streettree"]}]},
+    {"key": "animal", "label": "동물", "group": "기타", "object_prefix": "A", "prompts": ["animal"], "subtypes": [{"key": "animal", "label": "동물", "trigger": ["obstacle_other", "동물"], "collision": ["collision_targets", "other.animal"]}]},
+    {"key": "road_debris", "label": "도로낙하물", "group": "기타", "object_prefix": "D", "prompts": ["debris on road"], "threshold": 0.35, "subtypes": [{"key": "road_debris", "label": "도로낙하물", "trigger": ["obstacle_other", "도로낙하물"], "collision": ["collision_targets", "other.road_debris"]}]}
+  ],
+  "legacy_aliases": {"child": "child", "adult": "adult", "person": "pedestrian", "car": "passenger", "bus": "van", "excavator": "special", "tow truck": "special", "tow_truck": "special", "fire truck": "special", "fire_truck": "special", "ambulance": "special", "electric kick scooter": "pm", "scooter": "motorcycle"}
+}

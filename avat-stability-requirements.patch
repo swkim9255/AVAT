@@ -1,0 +1,916 @@
+diff --git a/README.md b/README.md
+index cb51a46..2ec096a 100644
+--- a/README.md
++++ b/README.md
+@@ -29,12 +29,13 @@
+ 
+ ## 설치 및 실행
+ 
+-Python 3.11~3.13 환경을 권장합니다.
++Python 3.11~3.13 환경을 권장합니다. 의존성 파일은 실행용 `requirements.txt`(본체 + 객체 검출)와 개발용 `local_dev/requirements-dev.txt`(실행용 + 테스트·린트) 두 개입니다. PyTorch는 PC의 GPU 드라이버에 맞는 휠을 먼저 설치하며, CPU 전용 PC는 아래 index URL을 `https://download.pytorch.org/whl/cpu`로 바꿉니다.
+ 
+ ```powershell
+ py -3.11 -m venv .venv
+ .\.venv\Scripts\Activate.ps1
+ python -m pip install --upgrade pip
++python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+ python -m pip install -r requirements.txt
+ python main.py
+ ```
+@@ -119,17 +120,9 @@ python main.py --workspace "D:\investigations"
+ 
+ ### 검출 환경 준비
+ 
+-AVAT 본체와 검출은 **하나의 Python 환경에 함께 설치**할 수 있습니다. `requirements.txt`는 공통 PySide6·OpenCV·NumPy를, `requirements-detection.txt`는 PyTorch·Torchvision·Transformers·Pillow와 기본 YOLOE·CLIP 토크나이저를 관리합니다. NumPy **2.1.3**, Pillow **11.1.0**, OpenCV **4.11.0.86** 조합을 유지하며 Ultralytics는 **8.3.253**으로 고정합니다. 학습·내보내기 extras는 설치하지 않습니다.
+-
+-```powershell
+-py -3.11 -m venv .venv
+-.\.venv\Scripts\Activate.ps1
+-python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+-python -m pip install -r requirements-detection.txt
+-python main.py
+-```
++AVAT 본체와 검출은 **하나의 Python 환경에 함께 설치**합니다. 실행용 `requirements.txt` 하나가 공통 PySide6·OpenCV·NumPy와 PyTorch·Torchvision·Transformers·Pillow, 기본 YOLOE·CLIP 토크나이저, EfficientSAM3 추론 라이브러리를 함께 관리합니다. NumPy **2.1.3**, Pillow **11.1.0**, OpenCV **4.11.0.86** 조합을 유지하며 Ultralytics는 **8.3.253**으로 고정합니다. 학습·내보내기 extras는 설치하지 않습니다. 설치 명령은 위 **설치 및 실행**과 같습니다.
+ 
+-`requirements-detection.txt` 하나를 설치하면 본체 의존성도 설치됩니다. `python -m pip install -r requirements.txt -r requirements-detection.txt`로 함께 지정해도 같은 버전으로 해결됩니다. 패키지로 설치할 때의 `python -m pip install ".[detection]"`도 동일한 의존성을 사용합니다. 기본 `requirements.txt`만 설치하면 재생·조사·수동 박스 편집을 사용할 수 있고 자동 검출은 추가 라이브러리가 필요합니다.
++패키지로 설치할 때의 `python -m pip install ".[detection]"`도 `requirements.txt`와 같은 의존성을 사용합니다. 자동 검출 없이 재생·조사·수동 박스 편집만 쓰는 PC는 `python -m pip install -e .`로 본체 의존성(PySide6·OpenCV·NumPy)만 설치할 수 있습니다.
+ 
+ **설정 → 객체 검출 환경…**의 검출용 Python은 앱 실행에 사용한 `.venv/Scripts/python.exe`를 지정하면 됩니다. 별도 설정이나 작업 공간의 `detection-runtime.json`이 없을 때는 앱을 실행한 Python을 사용합니다. 기존 작업 공간 설정이 다른 Python을 지정하고 있으면 그 설정을 우선 유지하므로 경로를 확인하세요. 검출은 UI 응답성과 오류 격리를 위해 별도 **프로세스**로 실행하지만, 별도 **가상환경**은 필수가 아닙니다. 기존의 분리 환경 설정도 계속 지원합니다.
+ 
+@@ -217,7 +210,7 @@ EXE 배포 전 Ultralytics의 AGPL-3.0/Enterprise 라이선스 조건도 확인
+ `detection-runtime.efficientsam3.json`은 경량 모델 선택 시에만 읽는 로컬 프리셋이며,
+ 기존 `detection-runtime.json`이나 사용자 설정을 자동 변경하지 않습니다.
+ 모델·소스·로컬 설정은 Git에 포함하지 않습니다. 다른 PC에서는
+-`requirements-detection-efficient.txt`로 기존 검출 환경과 추가 추론 라이브러리를 설치하고,
++`requirements.txt`로 검출 환경과 추가 추론 라이브러리(timm·einops·ftfy·pycocotools)를 설치하고,
+ 소스·가중치를 함께 준비해야 합니다. 현재 로컬 비교 환경은 기존 torch 환경을 공유하므로
+ 가상환경 폴더만 복사하는 배포 방식으로 사용하지 않습니다.
+ 
+@@ -415,6 +408,27 @@ python main.py
+ 
+ `async_lock` assert는 FFmpeg 프레임 스레드의 내부 불변식 실패입니다. 프로세스 분리는 OpenCV 디코더의 종료를 앱 전체에서 격리하는 조치이지 FFmpeg 내부 오류 자체를 수정하는 것은 아닙니다. Qt 오디오 디코더는 부모 프로세스에 남아 있으므로 모든 종류의 네이티브 오류를 격리한다는 뜻도 아닙니다. 오류는 상태 표시줄과 진단 로그에 남기며, 동일 증상이 남으면 원본 문제 영상·재현 조작·진단 로그로 추가 확인해야 합니다.
+ 
++### 다른 PC에서 블루스크린·전원 꺼짐이 날 때
++
++AVAT는 일반 사용자 모드 프로그램이라 Windows 커널을 직접 멈출 수 없습니다. 블루스크린은 드라이버(그래픽·오디오·저장장치·보안 프로그램)나 하드웨어 오류에서, 갑작스러운 전원 꺼짐은 과열·전원부 보호에서 발생합니다. 앱은 CPU·GPU 부하나 드라이버 호출로 그 계기가 될 수 있습니다. 영상 디코딩은 OpenCV와 Qt 오디오 모두 CPU만 사용하며(하드웨어 디코더 미사용), 디코더·검출 프로세스는 '보통 미만' 우선순위로 실행합니다. 앱이 GPU를 직접 쓰는 곳은 검출의 CUDA 추론뿐이며, 화면 표시는 Windows 기본 그리기 경로를 사용합니다.
++
++`avat.log`에는 실행 시 Windows·Qt·OpenCV 버전(`runtime`), 영상 열기(해상도·코덱·디코더 스레드 수, `video_opened`), 재생 상태(`playback_state`), 디코더 오류·복구가 시간과 함께 남습니다. 파일명과 조사 값은 기록하지 않습니다. Windows 기록과 시각을 맞춰 보세요.
++
++```powershell
++# 41: 비정상 종료(BugcheckCode 0이면 블루스크린 없이 전원 차단), 1001: 블루스크린 코드, WHEA: 하드웨어 오류
++Get-WinEvent -FilterHashtable @{LogName='System'; Id=41,1001,6008} -MaxEvents 20 | Format-List TimeCreated, Id, Message
++Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WHEA-Logger'} -MaxEvents 20 -ErrorAction SilentlyContinue
++Get-ChildItem C:\Windows\Minidump
++```
++
++AVAT를 실행하지 않은 시간에도 발생하면 PC 문제입니다. 재생·탐색·검출 중에만 발생하면 부하를 줄여 비교합니다. 다음 설정은 실행 전에 지정하며 기본값은 바뀌지 않습니다.
++
++```powershell
++$env:AVAT_DECODER_THREADS = "2"   # 디코더 스레드 상한(기본: 코어 수, 최대 16). 탐색이 느려질 수 있음
++$env:OMP_NUM_THREADS = "2"        # CPU 검출 시 PyTorch 스레드 상한
++python main.py
++```
++
+ 다음 조건을 모두 만족해야 완료할 수 있습니다.
+ 
+ - 고정 식별 정보와 일반 필수 질문 입력
+diff --git a/investigator/app.py b/investigator/app.py
+index 95df335..a835ad3 100644
+--- a/investigator/app.py
++++ b/investigator/app.py
+@@ -3,20 +3,36 @@
+ from __future__ import annotations
+ 
+ import argparse
++import os
+ import sys
+ from ctypes import WinDLL
+ from pathlib import Path
+ 
+-from investigator.diagnostics import configure_diagnostics
++from investigator.diagnostics import configure_diagnostics, log_runtime_environment
+ 
+ # Install native/Python crash diagnostics before loading Qt or other native DLLs.
+ configure_diagnostics()
+ 
+-_icuuc = WinDLL(r"C:/Windows/System32/icuuc.dll")
+-_icuin = WinDLL(r"C:/Windows/System32/icuin.dll")
++
++def _preload_system_icu() -> tuple[WinDLL, ...]:
++    """Load Windows' own ICU first, so Qt6Core never binds a same-named copy.
++
++    Qt6Core imports icuuc.dll by name. Resolve System32 from %SystemRoot%
++    instead of assuming C:\\Windows; if a DLL is absent, Qt reports it itself.
++    """
++    system32 = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32"
++    return tuple(
++        WinDLL(str(path))
++        for path in (system32 / "icuuc.dll", system32 / "icuin.dll")
++        if path.is_file()
++    )
++
++
++_system_icu = _preload_system_icu()
+ 
+ from PySide6.QtWidgets import QApplication  # noqa: E402 -- native preload must run first
+ 
++from investigator.audio_playback import disable_qt_hardware_decoding  # noqa: E402
+ from investigator.ffmpeg_logging import restore_qt_ffmpeg_log_level  # noqa: E402
+ from investigator.main_window import MainWindow  # noqa: E402
+ from investigator.qt_font_setup import configure_text_rendering  # noqa: E402
+@@ -33,7 +49,9 @@ def main(arguments: list[str] | None = None) -> int:
+     args = parse_args(arguments)
+     qt_arguments = [sys.argv[0]] if arguments is not None else sys.argv
+     configure_text_rendering(qt_arguments)
++    disable_qt_hardware_decoding()
+     app = QApplication(qt_arguments)
++    log_runtime_environment()
+     app.setApplicationName("AVAT")
+     app.setApplicationDisplayName("AVAT")
+     app.setOrganizationName("AVAT")
+diff --git a/investigator/audio_playback.py b/investigator/audio_playback.py
+index f271303..11d11c4 100644
+--- a/investigator/audio_playback.py
++++ b/investigator/audio_playback.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ from functools import lru_cache
+ from pathlib import Path
+ 
+@@ -10,6 +11,21 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+ 
+ from investigator.ffmpeg_logging import configure_qt_ffmpeg_log_level
+ 
++QT_HW_DECODING_VARIABLE = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
++
++
++def disable_qt_hardware_decoding() -> None:
++    """Keep Qt's FFmpeg backend off the GPU video decoder (D3D11VA/DXVA).
++
++    Qt decodes only the soundtrack here; OpenCV supplies every displayed frame.
++    Whenever Qt still selects the video track, it otherwise opens a hardware
++    decoder and loads the graphics driver into this process. Qt reads the
++    variable once, before its first codec, so call this before any player.
++    "," is a defined but empty device list (an empty string would unset the
++    variable on Windows). A value set before launch is kept for diagnosis.
++    """
++    os.environ.setdefault(QT_HW_DECODING_VARIABLE, ",")
++
+ 
+ @lru_cache(maxsize=1)
+ def configure_media_logging() -> None:
+@@ -27,6 +43,7 @@ class AudioPlayback(QObject):
+     def __init__(self, parent: QObject) -> None:
+         super().__init__(parent)
+         configure_media_logging()
++        disable_qt_hardware_decoding()
+         self._target_ms = 0
+         self._playing = False
+         self._player = QMediaPlayer(self)
+diff --git a/investigator/detection_worker/__main__.py b/investigator/detection_worker/__main__.py
+index 387b860..b7afc41 100644
+--- a/investigator/detection_worker/__main__.py
++++ b/investigator/detection_worker/__main__.py
+@@ -6,8 +6,10 @@
+ from __future__ import annotations
+ 
+ import argparse
++import os
+ import sys
+ import traceback
++from contextlib import suppress
+ from pathlib import Path
+ 
+ from .classes import load_config
+@@ -123,5 +125,23 @@ def main(argv: list[str] | None = None, backend=None) -> int:
+         return EXIT_ERROR
+ 
+ 
++def _lower_process_priority() -> None:
++    """검출 프로세스를 '보통 미만' 우선순위로 낮춘다.
++
++    CPU 추론과 디코딩이 모든 코어를 오래 쓰더라도 AVAT 화면·오디오·시스템 서비스가
++    먼저 실행되게 한다. 남는 코어가 있으면 검출 속도는 달라지지 않는다.
++    """
++    if os.name == "nt":
++        import ctypes
++
++        with suppress(Exception):
++            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
++            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
++            kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
++            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL
++
++
+ if __name__ == "__main__":
++    # 프로세스로 실행될 때만 적용한다. 테스트처럼 main()을 직접 부르는 호출자는 그대로 둔다.
++    _lower_process_priority()
+     sys.exit(main())
+diff --git a/investigator/detection_worker/efficient_backend.py b/investigator/detection_worker/efficient_backend.py
+index 9c9e004..3465dcc 100644
+--- a/investigator/detection_worker/efficient_backend.py
++++ b/investigator/detection_worker/efficient_backend.py
+@@ -87,7 +87,7 @@ class EfficientSam3Backend:
+             processor_class = importlib.import_module("sam3.model.sam3_image_processor").Sam3Processor
+         except ImportError as exc:
+             raise RuntimeError(
+-                "EfficientSAM3 추론 의존성을 찾지 못했습니다. requirements-detection-efficient.txt와 "
++                "EfficientSAM3 추론 의존성을 찾지 못했습니다. requirements.txt 설치 여부와 "
+                 "검출용 Python 설정을 확인해 주세요. " + str(exc)
+             ) from exc
+         finally:
+diff --git a/investigator/detection_worker/runner.py b/investigator/detection_worker/runner.py
+index b85b3ff..39b8c34 100644
+--- a/investigator/detection_worker/runner.py
++++ b/investigator/detection_worker/runner.py
+@@ -66,6 +66,18 @@ def plan_frames(frame_count: int, video_fps: float, opts: RunOptions) -> list[in
+     return list(range(start, end, step))
+ 
+ 
++def _open_video(path: Path) -> cv2.VideoCapture:
++    """재생과 같은 FFmpeg 백엔드로 열고, 디코딩은 CPU로 명시한다.
++
++    CAP_ANY는 FFmpeg 실패 시 하드웨어 디코더를 쓸 수 있는 Media Foundation으로
++    넘어갈 수 있다. GPU 드라이버 사용은 모델 추론(CUDA)으로만 한정한다.
++    """
++    hw_property = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
++    if hw_property is None:
++        return cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
++    return cv2.VideoCapture(str(path), cv2.CAP_FFMPEG, [hw_property, cv2.VIDEO_ACCELERATION_NONE])
++
++
+ def run(
+     opts: RunOptions,
+     backend: PromptBackend,
+@@ -79,7 +91,7 @@ def run(
+     if cancel.cancelled:
+         raise Cancelled()
+     initial_stat = opts.video_path.stat()
+-    cap = cv2.VideoCapture(str(opts.video_path))
++    cap = _open_video(opts.video_path)
+     if not cap.isOpened():
+         cap.release()
+         raise RuntimeError(f"영상을 열 수 없습니다: {opts.video_path}")
+diff --git a/investigator/detection_worker/yoloe_backend.py b/investigator/detection_worker/yoloe_backend.py
+index 7e4ef3a..fb567c3 100644
+--- a/investigator/detection_worker/yoloe_backend.py
++++ b/investigator/detection_worker/yoloe_backend.py
+@@ -125,7 +125,7 @@ class YoloEBackend:
+             from ultralytics import YOLOE, utils
+         except ImportError as exc:
+             raise RuntimeError(
+-                "YOLOE 실행 환경을 찾지 못했습니다. requirements-detection-yoloe.txt와 "
++                "YOLOE 실행 환경을 찾지 못했습니다. requirements.txt 설치 여부와 "
+                 "검출용 Python 설정을 확인해 주세요."
+             ) from exc
+         # Also cover a library imported previously in a benchmark process.
+diff --git a/investigator/diagnostics.py b/investigator/diagnostics.py
+index c903684..1332bed 100644
+--- a/investigator/diagnostics.py
++++ b/investigator/diagnostics.py
+@@ -136,6 +136,32 @@ def shutdown_diagnostics() -> None:
+     _log_directory = None
+ 
+ 
++def log_runtime_environment() -> None:
++    """Record the Windows build, library versions and decoder settings of this PC.
++
++    Comparing this line between a working and a failing PC separates
++    environment differences from application behaviour. No case data.
++    """
++    import platform
++
++    fields = {
++        "windows": platform.platform(),
++        "cpus": os.cpu_count(),
++        "python": sys.version.split()[0],
++    }
++    for label, module_name, attribute in (
++        ("pyside6", "PySide6", "__version__"),
++        ("qt", "PySide6.QtCore", "qVersion"),
++        ("opencv", "cv2", "__version__"),
++        ("numpy", "numpy", "__version__"),
++    ):
++        value = getattr(sys.modules.get(module_name), attribute, None)
++        fields[label] = value() if callable(value) else value or "-"
++    fields["qt_hw_decoding"] = os.environ.get("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "default")
++    fields["decoder_threads"] = os.environ.get("AVAT_DECODER_THREADS", "auto")
++    LOGGER.info("runtime %s", " ".join(f"{key}={value}" for key, value in fields.items()))
++
++
+ def process_memory_bytes() -> int | None:
+     """Return Windows process working-set bytes when available, without dependencies."""
+     if sys.platform != "win32":
+diff --git a/investigator/video_capture.py b/investigator/video_capture.py
+index 328da76..577a9e1 100644
+--- a/investigator/video_capture.py
++++ b/investigator/video_capture.py
+@@ -18,10 +18,15 @@ def open_video_capture(path: str) -> cv2.VideoCapture:
+     thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
+     if thread_property is None:
+         raise RuntimeError("OpenCV does not support single-threaded FFmpeg decoding.")
++    params = [thread_property, 1]
++    # Software decoding only: a metadata probe must never open a GPU decoder.
++    hw_property = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
++    if hw_property is not None:
++        params += [hw_property, cv2.VIDEO_ACCELERATION_NONE]
+ 
+     capture = None
+     try:
+-        capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, [thread_property, 1])
++        capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
+         if not capture.isOpened():
+             raise RuntimeError("Unable to open the video with single-threaded FFmpeg decoding.")
+     except Exception:
+diff --git a/investigator/video_controller.py b/investigator/video_controller.py
+index 022944d..9c07b30 100644
+--- a/investigator/video_controller.py
++++ b/investigator/video_controller.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import logging
+ import math
+ import os
+ from collections import OrderedDict
+@@ -18,10 +19,28 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
+ from PySide6.QtGui import QImage
+ 
+ from investigator.audio_playback import AudioPlayback
++from investigator.diagnostics import process_memory_bytes
+ from investigator.video_capture import open_video_capture
+ from investigator.video_decoder import ProcessDecoder
+ 
++LOGGER = logging.getLogger(__name__)
+ DEFAULT_FPS = 30.0
++DECODER_THREADS_VARIABLE = "AVAT_DECODER_THREADS"
++
++
++def configured_decoder_threads() -> int:
++    """Return the FFmpeg decoder thread setting; 0 keeps OpenCV's automatic choice.
++
++    Automatic mode uses one decoder thread per logical core (at most 16), so
++    scrubbing can briefly load every core. AVAT_DECODER_THREADS (for example 2)
++    caps that on a slow or overheating PC for diagnosis; invalid values are ignored.
++    """
++    raw = os.environ.get(DECODER_THREADS_VARIABLE, "").strip()
++    try:
++        threads = int(raw) if raw else 0
++    except ValueError:
++        return 0
++    return min(max(threads, 0), 16)
+ 
+ 
+ class PlaybackState(StrEnum):
+@@ -83,6 +102,7 @@ class VideoController(QObject):
+         self._capture: CaptureProtocol | None = None
+         self._decoder: ProcessDecoder | None = None
+         self._decoder_threads: int | None = None
++        self._decoder_thread_setting = configured_decoder_threads()
+         self._generation = 0
+         self._request_id = 0
+         self._revision = 0
+@@ -372,14 +392,14 @@ class VideoController(QObject):
+             self.error_occurred.emit(f"{next_frame + 1:,}번 프레임을 읽을 수 없습니다.")
+ 
+     def _open_process_video(self, resolved: Path) -> bool:
+-        threads = 1 if resolved in self._safe_files else 0
++        threads = 1 if resolved in self._safe_files else self._decoder_thread_setting
+         candidate = ProcessDecoder(self)
+         opened = candidate.open(resolved, threads)
+         if opened is None:
+             candidate.deleteLater()
+             # Startup aborts are isolated too. One file-specific safe retry,
+             # never silently force every healthy video back to one thread.
+-            if threads == 0:
++            if threads != 1:
+                 candidate = ProcessDecoder(self)
+                 opened = candidate.open(resolved, 1)
+                 if opened is not None:
+@@ -405,6 +425,14 @@ class VideoController(QObject):
+         if self._audio is not None:
+             self._audio.open(resolved)
+         self._timer.setInterval(max(1, round(1000 / fps)))
++        # Activity breadcrumbs to line up with Windows crash times; no names/paths.
++        LOGGER.info(
++            "video_opened width=%s height=%s fps=%.3f frames=%s codec=%s decoder_threads=%s "
++            "safe_mode=%s audio=%s memory_bytes=%s",
++            image.width(), image.height(), fps, count, information.get("codec") or "-",
++            self._decoder_threads, resolved in self._safe_files, self._audio is not None,
++            process_memory_bytes() or "-",
++        )
+         self._set_state(PlaybackState.STOPPED)
+         self.video_opened.emit(self._metadata)
+         self.frame_ready.emit(QImage(image), 0, 0.0)
+@@ -570,6 +598,10 @@ class VideoController(QObject):
+         self._crash_counts[path] = failures
+         if failures >= 2:
+             self._safe_files.add(path)
++        LOGGER.warning(
++            "decoder_recovery failures=%s safe_mode=%s frame=%s", failures, path in self._safe_files,
++            target,
++        )
+         if failures > 2:
+             self._seek_target = None
+             self.seek_cancelled.emit()
+@@ -583,7 +615,9 @@ class VideoController(QObject):
+         if generation != self._generation or self._metadata is None or self._metadata.path != path:
+             return
+         candidate = ProcessDecoder(self)
+-        information = candidate.open(path, 1 if path in self._safe_files else 0)
++        information = candidate.open(
++            path, 1 if path in self._safe_files else self._decoder_thread_setting
++        )
+         if information is None:
+             candidate.deleteLater()
+             self._seek_target = None
+@@ -630,6 +664,7 @@ class VideoController(QObject):
+         if state is self._state:
+             return
+         self._state = state
++        LOGGER.info("playback_state state=%s frame=%s", state.value, self._current_frame)
+         self.state_changed.emit(state)
+ 
+     @staticmethod
+diff --git a/investigator/video_decode_worker.py b/investigator/video_decode_worker.py
+index 8d451ad..d15dec7 100644
+--- a/investigator/video_decode_worker.py
++++ b/investigator/video_decode_worker.py
+@@ -23,6 +23,17 @@ import cv2
+ import numpy as np
+ 
+ 
++def _software_decoding_params() -> list[int]:
++    """Request CPU decoding explicitly, so no D3D11/DXVA path enters the GPU driver.
++
++    OpenCV's FFmpeg backend already defaults to software decoding; pinning it
++    keeps another OpenCV build or OPENCV_FFMPEG_CAPTURE_OPTIONS from changing it.
++    """
++    hw_property = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
++    software = getattr(cv2, "VIDEO_ACCELERATION_NONE", None)
++    return [] if hw_property is None or software is None else [hw_property, software]
++
++
+ def _open_capture(path: str, threads: int) -> cv2.VideoCapture:
+     """Open exactly one FFmpeg capture, with parallelism selected at open time."""
+     if threads < 0:
+@@ -32,10 +43,13 @@ def _open_capture(path: str, threads: int) -> cv2.VideoCapture:
+         raise RuntimeError("OpenCV does not support configuring FFmpeg decoder threads.")
+     capture = None
+     try:
+-        if thread_property is None:
+-            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
++        params = _software_decoding_params()
++        if thread_property is not None:
++            params += [thread_property, threads]
++        if params:
++            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
+         else:
+-            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, [thread_property, threads])
++            capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
+         if not capture.isOpened():
+             raise RuntimeError("영상을 열 수 없습니다.")
+         return capture
+@@ -50,6 +64,16 @@ def _positive_float(value: float) -> float:
+     return float(value) if math.isfinite(value) and value > 0 else 0.0
+ 
+ 
++def _codec_tag(capture: cv2.VideoCapture) -> str:
++    """Four-character codec tag (for example avc1, hev1) for diagnostics only."""
++    with suppress(Exception):
++        tag = int(capture.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode("ascii")
++        tag = tag.strip("\0 ")
++        if tag.isprintable():
++            return tag
++    return ""
++
++
+ class DecoderSession:
+     """Serial capture ownership and one shared-memory image, owned by this process."""
+ 
+@@ -65,6 +89,7 @@ class DecoderSession:
+             self.total_frames = int(_positive_float(self.capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+             thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
+             self.threads = int(self.capture.get(thread_property)) if thread_property is not None else 0
++            self.codec = _codec_tag(self.capture)
+         except Exception:
+             self.capture.release()
+             raise
+@@ -84,6 +109,7 @@ class DecoderSession:
+             "shape": list(self._shape),
+             "frame": 0,
+             "threads": self.threads,
++            "codec": self.codec,
+         }
+ 
+     def _decode(self, frame: int) -> bool:
+@@ -175,6 +201,20 @@ def _suppress_windows_error_dialogs() -> None:
+             ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+ 
+ 
++def _lower_process_priority() -> None:
++    if os.name == "nt":
++        # Parallel decoding can briefly occupy every core while scrubbing.
++        # Below-normal priority lets the GUI, audio and system services run
++        # first; it changes nothing while any core is idle.
++        import ctypes
++
++        with suppress(Exception):
++            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
++            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
++            kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
++            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL
++
++
+ def run(path: str, threads: int, source: TextIO, output: TextIO) -> int:
+     session = None
+     try:
+@@ -222,6 +262,7 @@ def main() -> int:
+     parser.add_argument("--threads", type=int, default=0)
+     args = parser.parse_args()
+     _suppress_windows_error_dialogs()
++    _lower_process_priority()
+     return run(args.path, args.threads, sys.stdin, sys.stdout)
+ 
+ 
+diff --git a/investigator/video_decoder.py b/investigator/video_decoder.py
+index 52755c5..38977f8 100644
+--- a/investigator/video_decoder.py
++++ b/investigator/video_decoder.py
+@@ -19,7 +19,8 @@ from pathlib import Path
+ from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+ from PySide6.QtGui import QImage
+ 
+-LOGGER = logging.getLogger("avat.video_decoder")
++# Under the "investigator" logger so failures reach %LOCALAPPDATA%/AVAT/logs.
++LOGGER = logging.getLogger("investigator.video_decoder")
+ MAX_FRAME_BYTES = 256 * 1024 * 1024
+ 
+ 
+@@ -45,6 +46,7 @@ class ProcessDecoder(QObject):
+         self._closing = False
+         self._reported_failure = False
+         self._busy = False
++        self._private_names: tuple[str, ...] = ()
+         self._watchdog = QTimer(self)
+         self._watchdog.setSingleShot(True)
+         self._watchdog.setInterval(15_000)
+@@ -54,8 +56,16 @@ class ProcessDecoder(QObject):
+     def pid(self) -> int | None:
+         return int(self.process.processId()) or None
+ 
++    def _redact(self, text: str) -> str:
++        # Diagnostic logs never contain video paths or filenames.
++        for name in self._private_names:
++            text = text.replace(name, "<video>")
++        return text
++
+     def open(self, path: Path, threads: int = 0) -> tuple[dict, QImage] | None:
+         """Bound only initial file opening; all subsequent requests are async."""
++        names = {str(path), path.as_posix(), path.name}
++        self._private_names = tuple(sorted(filter(None, names), key=len, reverse=True))
+         self.process.setWorkingDirectory(str(Path(__file__).resolve().parent.parent))
+         self.process.start(sys.executable, [
+             "-u", "-m", "investigator.video_decode_worker", "--path", str(path),
+@@ -72,7 +82,7 @@ class ProcessDecoder(QObject):
+             if self.process.state() == QProcess.ProcessState.NotRunning:
+                 break
+         if self._opening is None:
+-            LOGGER.warning("decoder_open_failed path=%s error=%s", path.name, self._error)
++            LOGGER.warning("decoder_open_failed threads=%s error=%s", threads, self._redact(self._error))
+             self.close()
+         return self._opening
+ 
+@@ -155,7 +165,7 @@ class ProcessDecoder(QObject):
+                 elif event == "error":
+                     self._busy = False
+                     self._watchdog.stop()
+-                    LOGGER.warning("decoder_request_error pid=%s %s", self.pid, message)
++                    LOGGER.warning("decoder_request_error pid=%s %s", self.pid, self._redact(str(message)))
+                     if isinstance(message.get("request_id"), int):
+                         self.request_failed.emit(int(message["request_id"]), str(message["message"]))
+                     else:
+@@ -172,7 +182,7 @@ class ProcessDecoder(QObject):
+         # Drain Qt's buffer even for noisy/damaged files; do not retain a log FIFO.
+         text = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
+         if text.strip():
+-            LOGGER.warning("decoder_stderr pid=%s %s", self.pid, text[-4000:].strip())
++            LOGGER.warning("decoder_stderr pid=%s %s", self.pid, self._redact(text[-4000:].strip()))
+ 
+     def _process_error(self, error: QProcess.ProcessError) -> None:
+         if error == QProcess.ProcessError.FailedToStart:
+@@ -188,7 +198,7 @@ class ProcessDecoder(QObject):
+         self._watchdog.stop()
+         if not self._closing and not self._reported_failure:
+             self._reported_failure = True
+-            LOGGER.warning("decoder_failed pid=%s %s", self.pid, message)
++            LOGGER.warning("decoder_failed pid=%s %s", self.pid, self._redact(message))
+             self.failed.emit(message)
+ 
+     def _timed_out(self) -> None:
+diff --git a/investigator/widgets/video_player.py b/investigator/widgets/video_player.py
+index 3e8c415..d74b3c8 100644
+--- a/investigator/widgets/video_player.py
++++ b/investigator/widgets/video_player.py
+@@ -49,6 +49,10 @@ class VideoCanvas(QWidget):
+         self.setStyleSheet(f"background: {VIDEO_BACKGROUND}; border: 0;")
+         self._image: QImage | None = None
+         self._source_image: QImage | None = None
++        # Smoothly scaled frame for the current widget size. Overlay, hover and
++        # box-drawing repaints reuse it instead of rescaling the full frame.
++        self._scaled: QPixmap | None = None
++        self._scaled_key: tuple[int, int, int] | None = None
+         self._rotation_degrees = 0
+         self._placeholder_icon = material_icon("video_file", "#94A3B8")
+         self._overlay: list[OverlayBox] = []
+@@ -247,7 +251,9 @@ class VideoCanvas(QWidget):
+     def set_frame(self, image: QImage) -> None:
+         # Do not attach an unfinished drag to a different displayed frame.
+         self._draw_start = self._draw_current = None
+-        self._source_image = image.copy()
++        # QImage is copy-on-write: sharing the decoded frame avoids a full-frame
++        # copy per displayed frame, and a later writer detaches its own copy.
++        self._source_image = QImage(image)
+         self._update_display_image()
+ 
+     @property
+@@ -273,12 +279,13 @@ class VideoCanvas(QWidget):
+                 Qt.TransformationMode.SmoothTransformation,
+             )
+         else:
+-            self._image = self._source_image.copy()
++            self._image = self._source_image
+         self.update()
+ 
+     def clear(self) -> None:
+         self._source_image = None
+         self._image = None
++        self._scaled = self._scaled_key = None
+         self._overlay = []
+         self._draw_start = self._draw_current = None
+         self.set_draw_mode(False)
+@@ -311,11 +318,15 @@ class VideoCanvas(QWidget):
+             )
+             return
+         available = self.rect()
+-        scaled = QPixmap.fromImage(self._image).scaled(
+-            available.size(),
+-            Qt.AspectRatioMode.KeepAspectRatio,
+-            Qt.TransformationMode.SmoothTransformation,
+-        )
++        key = (self._image.cacheKey(), available.width(), available.height())
++        if self._scaled is None or self._scaled_key != key:
++            self._scaled = QPixmap.fromImage(self._image).scaled(
++                available.size(),
++                Qt.AspectRatioMode.KeepAspectRatio,
++                Qt.TransformationMode.SmoothTransformation,
++            )
++            self._scaled_key = key
++        scaled = self._scaled
+         x = (available.width() - scaled.width()) // 2
+         y = (available.height() - scaled.height()) // 2
+         painter.drawPixmap(x, y, scaled)
+diff --git a/local_dev/requirements-dev.txt b/local_dev/requirements-dev.txt
+index 26b24c6..4ccee26 100644
+--- a/local_dev/requirements-dev.txt
++++ b/local_dev/requirements-dev.txt
+@@ -1,3 +1,7 @@
++# -*- coding: utf-8 -*-
++# 개발용 의존성: 실행용 requirements.txt 전체 + 테스트·린트 도구.
++# 프로젝트 루트에서: python -m pip install -r local_dev/requirements-dev.txt
++# PyTorch는 requirements.txt 머리말의 1)처럼 먼저 설치합니다.
+ -r ../requirements.txt
+ pytest>=8,<10
+ pytest-qt>=4.4,<5
+diff --git a/local_dev/tests/test_dependency_contract.py b/local_dev/tests/test_dependency_contract.py
+index a9066ca..aa21e76 100644
+--- a/local_dev/tests/test_dependency_contract.py
++++ b/local_dev/tests/test_dependency_contract.py
+@@ -1,4 +1,4 @@
+-"""Keep the GUI and optional detector installable in one Python environment.
++"""Keep exactly one runtime and one development requirements file in sync.
+ 
+ These checks inspect only dependency declarations: no Qt application, model,
+ CUDA runtime, package installation, or network access is needed.
+@@ -14,9 +14,14 @@ from packaging.requirements import Requirement
+ from packaging.utils import canonicalize_name
+ 
+ ROOT = Path(__file__).resolve().parents[2]
+-BASE = ROOT / "requirements.txt"
+-DETECTION = ROOT / "requirements-detection.txt"
+-DETECTION_ONLY = {"torch", "torchvision", "transformers", "pillow", "ultralytics", "clip"}
++RUNTIME = ROOT / "requirements.txt"
++DEVELOPMENT = ROOT / "local_dev" / "requirements-dev.txt"
++BASE_ONLY = {"pyside6", "opencv-python", "numpy"}
++DETECTION_ONLY = {
++    "torch", "torchvision", "transformers", "pillow", "ultralytics", "clip",
++    "timm", "einops", "ftfy", "wcwidth", "pycocotools",
++}
++DEVELOPMENT_ONLY = {"pytest", "pytest-qt", "ruff"}
+ 
+ 
+ def _requirements(path: Path, *, include: bool = True) -> dict[str, Requirement]:
+@@ -47,28 +52,45 @@ def _named(requirements: list[str]) -> dict[str, Requirement]:
+     return result
+ 
+ 
+-def test_detection_includes_base_without_repeating_shared_dependencies():
+-    lines = [line.strip() for line in DETECTION.read_text(encoding="utf-8-sig").splitlines()]
+-    assert "-r requirements.txt" in lines
+-    base = _requirements(BASE)
+-    additions = _requirements(DETECTION, include=False)
+-    assert set(additions) == DETECTION_ONLY
+-    assert not (base.keys() & additions.keys())
+-    assert _requirements(DETECTION) == base | additions
++def test_only_runtime_and_development_files_exist():
++    assert sorted(path.name for path in ROOT.glob("requirements*.txt")) == ["requirements.txt"]
++    assert sorted(path.name for path in DEVELOPMENT.parent.glob("requirements*.txt")) == [
++        "requirements-dev.txt"
++    ]
+ 
+ 
+-def test_package_metadata_matches_both_requirement_files():
++def test_runtime_file_covers_gui_and_detection_once():
++    assert set(_requirements(RUNTIME)) == BASE_ONLY | DETECTION_ONLY
++
++
++def test_development_file_adds_tools_to_the_runtime_file():
++    lines = [line.strip() for line in DEVELOPMENT.read_text(encoding="utf-8-sig").splitlines()]
++    assert "-r ../requirements.txt" in lines
++    additions = _requirements(DEVELOPMENT, include=False)
++    assert set(additions) == DEVELOPMENT_ONLY
++    assert _requirements(DEVELOPMENT) == _requirements(RUNTIME) | additions
++
++
++@pytest.mark.parametrize("path", [RUNTIME, DEVELOPMENT])
++def test_korean_comments_declare_utf8_for_pip_on_cp949_windows(path):
++    # pip falls back to the locale codec (cp949) without a PEP 263 declaration.
++    assert path.read_text(encoding="utf-8-sig").splitlines()[0] == "# -*- coding: utf-8 -*-"
++
++
++def test_package_metadata_matches_requirement_files():
+     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+     base = _named(project["dependencies"])
+     detection = _named(project["optional-dependencies"]["detection"])
+-    assert base == _requirements(BASE)
+-    assert detection == _requirements(DETECTION, include=False)
+-    assert base | detection == _requirements(DETECTION)
++    development = _named(project["optional-dependencies"]["dev"])
++    assert set(base) == BASE_ONLY
++    assert set(detection) == DETECTION_ONLY
++    assert base | detection == _requirements(RUNTIME)
++    assert development == _requirements(DEVELOPMENT, include=False)
+ 
+ 
+ @pytest.mark.parametrize("name,version", [("numpy", "2.1.3"), ("pillow", "11.1.0")])
+-def test_target_pc_versions_are_allowed_by_combined_install(name, version):
+-    requirements = _requirements(DETECTION)
++def test_target_pc_versions_are_allowed_by_runtime_install(name, version):
++    requirements = _requirements(RUNTIME)
+     assert requirements[name].specifier.contains(version)
+ 
+ 
+@@ -76,12 +98,11 @@ def test_target_pc_versions_are_allowed_by_combined_install(name, version):
+     "name,version", [("torch", "2.11.0+cu128"), ("torchvision", "0.26.0+cu128")]
+ )
+ def test_cuda_wheels_satisfy_public_pytorch_version_pins(name, version):
+-    requirements = _requirements(DETECTION)
++    requirements = _requirements(RUNTIME)
+     assert requirements[name].specifier.contains(version)
+ 
+ 
+-def test_yoloe_alias_uses_same_dependency_set_and_reproducible_tokenizer():
+-    assert _requirements(ROOT / "requirements-detection-yoloe.txt") == _requirements(DETECTION)
+-    requirements = _requirements(DETECTION)
++def test_yoloe_dependencies_and_reproducible_tokenizer():
++    requirements = _requirements(RUNTIME)
+     assert requirements["ultralytics"].specifier.contains("8.3.253")
+     assert requirements["clip"].url.endswith("@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40")
+diff --git a/pyproject.toml b/pyproject.toml
+index 1c10295..f7a4692 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -22,6 +22,11 @@ detection = [
+     "pillow==11.1.0",
+     "ultralytics==8.3.253",
+     "clip @ git+https://github.com/ultralytics/CLIP.git@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40",
++    "timm==1.0.27",
++    "einops==0.8.2",
++    "ftfy==6.1.1",
++    "wcwidth==0.2.13",
++    "pycocotools==2.0.11",
+ ]
+ dev = [
+     "pytest>=8,<10",
+diff --git a/requirements-detection-efficient.txt b/requirements-detection-efficient.txt
+deleted file mode 100644
+index 73be476..0000000
+--- a/requirements-detection-efficient.txt
++++ /dev/null
+@@ -1,10 +0,0 @@
+-# Optional EfficientSAM3 image inference dependencies, in addition to the
+-# existing requirements-detection.txt environment. No training/video extras.
+-# EfficientSAM3 source and local weights are configured with avat-efficient.json.
+--r requirements-detection.txt
+-
+-timm==1.0.27
+-einops==0.8.2
+-ftfy==6.1.1
+-wcwidth==0.2.13
+-pycocotools==2.0.11
+diff --git a/requirements-detection-yoloe.txt b/requirements-detection-yoloe.txt
+deleted file mode 100644
+index 5f3af13..0000000
+--- a/requirements-detection-yoloe.txt
++++ /dev/null
+@@ -1,5 +0,0 @@
+-# YOLOE image inference in the same AVAT environment. No training/export extras.
+-# Keep AVAT NumPy/Pillow/OpenCV pins; install the CUDA PyTorch wheels first.
+--r requirements-detection.txt
+-
+-# YOLOE and its tokenizer are pinned by requirements-detection.txt.
+diff --git a/requirements-detection.txt b/requirements-detection.txt
+deleted file mode 100644
+index 7afaf5a..0000000
+--- a/requirements-detection.txt
++++ /dev/null
+@@ -1,22 +0,0 @@
+-# -*- coding: utf-8 -*-
+-# AVAT 본체와 YOLOE/SAM 3 검출을 함께 사용하는 Windows Python 3.11 환경용입니다.
+-# 공통 의존성은 requirements.txt에서 한 번만 관리합니다.
+-# CUDA 12.8 PyTorch/torchvision을 먼저 설치한 뒤 이 파일을 설치하세요:
+-#   python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+-#   python -m pip install -r requirements-detection.txt
+-# CPU 전용이면 첫 명령의 index URL을 https://download.pytorch.org/whl/cpu 로 바꿉니다.
+--r requirements.txt
+-
+-torch==2.11.0
+-torchvision==0.26.0
+-transformers==5.20.2
+-pillow==11.1.0
+-
+-# Default YOLOE backend (no training/export extras). Build a local wheel for
+-# CLIP before moving the installation bundle to an air-gapped Windows PC.
+-ultralytics==8.3.253
+-clip @ git+https://github.com/ultralytics/CLIP.git@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40
+-
+-# safetensors, tokenizers, huggingface-hub 등은 transformers의 필수 의존성으로 자동 설치됩니다.
+-# 현재 직접 로딩 방식에는 accelerate 및 Meta 원본 sam3/Triton 패키지가 필요하지 않습니다.
+-# PySide6, OpenCV, NumPy는 위의 requirements.txt를 통해 함께 설치됩니다.
+diff --git a/requirements.txt b/requirements.txt
+index 939f8a5..983cfba 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,12 +1,40 @@
+ # -*- coding: utf-8 -*-
+-# Python >=3.11,<3.14. Base dependencies shared by the GUI and detection worker.
+-# SQLite persistence, background saving, and diagnostics use Python's standard
+-# library (sqlite3, concurrent.futures, logging, faulthandler); no extra package.
+-# PySide6 also includes QtMultimedia for audio playback.
+-# Word report templates use zipfile/xml.dom from the standard library; no Word
+-# installation or extra DOCX dependency is required for report export.
+-# requirements-detection.txt includes this file and adds SAM 3 to the SAME environment.
+-# The detection worker remains a separate process, not a separate required environment.
++# AVAT 실행용 의존성: GUI·재생·조사 + 객체 검출. Windows, Python >=3.11,<3.14.
++# 개발용(테스트·린트)은 local_dev/requirements-dev.txt이며 이 파일을 포함합니다.
++#
++# 설치 순서 (인터넷이 연결된 준비 PC, 같은 가상환경):
++#   1) PC의 GPU 드라이버에 맞는 PyTorch를 먼저 설치합니다.
++#      CUDA 12.8: python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
++#      CPU 전용 : python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
++#   2) python -m pip install -r requirements.txt
++# 아래 torch·torchvision 고정 버전은 +cu128/+cpu 휠도 만족하므로 1)의 설치를 유지합니다.
++#
++# SQLite 저장·백그라운드 저장·진단 로그·Word 보고서는 표준 라이브러리만 사용합니다.
++# PySide6에는 오디오 재생용 QtMultimedia가 포함됩니다. 검출 worker는 별도 프로세스로
++# 실행되지만 별도 가상환경은 필요하지 않습니다.
++
++# --- 본체: GUI·재생·조사 --------------------------------------------------------
+ PySide6>=6.7,<7
+ opencv-python==4.11.0.86
+ numpy==2.1.3
++
++# --- 객체 검출: PyTorch·Transformers(SAM 3, Grounding DINO)·YOLOE ---------------
++torch==2.11.0
++torchvision==0.26.0
++transformers==5.20.2
++pillow==11.1.0
++# 학습·내보내기 extras는 설치하지 않습니다. CLIP은 git 소스이므로 폐쇄망 PC로 옮기기
++# 전에 준비 PC에서 Windows 휠로 미리 빌드합니다.
++ultralytics==8.3.253
++clip @ git+https://github.com/ultralytics/CLIP.git@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40
++
++# --- EfficientSAM3 (경량·실험) 이미지 추론 ---------------------------------------
++# 연구 소스와 가중치는 별도로 준비합니다(README 참고). 학습·영상 extras는 제외합니다.
++timm==1.0.27
++einops==0.8.2
++ftfy==6.1.1
++wcwidth==0.2.13
++pycocotools==2.0.11
++
++# safetensors, tokenizers, huggingface-hub 등은 transformers의 필수 의존성으로 함께
++# 설치됩니다. accelerate와 Meta 원본 sam3/Triton 패키지는 필요하지 않습니다.

@@ -1,0 +1,344 @@
+<title>AVAT 나비형 비교</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one working panel — controls on top, mirrored bars around a shared centre axis, readout below. */
+:root {
+  --bg: #F3F5F8;
+  --surface: #FFFFFF;
+  --ink: #111827;
+  --muted: #5B6575;
+  --line: #DFE4EB;
+  --track: #EDF0F4;
+  --left: #2F63D6;
+  --left-soft: #DCE6FA;
+  --right: #D2691E;
+  --right-soft: #FBE6D6;
+  --focus: #003CDC;
+  --warn-ink: #7A4A00;
+  --warn-bg: #FFF3D6;
+  --font-ui: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161D; --surface: #1A2029; --ink: #E8ECF2; --muted: #9AA5B4; --line: #2C3440; --track: #232A35;
+    --left: #6F9BFF; --left-soft: #22325A; --right: #F2994A; --right-soft: #4A2E17; --focus: #8EB0FF;
+    --warn-ink: #F5CF7A; --warn-bg: #3A2E12; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161D; --surface: #1A2029; --ink: #E8ECF2; --muted: #9AA5B4; --line: #2C3440; --track: #232A35;
+  --left: #6F9BFF; --left-soft: #22325A; --right: #F2994A; --right-soft: #4A2E17; --focus: #8EB0FF;
+  --warn-ink: #F5CF7A; --warn-bg: #3A2E12; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-ui); font-size: 14px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 40px;
+}
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+h1 { margin: 0; font-size: 22px; font-weight: 700; text-wrap: balance; }
+.tag { font-size: 12px; color: var(--muted); }
+.sample { font-size: 11px; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-ink); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+select { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 28px 6px 10px; min-height: 34px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; border: 0; background: var(--surface); color: var(--ink); padding: 6px 12px; min-height: 34px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.seg button:disabled { color: var(--muted); cursor: not-allowed; }
+.push { margin-left: auto; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.groups { display: grid; grid-template-columns: minmax(0, 1fr) var(--axis-w, 96px) minmax(0, 1fr); gap: 8px; align-items: end; }
+.groups .field { justify-self: start; }
+.groups .l { justify-self: end; text-align: right; }
+.groups select { min-width: 160px; max-width: 100%; }
+.tickset { margin-inline: 10px; }
+.axis-name { text-align: center; font-size: 12px; color: var(--muted); padding-bottom: 8px; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+
+.chart { display: flex; flex-direction: column; gap: 4px; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) var(--axis-w, 96px) minmax(0, 1fr); gap: 8px; align-items: center; border: 0; background: none; padding: 2px 0; font: inherit; color: inherit; cursor: pointer; border-radius: 6px; text-align: left; width: 100%; }
+.row:hover .mid, .row[aria-pressed="true"] .mid { background: var(--ink); color: var(--surface); }
+.row[aria-pressed="true"] .bar.l { box-shadow: 0 0 0 2px var(--left) inset; }
+.side { display: flex; align-items: center; gap: 8px; height: 26px; min-width: 0; }
+.side.l { flex-direction: row-reverse; }
+.bar { height: 22px; min-width: 0; transition: width 240ms ease; }
+.bar.l { background: var(--left); border-radius: 4px 0 0 4px; }
+.bar.r { background: var(--right); border-radius: 0 4px 4px 0; }
+.row.dim .bar { opacity: 0.35; }
+.val { font-family: var(--font-num); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mid { text-align: center; font-size: 13px; padding: 3px 4px; border-radius: 4px; background: var(--track); transition: background 120ms, color 120ms; white-space: nowrap; }
+
+.ticks { display: grid; grid-template-columns: minmax(0, 1fr) var(--axis-w, 96px) minmax(0, 1fr); gap: 8px; border-top: 1px solid var(--line); padding-top: 4px; }
+.tickset { position: relative; height: 18px; }
+.tickset span { position: absolute; top: 0; font-family: var(--font-num); font-size: 11px; color: var(--muted); transform: translateX(-50%); font-variant-numeric: tabular-nums; }
+.unit-label { text-align: center; font-size: 11px; color: var(--muted); }
+
+.foot { display: grid; grid-template-columns: minmax(0, 1fr) var(--axis-w, 96px) minmax(0, 1fr); gap: 8px; font-size: 12px; color: var(--muted); }
+.foot .l { text-align: right; }
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.card h2 { margin: 0; font-size: 12px; font-weight: 500; color: var(--muted); }
+.card p { margin: 0; font-size: 14px; }
+.big { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.warn { font-size: 13px; color: var(--warn-ink); background: var(--warn-bg); border-radius: 8px; padding: 8px 12px; }
+.note { font-size: 12px; color: var(--muted); margin: 0; max-width: 72ch; }
+
+@media (max-width: 560px) {
+  :root { --axis-w: 64px; }
+  .mid { font-size: 12px; }
+  .val { font-size: 11px; }
+  .push { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .bar, .mid { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>나비형 비교</h1>
+    <span class="tag">AVAT 통계 · 교차 분석 시안</span>
+    <span class="sample">예시 데이터 152건</span>
+  </header>
+
+  <section class="panel" aria-label="나비형 비교 차트">
+    <div class="controls">
+      <label class="field" for="axis">가운데 축 (순서 있는 항목)
+        <select id="axis"></select>
+      </label>
+      <label class="field" for="groupItem">좌우로 나눌 항목
+        <select id="groupItem"></select>
+      </label>
+      <div class="field">비교 방식
+        <div class="seg" role="group" aria-label="비교 방식" id="mode">
+          <button type="button" data-v="two">두 그룹</button>
+          <button type="button" data-v="rest">한 그룹 vs 나머지</button>
+        </div>
+      </div>
+      <div class="field push">단위
+        <div class="seg" role="group" aria-label="단위" id="unit">
+          <button type="button" data-v="pct">그룹 내 %</button>
+          <button type="button" data-v="cnt">건수</button>
+        </div>
+      </div>
+      <div class="field">대상
+        <div class="seg" role="group" aria-label="대상" id="status">
+          <button type="button" data-v="done">완료만</button>
+          <button type="button" data-v="all">전체</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="groups">
+      <label class="field l" for="left"><span><span class="swatch" style="background: var(--left)"></span>왼쪽 그룹</span>
+        <select id="left"></select>
+      </label>
+      <div class="axis-name" id="axisName"></div>
+      <label class="field" for="right"><span><span class="swatch" style="background: var(--right)"></span>오른쪽 그룹</span>
+        <select id="right"></select>
+      </label>
+    </div>
+
+    <div class="chart" id="chart" role="list"></div>
+    <div class="ticks" aria-hidden="true">
+      <div class="tickset" id="ticksL"></div>
+      <div class="unit-label" id="unitLabel"></div>
+      <div class="tickset" id="ticksR"></div>
+    </div>
+    <div class="foot" id="foot"></div>
+    <div class="warn" id="warn" hidden></div>
+
+    <div class="readout">
+      <div class="card" aria-live="polite">
+        <h2 id="selTitle">선택한 구간</h2>
+        <p id="selBody"></p>
+      </div>
+      <div class="card">
+        <h2>차이가 가장 큰 구간</h2>
+        <p><span class="big" id="gapBig"></span></p>
+        <p id="gapBody"></p>
+      </div>
+    </div>
+    <p class="note">그룹 크기가 다르면 건수로는 분포 모양을 비교할 수 없어서 기본 단위는 그룹 안에서의 비율이에요. 좌우 막대는 같은 눈금을 써요. 막대를 누르면 그 구간의 숫자가 아래에 나오고, AVAT에서는 해당 사고 목록이 오른쪽 패널에 뜨는 자리예요.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  var ITEMS = {
+    gender: { label: '운전자 성별', cats: ['남', '여'] },
+    light: { label: '조명 상태', cats: ['주간', '야간(조명 있음)', '야간(조명 없음)', '새벽·황혼'] },
+    target: { label: '충돌대상', cats: ['승용', '보행자', '이륜', '화물', '기타'] }
+  };
+  var AXES = {
+    age: { label: '운전 연령', cats: ['20대', '30대', '40대', '50대', '60대', '70대 이상'] },
+    damage: { label: '피해 정도', cats: ['물피만', '경상', '중상', '사망'] },
+    day: { label: '사고요일', cats: ['월', '화', '수', '목', '금', '토', '일'] }
+  };
+
+  // Deterministic example records so the page looks the same on every load.
+  var seed = 20261020;
+  function rnd() { seed |= 0; seed = seed + 0x6D2B79F5 | 0; var t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }
+  function pick(pairs) { var x = rnd(), acc = 0; for (var i = 0; i < pairs.length; i++) { acc += pairs[i][1]; if (x < acc) return pairs[i][0]; } return pairs[pairs.length - 1][0]; }
+  var RECORDS = [];
+  for (var i = 0; i < 152; i++) {
+    var gender = pick([['남', 0.68], ['여', 0.32]]);
+    var age = gender === '남'
+      ? pick([['20대', 0.12], ['30대', 0.2], ['40대', 0.24], ['50대', 0.22], ['60대', 0.14], ['70대 이상', 0.08]])
+      : pick([['20대', 0.2], ['30대', 0.27], ['40대', 0.25], ['50대', 0.16], ['60대', 0.09], ['70대 이상', 0.03]]);
+    var light = pick([['주간', 0.5], ['야간(조명 있음)', 0.26], ['야간(조명 없음)', 0.14], ['새벽·황혼', 0.1]]);
+    var target = pick([['승용', 0.42], ['보행자', 0.25], ['이륜', 0.16], ['화물', 0.1], ['기타', 0.07]]);
+    var risk = (light === '야간(조명 없음)' ? 1.1 : light === '야간(조명 있음)' ? 0.4 : 0) + (target === '보행자' ? 1.1 : target === '이륜' ? 0.7 : 0) + (age === '70대 이상' ? 0.5 : 0) + rnd() * 2.2;
+    var damage = risk < 1.0 ? '물피만' : risk < 2.0 ? '경상' : risk < 2.9 ? '중상' : '사망';
+    var day = pick(light === '주간'
+      ? [['월', 0.15], ['화', 0.14], ['수', 0.15], ['목', 0.15], ['금', 0.16], ['토', 0.13], ['일', 0.12]]
+      : [['월', 0.1], ['화', 0.1], ['수', 0.11], ['목', 0.12], ['금', 0.21], ['토', 0.22], ['일', 0.14]]);
+    RECORDS.push({ gender: gender, age: age, light: light, target: target, damage: damage, day: day, done: i < 128 });
+  }
+
+  var state = { axis: 'age', item: 'gender', mode: 'two', unit: 'pct', status: 'done', left: '남', right: '여', sel: null };
+  try { var saved = JSON.parse(localStorage.getItem('avat-butterfly') || 'null'); if (saved && AXES[saved.axis] && ITEMS[saved.item]) { state.axis = saved.axis; state.item = saved.item; state.unit = saved.unit === 'cnt' ? 'cnt' : 'pct'; } } catch (e) { /* storage unavailable */ }
+
+  var $ = function (id) { return document.getElementById(id); };
+  function fill(select, options, value) {
+    select.innerHTML = '';
+    options.forEach(function (o) { var opt = document.createElement('option'); opt.value = o[0]; opt.textContent = o[1]; select.appendChild(opt); });
+    select.value = value;
+  }
+  fill($('axis'), Object.keys(AXES).map(function (k) { return [k, AXES[k].label]; }), state.axis);
+  fill($('groupItem'), Object.keys(ITEMS).map(function (k) { return [k, ITEMS[k].label]; }), state.item);
+
+  function setSeg(id, value, disabledValues) {
+    Array.prototype.forEach.call($(id).querySelectorAll('button'), function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.v === value));
+      b.disabled = !!(disabledValues && disabledValues.indexOf(b.dataset.v) >= 0);
+    });
+  }
+  function niceStep(max) {
+    var steps = [1, 2, 5, 10, 20, 25, 50, 100];
+    for (var i = 0; i < steps.length; i++) if (max / steps[i] <= 4) return steps[i];
+    return 100;
+  }
+  function fmt(v) { return state.unit === 'pct' ? (Math.round(v * 10) / 10).toFixed(0) + '%' : String(v); }
+
+  function normalizeGroups() {
+    var cats = ITEMS[state.item].cats;
+    var binary = cats.length === 2;
+    if (binary) state.mode = 'two';
+    if (cats.indexOf(state.left) < 0) state.left = cats[0];
+    if (state.mode === 'two' && (cats.indexOf(state.right) < 0 || state.right === state.left)) {
+      state.right = cats.filter(function (c) { return c !== state.left; })[0];
+    }
+    fill($('left'), cats.map(function (c) { return [c, c]; }), state.left);
+    if (state.mode === 'rest') {
+      fill($('right'), [['__rest', '나머지 전체']], '__rest');
+      $('right').disabled = true;
+    } else {
+      fill($('right'), cats.filter(function (c) { return c !== state.left; }).map(function (c) { return [c, c]; }), state.right);
+      $('right').disabled = binary;
+    }
+    $('left').disabled = binary && false;
+    setSeg('mode', state.mode, binary ? ['rest'] : null);
+  }
+
+  function render() {
+    normalizeGroups();
+    setSeg('unit', state.unit);
+    setSeg('status', state.status);
+    var axis = AXES[state.axis];
+    $('axisName').textContent = axis.label;
+    var recs = RECORDS.filter(function (r) { return state.status === 'all' || r.done; });
+    var inLeft = function (r) { return r[state.item] === state.left; };
+    var inRight = state.mode === 'rest' ? function (r) { return r[state.item] !== state.left; } : function (r) { return r[state.item] === state.right; };
+    var rightName = state.mode === 'rest' ? state.left + ' 외 나머지' : state.right;
+    var L = recs.filter(inLeft), R = recs.filter(inRight);
+    var cl = axis.cats.map(function (c) { return L.filter(function (r) { return r[state.axis] === c; }).length; });
+    var cr = axis.cats.map(function (c) { return R.filter(function (r) { return r[state.axis] === c; }).length; });
+    var vl = cl.map(function (v) { return state.unit === 'pct' ? (L.length ? v / L.length * 100 : 0) : v; });
+    var vr = cr.map(function (v) { return state.unit === 'pct' ? (R.length ? v / R.length * 100 : 0) : v; });
+    var rawMax = Math.max(1, Math.max.apply(null, vl.concat(vr)));
+    var step = niceStep(rawMax);
+    var top = Math.ceil(rawMax / step) * step;
+
+    var chart = $('chart');
+    chart.innerHTML = '';
+    axis.cats.forEach(function (c, i) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'row' + (state.sel && state.sel !== c ? ' dim' : '');
+      row.setAttribute('role', 'listitem');
+      row.setAttribute('aria-pressed', String(state.sel === c));
+      row.setAttribute('aria-label', axis.label + ' ' + c + ': ' + state.left + ' ' + cl[i] + '건 ' + fmtPct(cl[i], L.length) + ', ' + rightName + ' ' + cr[i] + '건 ' + fmtPct(cr[i], R.length));
+      row.innerHTML =
+        '<span class="side l"><span class="bar l" style="width:' + (vl[i] / top * 100).toFixed(2) + '%"></span><span class="val">' + fmt(vl[i]) + '</span></span>' +
+        '<span class="mid">' + c + '</span>' +
+        '<span class="side r"><span class="bar r" style="width:' + (vr[i] / top * 100).toFixed(2) + '%"></span><span class="val">' + fmt(vr[i]) + '</span></span>';
+      row.addEventListener('click', function () { state.sel = state.sel === c ? null : c; render(); });
+      chart.appendChild(row);
+    });
+
+    var ticks = [];
+    for (var t = 0; t <= top + 1e-9; t += step) ticks.push(t);
+    $('ticksL').innerHTML = ticks.map(function (t) { return '<span style="left:' + (100 - t / top * 100).toFixed(2) + '%">' + t + '</span>'; }).join('');
+    $('ticksR').innerHTML = ticks.map(function (t) { return '<span style="left:' + (t / top * 100).toFixed(2) + '%">' + t + '</span>'; }).join('');
+    $('unitLabel').textContent = state.unit === 'pct' ? '단위 %' : '단위 건';
+
+    $('foot').innerHTML = '<span class="l">' + state.left + ' · n=' + L.length + '</span><span></span><span>' + rightName + ' · n=' + R.length + '</span>';
+    var small = [[state.left, L.length], [rightName, R.length]].filter(function (g) { return g[1] < 20; });
+    $('warn').hidden = !small.length;
+    $('warn').textContent = small.length ? small.map(function (g) { return g[0] + '(n=' + g[1] + ')'; }).join(', ') + '은 사고가 20건 미만이라 비율이 크게 흔들릴 수 있어요. 건수를 함께 보세요.' : '';
+
+    // Readouts always compare within-group shares, whatever unit the bars use.
+    var pl = cl.map(function (v) { return L.length ? v / L.length * 100 : 0; });
+    var pr = cr.map(function (v) { return R.length ? v / R.length * 100 : 0; });
+    var gi = 0;
+    pl.forEach(function (_, i) { if (Math.abs(pl[i] - pr[i]) > Math.abs(pl[gi] - pr[gi])) gi = i; });
+    var gap = pl[gi] - pr[gi];
+    $('gapBig').textContent = axis.cats[gi] + ' ' + (gap >= 0 ? '+' : '−') + Math.abs(gap).toFixed(0) + '%p';
+    $('gapBody').textContent = state.left + ' ' + pl[gi].toFixed(0) + '% · ' + rightName + ' ' + pr[gi].toFixed(0) + '% (그룹 내 비율 기준)';
+
+    if (state.sel) {
+      var si = axis.cats.indexOf(state.sel);
+      $('selTitle').textContent = axis.label + ' · ' + state.sel;
+      var d = pl[si] - pr[si];
+      $('selBody').textContent = state.left + ' ' + cl[si] + '건(' + pl[si].toFixed(0) + '%) · ' + rightName + ' ' + cr[si] + '건(' + pr[si].toFixed(0) + '%) · 차이 ' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(0) + '%p';
+    } else {
+      $('selTitle').textContent = '선택한 구간';
+      $('selBody').textContent = '막대를 누르면 두 그룹의 건수와 비율이 여기에 나와요.';
+    }
+    try { localStorage.setItem('avat-butterfly', JSON.stringify({ axis: state.axis, item: state.item, unit: state.unit })); } catch (e) { /* storage unavailable */ }
+  }
+  function fmtPct(v, n) { return n ? Math.round(v / n * 100) + '%' : '0%'; }
+
+  function bindSeg(id, key) {
+    $(id).addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b || b.disabled) return;
+      state[key] = b.dataset.v;
+      render();
+    });
+  }
+  bindSeg('mode', 'mode');
+  bindSeg('unit', 'unit');
+  bindSeg('status', 'status');
+  $('axis').addEventListener('change', function (e) { state.axis = e.target.value; state.sel = null; render(); });
+  $('groupItem').addEventListener('change', function (e) {
+    state.item = e.target.value; state.sel = null;
+    var cats = ITEMS[state.item].cats;
+    state.left = cats[0]; state.right = cats[1];
+    if (cats.length === 2) state.mode = 'two';
+    render();
+  });
+  $('left').addEventListener('change', function (e) { state.left = e.target.value; state.sel = null; render(); });
+  $('right').addEventListener('change', function (e) { state.right = e.target.value; state.sel = null; render(); });
+  render();
+})();
+</script>

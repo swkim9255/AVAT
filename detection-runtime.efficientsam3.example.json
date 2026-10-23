@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "backend": "efficientsam3",
+  "python": ".venv-efficient-sam3/Scripts/python.exe",
+  "model": "runtime/models/efficientsam3-tv-m",
+  "device": "auto",
+  "offline": true
+}

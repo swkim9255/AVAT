@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from investigator.form_definition import FormDefinition
+from investigator.object_detection import VideoObjects, normalize_objects_by_video
 from investigator.schema import (
     INJURY_GRADE_RULES,
     INVALID_FORMAT_MESSAGE,
@@ -54,6 +55,8 @@ class InvestigationCase:
     active_video_index: int = 0
     markers_by_video: dict[str, dict[str, Any]] = field(default_factory=dict)
     rotation_by_video: dict[str, int] = field(default_factory=dict)
+    # Detected/annotated objects per video path; optional in the stored payload.
+    objects_by_video: dict[str, dict[str, Any]] = field(default_factory=dict)
     status: str = "draft"
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -173,6 +176,12 @@ class InvestigationCase:
             if degrees in {90, 180, 270} and normalized_path.casefold() in known_videos:
                 normalized_rotations[normalized_path] = degrees
         self.rotation_by_video = normalized_rotations
+        video_paths = {str(Path(path)).casefold(): path for path in self.videos}
+        self.objects_by_video = {
+            video_paths[str(Path(video_path)).casefold()]: payload
+            for video_path, payload in normalize_objects_by_video(self.objects_by_video).items()
+            if str(Path(video_path)).casefold() in known_videos
+        }
         if self.status not in {"draft", "completed"}:
             self.status = "draft"
         if self.form_definition:
@@ -207,6 +216,45 @@ class InvestigationCase:
             self.marker_key,
             {"trigger_frame": None, "collision_frames": []},
         )
+
+    def video_objects(self) -> VideoObjects:
+        """Objects of the active video (a copy; store changes with set_video_objects)."""
+
+        path = self.active_video
+        return self.objects_for_video(path) if path else VideoObjects()
+
+    def set_video_objects(self, objects: VideoObjects, *, video_path: str | None = None) -> None:
+        path = video_path or self.active_video
+        if path is None:
+            raise ValueError("영상이 선택되지 않아 객체를 저장할 수 없습니다.")
+        path_key = str(Path(path)).casefold()
+        key = next((item for item in self.videos if str(Path(item)).casefold() == path_key), None)
+        if key is None:
+            raise ValueError("사고에 연결되지 않은 영상입니다.")
+        # Validate/copy before touching live data so invalid caller-created
+        # objects cannot corrupt a project or partially change its workflow.
+        payload = objects.to_dict()
+        validated = VideoObjects.from_dict(payload)
+        if validated.is_empty():
+            if key not in self.objects_by_video:
+                return
+            self.objects_by_video.pop(key, None)
+        else:
+            if self.objects_by_video.get(key) == payload:
+                return
+            self.objects_by_video[key] = payload
+        # Detector annotations are optional, separate from investigation values.
+        # Only an explicit form reflection should reopen a completed case.
+        self.updated_at = utc_now()
+
+    def objects_for_video(self, path: str) -> VideoObjects:
+        path_key = str(Path(path)).casefold()
+        key = next(
+            (item for item in self.objects_by_video if str(Path(item)).casefold() == path_key),
+            None,
+        )
+        raw = self.objects_by_video.get(key) if key is not None else None
+        return VideoObjects.from_dict(raw) if raw else VideoObjects()
 
     @property
     def trigger_frame(self) -> int | None:
@@ -394,11 +442,15 @@ class InvestigationCase:
         for rotation_key in list(self.rotation_by_video):
             if str(Path(rotation_key).expanduser().resolve()).casefold() == removed_key:
                 self.rotation_by_video.pop(rotation_key, None)
+        for objects_key in list(self.objects_by_video):
+            if str(Path(objects_key).expanduser().resolve()).casefold() == removed_key:
+                self.objects_by_video.pop(objects_key, None)
 
         if not self.videos:
             self.active_video_index = 0
             self.markers_by_video.clear()
             self.rotation_by_video.clear()
+            self.objects_by_video.clear()
         elif index < previous_active:
             self.active_video_index = previous_active - 1
         elif index == previous_active:
@@ -448,7 +500,7 @@ class InvestigationCase:
         self.updated_at = self.completed_at
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "uid": self.uid,
             "values": normalize_json_value(self.values),
             "videos": list(self.videos),
@@ -462,6 +514,10 @@ class InvestigationCase:
                 "completed_at": self.completed_at,
             },
         }
+        if self.objects_by_video:
+            # Optional key: cases without objects keep byte-identical payloads.
+            result["objects_by_video"] = normalize_json_value(self.objects_by_video)
+        return result
 
     @classmethod
     def from_dict(
@@ -472,6 +528,7 @@ class InvestigationCase:
         raw_videos = data.get("videos", [])
         raw_markers = data.get("markers_by_video", {})
         raw_rotations = data.get("rotation_by_video", {})
+        raw_objects = data.get("objects_by_video", {})
         if not isinstance(raw_workflow, dict):
             raise TypeError("workflow 항목은 JSON 객체여야 합니다.")
         if not isinstance(raw_values, dict):
@@ -484,6 +541,8 @@ class InvestigationCase:
             raise TypeError("markers_by_video 항목은 JSON 객체여야 합니다.")
         if not isinstance(raw_rotations, dict):
             raise TypeError("rotation_by_video 항목은 JSON 객체여야 합니다.")
+        if not isinstance(raw_objects, dict):
+            raise TypeError("objects_by_video 항목은 JSON 객체여야 합니다.")
 
         workflow = raw_workflow
         videos = list(raw_videos)
@@ -504,6 +563,7 @@ class InvestigationCase:
             active_video_index=active_video_index,
             markers_by_video=markers_by_video,
             rotation_by_video=dict(raw_rotations),
+            objects_by_video=dict(raw_objects),
             status=str(workflow.get("status") or "draft"),
             created_at=str(workflow.get("created_at") or utc_now()),
             updated_at=str(workflow.get("updated_at") or utc_now()),

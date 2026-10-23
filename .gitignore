@@ -1,21 +1,38 @@
+# Python bytecode and package metadata
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# Test and lint caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.cache/
 .coverage
 htmlcov/
+
+# Virtual environments and build output
 .venv/
 .venv-*/
+venv/
 dist/
 build/
-workspace/
-avat_ai/
-tests/
-*.tmp
+node_modules/
+*.whl
 
-# Put all local tests, tools, samples, mockups, reports and patches here.
-/local_dev/
+# 폐쇄망 반입용 패키지와 배포 묶음은 소스와 별도로 보관
+/wheelhouse/
+/offline_bundle/
+
+# Runtime workspace and temporary files
+workspace/
+*.tmp
+.tmp/
+.DS_Store
+Thumbs.db
+
+# Office 문서를 열 때 생성되는 임시 잠금 파일
+~$*
 
 # Local investigation databases, backups, and SQLite sidecar files
 *.db
@@ -30,3 +47,96 @@ investigations.json
 
 # Interrupted video import copies
 .avat-import-*.part
+
+# Model weights and exported inference engines (keep model-definition source code)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.plan
+*.tflite
+*.torchscript
+*.gguf
+*.ggml
+*.bin
+*.h5
+*.hdf5
+*.weights
+
+# Video inputs, array datasets, and serialized caches
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4v
+*.wmv
+*.mpg
+*.mpeg
+*.mts
+*.m2ts
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# Local environment, credentials, and private keys; templates remain publishable
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Machine-specific detector configuration; share example configurations only
+/detection-runtime*.json
+!/detection-runtime*.example.json
+
+# Downloaded runtimes/models, not runtime/tools or other project scripts
+/runtime/compat/
+/runtime/models/
+/runtime/checkpoints/
+/runtime/tokenizers/
+/runtime/yoloe-initial-library-settings/
+/runtime/*.json
+
+# Separately cloned upstream repositories; do not accidentally add Git links
+/runtime/efficientsam3/
+/avat_ai/third_party/BoT-SORT/
+/avat_ai/third_party/BoostTrack/
+
+# Generated detector settings, predictions, and export artifacts
+/Ultralytics/
+/outputs/
+/runs/
+/runtime/workbooks/**/*.xlsx
+/runtime/workbooks/**/*.png
+/runtime/workbooks/**/*.ndjson
+/runtime/workbooks/**/expected.json
+
+# Keep development source/tests/mockups/patches, but not private data or backups
+/local_dev/samples/
+/local_dev/backups/
+/local_dev/references/
+/local_dev/*.docx
+
+# Reports are generated; retain any executable tools stored alongside them
+/local_dev/reports/**
+!/local_dev/reports/**/
+!/local_dev/reports/**/*.py
+!/local_dev/reports/**/*.ps1
+!/local_dev/reports/**/*.sh
+!/local_dev/reports/**/*.cmd
+!/local_dev/reports/**/*.bat
+!/local_dev/reports/**/*.js
+!/local_dev/reports/**/*.mjs
+!/local_dev/reports/**/*.cjs
+!/local_dev/reports/**/*.ts
+!/local_dev/reports/**/*.tsx
+!/local_dev/reports/**/*.jsx

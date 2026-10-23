@@ -1,0 +1,17 @@
+diff --git a/investigator/video_controller.py b/investigator/video_controller.py
+--- a/investigator/video_controller.py
++++ b/investigator/video_controller.py
+@@ -67,7 +67,12 @@ class VideoController(QObject):
+         capture_factory: Callable[[str], CaptureProtocol] | None = None,
+     ) -> None:
+         super().__init__(parent)
+-        self._capture_factory = capture_factory or cv2.VideoCapture
++        # Decoder thread count is an FFmpeg-only, open-time setting.
++        self._capture_factory = capture_factory or (
++            lambda path: cv2.VideoCapture(
++                path, cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, 1]
++            )
++        )
+         self._capture: CaptureProtocol | None = None
+         self._metadata: VideoMetadata | None = None
+         self._state = PlaybackState.EMPTY

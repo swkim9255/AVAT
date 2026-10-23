@@ -39,13 +39,12 @@ STAT_BAR = "#8CAEE3"
 STAT_BAR_DIM = "#CFDCEF"
 STAT_MISSING = "#C3C9D2"
 VIDEO_BACKGROUND = "#111827"
+INVESTIGATION_FONT_SIZE = 13
 
 _ASSET_DIR = Path(__file__).resolve().parent / "assets" / "material_symbols"
 _FONT_PATH = _ASSET_DIR / "MaterialSymbolsOutlined[FILL,GRAD,opsz,wght].ttf"
 _CODEPOINTS_PATH = _ASSET_DIR / "MaterialSymbolsOutlined[FILL,GRAD,opsz,wght].codepoints"
-_UI_FONT_PATH = Path(__file__).resolve().parent / "assets" / "fonts" / "NotoSansKR-VF.ttf"
 _FONT_FAMILY: str | None = None
-_UI_FONT_FAMILY: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -73,14 +72,8 @@ def material_font(size: int) -> QFont:
 
 
 def ui_font_family() -> str:
-    global _UI_FONT_FAMILY
-    if _UI_FONT_FAMILY is None:
-        font_id = QFontDatabase.addApplicationFont(str(_UI_FONT_PATH))
-        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
-        if not families:
-            raise RuntimeError(f"한글 UI 글꼴을 불러올 수 없습니다: {_UI_FONT_PATH}")
-        _UI_FONT_FAMILY = families[0]
-    return _UI_FONT_FAMILY
+    """Use Windows' Malgun Gothic for UI text, leaving symbol icons separate."""
+    return "Malgun Gothic"
 
 
 class _MaterialIconEngine(QIconEngine):
@@ -128,9 +121,12 @@ def apply_theme(app: QApplication) -> None:
 
     ui_family = ui_font_family()
     app_font = QFont(ui_family)
-    # Keep compact native item-view metrics before stylesheet polish; visible
-    # controls use the prototype's 14 px text size below.
+    # Keep native item-view metrics and general UI text at the same 13 px size.
     app_font.setPixelSize(13)
+    # Preserve Korean counters/strokes at fractional display scales instead
+    # of distorting glyph outlines to snap every stroke horizontally.
+    app_font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
+    app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(app_font)
     palette = QPalette(app.palette())
     colors = {
@@ -158,8 +154,11 @@ def apply_theme(app: QApplication) -> None:
         f"""
         * {{
             font-family: "{ui_family}";
-            font-size: 14px;
+            font-size: 13px;
             color: {TEXT};
+        }}
+        QWidget[investigationField="true"], QWidget[investigationField="true"] * {{
+            font-size: {INVESTIGATION_FONT_SIZE}px;
         }}
         QMainWindow, QWidget#appRoot {{ background: {BACKGROUND}; }}
         QDialog {{ background: {SURFACE}; }}
@@ -347,6 +346,18 @@ def apply_theme(app: QApplication) -> None:
         QSlider::handle:horizontal {{ background: {PRIMARY}; border: 3px solid white; width: 15px; margin: -7px 0; border-radius: 9px; }}
         QSplitter::handle {{ background: {BACKGROUND}; }}
         QSplitter::handle:horizontal {{ width: 6px; }}
+        QSplitter#mainSplitter::handle:horizontal {{
+            width: 8px; background: {CONTROL_BORDER};
+            border-left: 2px solid {BACKGROUND}; border-right: 2px solid {BACKGROUND};
+        }}
+        QSplitter#mainSplitter::handle:horizontal:hover {{ background: {STAT_BAR}; }}
+        QSplitter#mainSplitter::handle:horizontal:pressed {{ background: {PRIMARY}; }}
+        QSplitter#videoToolsSplitter::handle:vertical {{
+            height: 8px; background: {CONTROL_BORDER};
+            border-top: 2px solid {BACKGROUND}; border-bottom: 2px solid {BACKGROUND};
+        }}
+        QSplitter#videoToolsSplitter::handle:vertical:hover {{ background: {STAT_BAR}; }}
+        QSplitter#videoToolsSplitter::handle:vertical:pressed {{ background: {PRIMARY}; }}
         QMenuBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; padding: 3px 10px; }}
         QMenuBar::item {{ background: transparent; padding: 5px 10px; border-radius: 4px; font-size: 13px; }}
         QMenuBar::item:selected {{ background: {SUBTLE}; }}

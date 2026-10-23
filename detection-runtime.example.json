@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "backend": "yoloe",
+  "python": ".venv-yoloe/Scripts/python.exe",
+  "model": "runtime/models/yoloe-11l/yoloe-11l-seg.pt",
+  "device": "auto",
+  "offline": true
+}

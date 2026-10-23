@@ -13,13 +13,20 @@ from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from investigator.case_numbering import REPORT_ACCIDENT_NUMBER_COLUMN, build_case_number_map
+from investigator.csv_specification import csv_export_headers
 from investigator.form_definition import FormDefinition
 from investigator.models import SCHEMA_VERSION, InvestigationCase
+from investigator.speed_csv import speed_csv_path, write_speed_csv
 
 DATABASE_FILENAME = "investigations.db"
 LEGACY_DATABASE_FILENAME = "investigations.json"
 DATABASE_VERSION = 1
+# The physical SQL layout is unchanged. This payload version prevents older
+# AVAT builds from silently discarding independent detector annotations.
+OBJECT_WORKSPACE_SCHEMA_VERSION = 3
 DATABASE_APPLICATION_ID = 0x41564154  # AVAT, not an arbitrary SQLite database.
 _UNSET = object()
 _REQUIRED_METADATA = {
@@ -106,11 +113,11 @@ class CaseRepository:
         list[InvestigationCase], FormDefinition, FormDefinition, set[str], str | None
     ]:
         """Validate legacy and database data through exactly the same model path."""
-        if not isinstance(data, dict) or data.get("schema_version") not in {SCHEMA_VERSION, 2}:
+        if not isinstance(data, dict) or data.get("schema_version") not in {SCHEMA_VERSION, 2, OBJECT_WORKSPACE_SCHEMA_VERSION}:
             raise WorkspaceError("지원하지 않는 조사 데이터 형식입니다.")
         raw_cases = data.get("cases")
         try:
-            if data.get("schema_version") == 2 and not isinstance(
+            if data.get("schema_version") in {2, OBJECT_WORKSPACE_SCHEMA_VERSION} and not isinstance(
                 data.get("form_definition"), dict
             ):
                 raise ValueError("사용자 정의 조사 양식이 누락되었습니다.")
@@ -317,7 +324,10 @@ class CaseRepository:
     ) -> None:
         """Build and verify one standalone file before atomically activating it."""
         metadata = {
-            "schema_version": SCHEMA_VERSION if definition == FormDefinition.default() else 2,
+            "schema_version": (
+                OBJECT_WORKSPACE_SCHEMA_VERSION if any(case.objects_by_video for case in cases)
+                else SCHEMA_VERSION if definition == FormDefinition.default() else 2
+            ),
             "form_definition": definition.to_dict(),
             "initial_form_definition": initial_definition.to_dict(),
             "active_case_uid": active,
@@ -473,6 +483,10 @@ class CaseRepository:
         form_definition: FormDefinition | None = None,
     ) -> None:
         self._ensure_database()
+        try:
+            self._backup_before_object_upgrade(upserts, form_definition)
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+            raise WorkspaceError("객체 데이터 형식 변경 전 백업을 만들지 못했습니다. 기존 데이터는 변경하지 않았습니다.") from exc
         normalized_exclusions = (
             None if auto_import_exclusions is None
             else self._normalize_exclusions(auto_import_exclusions)
@@ -559,13 +573,45 @@ class CaseRepository:
                 if definition_changed:
                     metadata["form_definition"] = definition.to_dict()
                     self._write_metadata(connection, "form_definition", definition.to_dict())
-                    self._write_metadata(connection, "schema_version", SCHEMA_VERSION if definition == FormDefinition.default() else 2)
+                version = max(
+                    metadata.get("schema_version", SCHEMA_VERSION),
+                    OBJECT_WORKSPACE_SCHEMA_VERSION
+                    if any(case.objects_by_video for case in changed_by_uid.values())
+                    else SCHEMA_VERSION if definition == FormDefinition.default() else 2,
+                )
+                self._write_metadata(connection, "schema_version", version)
                 # Initial settings are immutable across ordinary form edits.
             self._adopt_metadata(
                 [], definition, initial_definition, stored_exclusions, stored_active,
             )
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise WorkspaceError(f"조사 데이터를 저장할 수 없습니다: {self.database_path}\n{exc}") from exc
+
+    def _backup_before_object_upgrade(
+        self, upserts: list[InvestigationCase], definition: FormDefinition | None,
+    ) -> None:
+        """Keep a verified pre-upgrade snapshot without rewriting cases on load."""
+        if not any(case.objects_by_video for case in upserts) and definition is None:
+            return
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM workspace_metadata WHERE key='schema_version'"
+            ).fetchone()
+            version = json.loads(row[0]) if row else SCHEMA_VERSION
+            if version >= OBJECT_WORKSPACE_SCHEMA_VERSION:
+                return
+            upgrading = any(case.objects_by_video for case in upserts)
+            if not upgrading and definition is not None:
+                old = connection.execute(
+                    "SELECT value FROM workspace_metadata WHERE key='form_definition'"
+                ).fetchone()
+                if old and json.loads(old[0]) != definition.to_dict():
+                    upgrading = any(
+                        json.loads(row[0]).get("objects_by_video")
+                        for row in connection.execute("SELECT payload FROM cases")
+                    )
+        if upgrading:
+            self.backup(self.workspace / ".backups" / f"investigations.pre-object-v2-{uuid4().hex}.db")
 
     def active_case_uid(self) -> str | None:
         """Return cached selection; only old callers before load incur a lookup."""
@@ -623,25 +669,20 @@ class CaseRepository:
         include_specification: bool = False,
     ) -> Path:
         destination = Path(path).expanduser().resolve()
-        metadata_headers = [
-            "case_id",
-            "workflow_status",
-            "video_files",
-            "active_video_file",
-            "trigger_frame",
-            "collision_frames",
-            "video_markers",
-        ]
-        headers = metadata_headers + self.form_definition.csv_headers()
+        headers = csv_export_headers(self.form_definition)
+        report_numbers = build_case_number_map(cases)
         temporary_path: Path | None = None
+        speed_temporary_path: Path | None = None
         specification_temporary_path: Path | None = None
+        speed_destination = speed_csv_path(destination)
         specification_destination = data_specification_path(destination)
         csv_saved = False
+        speed_saved = False
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if include_specification:
-                # Package the original workbook so exports also work after installation,
-                # independently of the current directory or the source checkout.
+                # Always the packaged original, byte for byte: form edits change
+                # the CSV columns but never the specification workbook.
                 content = files("investigator").joinpath(
                     "assets", DATA_SPECIFICATION_FILENAME
                 ).read_bytes()
@@ -696,30 +737,65 @@ class CaseRepository:
                             else None
                         ),
                         **self.form_definition.csv_row(case.values),
+                        REPORT_ACCIDENT_NUMBER_COLUMN: report_numbers.get(case.uid),
                     }
                     writer.writerow({header: _safe_csv_text(row.get(header)) for header in headers})
                 handle.flush()
                 os.fsync(handle.fileno())
+            # Stage every output before replacing any existing export. In
+            # particular, an I/O failure while generating speed analysis must
+            # not discard the user's previous investigation CSV.
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8-sig",
+                newline="",
+                prefix=f".{speed_destination.name}.",
+                suffix=".tmp",
+                dir=destination.parent,
+                delete=False,
+            ) as speed_handle:
+                speed_temporary_path = Path(speed_handle.name)
+                write_speed_csv(speed_handle, cases, report_numbers=report_numbers)
+                speed_handle.flush()
+                os.fsync(speed_handle.fileno())
             os.replace(temporary_path, destination)
             csv_saved = True
+            os.replace(speed_temporary_path, speed_destination)
+            speed_saved = True
             if specification_temporary_path is not None:
                 os.replace(specification_temporary_path, specification_destination)
         except OSError as exc:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-            if specification_temporary_path is not None:
-                specification_temporary_path.unlink(missing_ok=True)
             if csv_saved:
+                if not speed_saved:
+                    pending_specification = (
+                        f"\n데이터 명세서도 저장하지 못했습니다: {specification_destination}"
+                        if include_specification else ""
+                    )
+                    raise WorkspaceError(
+                        f"CSV는 저장했습니다: {destination}\n"
+                        f"속도 분석 CSV는 저장하지 못했습니다: {speed_destination}"
+                        f"{pending_specification}\n"
+                        "내보낼 파일이 다른 프로그램에서 열려 있는지 확인해 주세요."
+                    ) from exc
                 raise WorkspaceError(
                     f"CSV는 저장했습니다: {destination}\n"
+                    f"속도 분석 CSV도 저장했습니다: {speed_destination}\n"
                     f"데이터 명세서는 저장하지 못했습니다: {specification_destination}\n"
                     "명세서가 다른 프로그램에서 열려 있는지 확인해 주세요."
                 ) from exc
             if include_specification:
                 raise WorkspaceError(
-                    f"CSV와 데이터 명세서를 내보내지 못했습니다: {destination}\n{exc}"
+                    f"CSV와 데이터 명세서를 내보내지 못했습니다: {destination}\n"
+                    f"속도 분석 CSV도 저장하지 못했습니다: {speed_destination}\n{exc}"
                 ) from exc
-            raise WorkspaceError(f"CSV 파일을 저장할 수 없습니다: {destination}") from exc
+            raise WorkspaceError(
+                f"CSV 파일을 저장할 수 없습니다: {destination}\n"
+                f"속도 분석 CSV도 저장하지 못했습니다: {speed_destination}\n{exc}"
+            ) from exc
+        finally:
+            self._remove_temporary(temporary_path)
+            self._remove_temporary(speed_temporary_path)
+            self._remove_temporary(specification_temporary_path)
         return destination
 
 

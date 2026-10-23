@@ -46,6 +46,7 @@ class FieldEditor(QWidget):
 
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("investigationField", True)
         self.spec = spec
         policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         policy.setHeightForWidth(True)
@@ -129,6 +130,7 @@ class FieldEditor(QWidget):
             combo = ScrollSafeComboBox(self)
             combo.setObjectName(f"field_{spec.key}")
             combo.setEditable(spec.editable)
+            combo.view().setProperty("investigationField", True)
             combo.addItem(spec.placeholder or "선택", None)
             for choice in spec.choices:
                 combo.addItem(choice.label, choice.value)
@@ -138,6 +140,9 @@ class FieldEditor(QWidget):
                 completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
                 completer.setFilterMode(Qt.MatchFlag.MatchContains)
                 completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+                # QCompleter's popup is a separate top-level widget: it does
+                # not inherit the investigation form's scoped text size.
+                completer.popup().setProperty("investigationField", True)
                 combo.setCompleter(completer)
             combo.currentTextChanged.connect(self._combo_changed)
             return combo
@@ -394,13 +399,18 @@ class FieldEditor(QWidget):
             if self.spec.kind is FieldKind.SINGLE
             else getattr(self, "line_edit", self.control)
         )
-        target.setProperty("invalid", bool(message))
+        invalid = bool(message)
+        changed = target.property("invalid") != invalid
         if self.spec.key == "incident_day" and not message:
             target.setToolTip("사고일자를 선택하거나 입력하면 자동으로 계산됩니다.")
         else:
             target.setToolTip(message or "")
-        target.style().unpolish(target)
-        target.style().polish(target)
+        if changed:
+            target.setProperty("invalid", invalid)
+            target.style().unpolish(target)
+            target.style().polish(target)
+            target.updateGeometry()
+            target.update()
 
     def set_missing(self, missing: bool) -> None:
         self.required_mark.setVisible(missing)

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
+from investigator.case_numbering import REPORT_ACCIDENT_NUMBER_COLUMN
 from investigator.schema import (
     ALL_FIELDS,
     FIELD_BY_KEY,
@@ -17,7 +18,6 @@ from investigator.schema import (
     FieldKind,
     FieldSpec,
     SectionSpec,
-    csv_headers,
     is_blank,
     missing_questions,
     validation_errors,
@@ -25,6 +25,7 @@ from investigator.schema import (
 )
 
 METADATA_COLUMNS = {
+    REPORT_ACCIDENT_NUMBER_COLUMN,
     "case_id",
     "workflow_status",
     "video_files",
@@ -109,6 +110,8 @@ def field_record(spec: FieldSpec) -> dict[str, Any]:
 @dataclass
 class FormDefinition:
     tabs: list[dict[str, Any]]
+    # Read legacy workspaces without letting their historical export order
+    # override the live form. to_dict() writes the current order for old readers.
     csv_column_order: list[str] = field(default_factory=list, compare=False)
 
     @classmethod
@@ -176,8 +179,6 @@ class FormDefinition:
         if raw["version"] < 5:
             result._restore_automatic_adult_expansion()
         if raw["version"] == 1:
-            # Capture CSV order before changing the presentation order.
-            result.csv_column_order = result.csv_headers()
             result._initialize_layout()
         elif raw["version"] == 2:
             for tab in result.tabs:
@@ -251,7 +252,6 @@ class FormDefinition:
     def restored(self, initial: FormDefinition) -> FormDefinition:
         """Restore saved initial settings while keeping added fields and CSV links."""
         result = FormDefinition.from_dict(initial.to_dict())
-        result.csv_column_order = self.csv_headers()
         initial_tabs = {tab["key"]: tab for tab in result.tabs}
         for current_tab in self.tabs:
             target_tab = initial_tabs.get(current_tab["key"])
@@ -553,42 +553,22 @@ class FormDefinition:
         return next((f.label for f in self.fields if f.key == key), field_label(key))
 
     def csv_headers(self) -> list[str]:
-        # Historical names identify the same choice, rather than additional
-        # output columns. Re-export using the current individual-column name.
-        records = {record["key"]: record for record in self.records()}
-        renamed: dict[str, str] = {}
-        for key, record in records.items():
-            base = FIELD_BY_KEY.get(key)
-            base_choices = {c.value: c for c in base.choices} if base else {}
-            for choice in record["choices"]:
-                current = choice.get("csv_column")
-                if not current:
-                    continue
-                original = base_choices.get(choice.get("id", choice["value"]))
-                for old in [original.csv_column if original else None,
-                            *choice.get("csv_aliases", [])]:
-                    if old:
-                        renamed[old] = current
-        result = list(dict.fromkeys(renamed.get(column, column) for column in csv_headers()))
-        active = set(result)
-        for record in self.records():
-            active.update(column for column in [
-                record["csv_column"], *record.get("aliases", []),
-                *(c.get("csv_column") for c in record["choices"]),
-            ] if column)
-        for column in self.csv_column_order:
-            column = renamed.get(column, column)
-            if column in active and column not in result:
-                result.append(column)
-        for record in self.records():
+        """Export only live names, in the current tab/field/choice order.
+
+        Historical aliases and csv_column_order remain readable for old saved
+        forms, but must not resurrect deleted/renamed columns or override the
+        editor's order. Stable field/choice identities still migrate old values.
+        The date and weekday have no special ordering exception.
+        """
+        return list(dict.fromkeys(
+            column
+            for record in self.records()
             for column in [
-                record["csv_column"],
-                *record.get("aliases", []),
-                *(c.get("csv_column") for c in record["choices"]),
-            ]:
-                if column and column not in result:
-                    result.append(column)
-        return result
+                record.get("csv_column"),
+                *(choice.get("csv_column") for choice in record["choices"]),
+            ]
+            if column
+        ))
 
     def csv_row(self, values: dict[str, Any]) -> dict[str, str]:
         values = self.migrate_values(values)

@@ -1,0 +1,1549 @@
+diff --git a/investigator/main_window.py b/investigator/main_window.py
+index 3f43d8e..223259d 100644
+--- a/investigator/main_window.py
++++ b/investigator/main_window.py
+@@ -35,6 +35,7 @@ from investigator.schema import (
+     INVALID_FORMAT_MESSAGE,
+     MISSING_VALUE_MESSAGE,
+ )
++from investigator.speed_estimation import SpeedEstimate, estimate_speed
+ from investigator.storage import CaseRepository, WorkspaceError, data_specification_path
+ from investigator.storage_worker import StorageWorker
+ from investigator.theme import PRIMARY, material_icon
+@@ -51,6 +52,7 @@ from investigator.widgets.csv_export_dialog import CsvExportDialog
+ from investigator.widgets.form_designer import FormDesigner
+ from investigator.widgets.form_panel import InvestigationPanel
+ from investigator.widgets.playback_panel import PlaybackPanel
++from investigator.widgets.speed_panel import SpeedPanel
+ from investigator.widgets.video_import_dialog import VideoImportDialog
+ from investigator.widgets.video_player import VideoPlayerPanel
+ 
+@@ -99,6 +101,7 @@ class MainWindow(QMainWindow):
+         self.video_player = VideoPlayerPanel(self)
+         self.investigation = InvestigationPanel(self)
+         self.playback = PlaybackPanel(self)
++        self.speed_panel = SpeedPanel(self)
+         self._build_layout()
+         self._build_menu()
+         self._connect_signals()
+@@ -235,6 +238,10 @@ class MainWindow(QMainWindow):
+         video_layout.setSpacing(1)
+         video_layout.addWidget(self.video_player, 1)
+         video_layout.addWidget(self.playback, 0)
++        self.speed_panel.setParent(self.video_workspace)
++        self.speed_panel.setMinimumHeight(260)
++        self.speed_panel.setVisible(False)
++        video_layout.addWidget(self.speed_panel, 0)
+         self.splitter.addWidget(self.video_workspace)
+         self.splitter.addWidget(self.investigation)
+         self.splitter.setStretchFactor(0, 0)
+@@ -320,6 +327,14 @@ class MainWindow(QMainWindow):
+         )
+         self.playback.trigger_requested.connect(self.set_trigger_marker)
+         self.playback.collision_requested.connect(self.set_collision_marker)
++        self.playback.speed_point_requested.connect(self.toggle_speed_point)
++        self.playback.speed_panel_toggled.connect(self.speed_panel.setVisible)
++        self.speed_panel.add_point_requested.connect(self.toggle_speed_point)
++        self.speed_panel.remove_point_requested.connect(self.remove_speed_point)
++        self.speed_panel.clear_requested.connect(self.clear_speed_points)
++        self.speed_panel.distance_changed.connect(self.set_speed_distance)
++        self.speed_panel.seek_requested.connect(self._seek_video)
++        self.speed_panel.apply_requested.connect(self.apply_speed_label)
+         self.investigation.save_requested.connect(self.save_draft)
+         self.investigation.complete_requested.connect(self.complete_case)
+         self.investigation.next_requested.connect(self.next_case)
+@@ -1425,9 +1440,7 @@ class MainWindow(QMainWindow):
+             self.case_list.set_cases(self.cases, previous_uid)
+             previous_case = self.current_case
+             if previous_case:
+-                self.playback.set_markers(
+-                    previous_case.trigger_frame, previous_case.collision_frame
+-                )
++                self._sync_markers(previous_case)
+             return
+         self.current_uid = uid
+         self._mark_case_dirty(target_case)
+@@ -1440,6 +1453,7 @@ class MainWindow(QMainWindow):
+             self.video_controller.close_video()
+             self.video_player.clear()
+             self.playback.clear_video()
++            self.speed_panel.set_data([], SpeedEstimate(), 0.0)
+             self.investigation.load_values({})
+             self.investigation.case_title.setText("사고 없음")
+             self.investigation.completion_badge.setObjectName("missingBadge")
+@@ -1451,7 +1465,7 @@ class MainWindow(QMainWindow):
+             return
+         self.investigation.load_values(case.values)
+         self._refresh_case_presentation(rebuild_list=False)
+-        self.playback.set_markers(case.trigger_frame, case.collision_frame)
++        self._sync_markers(case)
+         if open_video and not self._open_active_video():
+             self.video_controller.close_video()
+             self.video_player.clear()
+@@ -1534,7 +1548,7 @@ class MainWindow(QMainWindow):
+         removing = case.trigger_frame == frame
+         case.set_trigger(None if removing else frame)
+         self._mark_case_dirty(case)
+-        self.playback.set_markers(case.trigger_frame, case.collision_frame)
++        self._sync_markers(case)
+         self._refresh_case_presentation(rebuild_list=True)
+         if removing:
+             self.statusBar().showMessage("T 트리거 마커를 해제했습니다.", 3000)
+@@ -1549,7 +1563,7 @@ class MainWindow(QMainWindow):
+         removing = case.collision_frame == frame
+         case.set_collision(None if removing else frame)
+         self._mark_case_dirty(case)
+-        self.playback.set_markers(case.trigger_frame, case.collision_frame)
++        self._sync_markers(case)
+         self._refresh_case_presentation(rebuild_list=True)
+         if removing:
+             self.statusBar().showMessage("충돌 마커를 해제했습니다.", 3000)
+@@ -1558,6 +1572,95 @@ class MainWindow(QMainWindow):
+                 f"충돌 시점을 {frame + 1:,}번 프레임에 지정했습니다.", 3000
+             )
+ 
++    def _sync_markers(self, case: InvestigationCase | None = None, *, fps: float | None = None) -> None:
++        """Push T/C and speed points to the timeline and refresh the speed estimate."""
++
++        case = case or self.current_case
++        if case is None:
++            self.playback.set_markers(None, None, [])
++            self.speed_panel.set_data([], SpeedEstimate(), 0.0)
++            return
++        points = case.speed_points
++        self.playback.set_markers(
++            case.trigger_frame, case.collision_frame, [point.frame for point in points]
++        )
++        if fps is None:
++            fps = self.video_controller.fps if self.video_controller.is_open else 0.0
++        self.speed_panel.set_data(points, estimate_speed(points, fps, case.trigger_frame), fps)
++        self.speed_panel.set_apply_available("trigger_vehicle_speed" in self.investigation.editors)
++
++    def _show_speed_panel(self) -> None:
++        if not self.speed_panel.isVisible():
++            self.playback.speed_panel_button.setChecked(True)
++
++    def toggle_speed_point(self) -> None:
++        case = self.current_case
++        if case is None or not self.video_controller.is_open:
++            return
++        frame = self.video_controller.current_frame
++        added = case.toggle_speed_point(frame)
++        self._mark_case_dirty(case)
++        self._sync_markers(case)
++        self._refresh_case_presentation(rebuild_list=True)
++        if added:
++            self._show_speed_panel()
++            number = next(
++                index for index, point in enumerate(case.speed_points, start=1) if point.frame == frame
++            )
++            self.statusBar().showMessage(
++                f"속도 지점 {number}을 {frame + 1:,}번 프레임에 추가했습니다.", 3000
++            )
++        else:
++            self.statusBar().showMessage(f"{frame + 1:,}번 프레임의 속도 지점을 해제했습니다.", 3000)
++
++    def remove_speed_point(self, frame: int) -> None:
++        case = self.current_case
++        if case is None or all(point.frame != frame for point in case.speed_points):
++            return
++        case.toggle_speed_point(frame)
++        self._mark_case_dirty(case)
++        self._sync_markers(case)
++        self._refresh_case_presentation(rebuild_list=True)
++
++    def clear_speed_points(self) -> None:
++        case = self.current_case
++        if case is None or not case.speed_points:
++            return
++        answer = QMessageBox.question(
++            self,
++            "속도 지점 삭제",
++            f"현재 영상의 속도 지점 {len(case.speed_points)}개를 모두 삭제할까요?",
++        )
++        if answer != QMessageBox.StandardButton.Yes:
++            return
++        case.clear_speed_points()
++        self._mark_case_dirty(case)
++        self._sync_markers(case)
++        self._refresh_case_presentation(rebuild_list=True)
++
++    def set_speed_distance(self, frame: int, distance_m: float | None) -> None:
++        case = self.current_case
++        if case is None:
++            return
++        case.set_speed_distance(frame, distance_m)
++        self._mark_case_dirty(case)
++        self._sync_markers(case)
++        self._refresh_case_presentation(rebuild_list=True)
++
++    def apply_speed_label(self, label: str) -> None:
++        case = self.current_case
++        editor = self.investigation.editors.get("trigger_vehicle_speed")
++        if case is None or editor is None:
++            return
++        editor.set_value(label)
++        self._field_changed("trigger_vehicle_speed", label)
++        source_editor = self.investigation.editors.get("trigger_vehicle_speed_source")
++        if source_editor is not None and not case.values.get("trigger_vehicle_speed_source"):
++            # Only fill an empty source; never overwrite EDR or a report.
++            source_editor.set_value("사고영상")
++            self._field_changed("trigger_vehicle_speed_source", "사고영상")
++        self.statusBar().showMessage(f"차량 속도 (추정)를 {label}으로 입력했습니다.", 4000)
++
+     def save_draft(self) -> None:
+         self._save(show_message=True)
+ 
+@@ -1764,7 +1867,7 @@ class MainWindow(QMainWindow):
+         case = self._opening_case or self.current_case
+         self.video_player.set_rotation(case.video_rotation if case else 0)
+         if case:
+-            self.playback.set_markers(case.trigger_frame, case.collision_frame)
++            self._sync_markers(case, fps=metadata.fps)
+         self.statusBar().showMessage(
+             f"영상 열기 완료 · {metadata.fps:.2f} FPS · {metadata.total_frames:,} frames", 4000
+         )
+@@ -1773,6 +1876,7 @@ class MainWindow(QMainWindow):
+         self.video_player.canvas.clear()
+         self.video_player.set_rotation(0)
+         self.playback.clear_video()
++        self.speed_panel.set_data([], SpeedEstimate(), 0.0)
+ 
+     def _frame_ready(self, image, frame: int, timestamp: float) -> None:  # type: ignore[no-untyped-def]
+         del frame, timestamp
+@@ -1820,7 +1924,7 @@ class MainWindow(QMainWindow):
+         QMessageBox.information(
+             self,
+             "재생 단축키",
+-            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nCtrl+S  임시저장",
++            "Space  재생 / 일시정지\n← / →  1프레임 이동\nCtrl+← / Ctrl+→  10프레임 이동\nJ / L  1초 이동\nM  속도 지점 추가 / 해제\nCtrl+S  임시저장",
+         )
+ 
+     def keyPressEvent(self, event: QKeyEvent) -> None:
+@@ -1840,6 +1944,8 @@ class MainWindow(QMainWindow):
+             self._step_seconds(-1)
+         elif key == Qt.Key.Key_L:
+             self._step_seconds(1)
++        elif key == Qt.Key.Key_M:
++            self.toggle_speed_point()
+         else:
+             super().keyPressEvent(event)
+             return
+diff --git a/investigator/models.py b/investigator/models.py
+index 5930d6b..c089bac 100644
+--- a/investigator/models.py
++++ b/investigator/models.py
+@@ -21,6 +21,7 @@ from investigator.schema import (
+     normalize_driver_age,
+     validation_errors,
+ )
++from investigator.speed_estimation import SpeedPoint, points_from_json, points_to_json
+ 
+ SCHEMA_VERSION = 1
+ DEFAULT_INSTITUTION = "samsung"
+@@ -148,12 +149,17 @@ class InvestigationCase:
+                 collision = collisions[0] if collisions else None
+             else:
+                 collision = max(0, int(raw_collision))
+-            normalized_markers[str(marker_key)] = {
++            normalized_marker: dict[str, Any] = {
+                 "trigger_frame": trigger,
+                 # Keep the persisted plural key for schema-v1/CSV compatibility,
+                 # while normalizing every video to zero or one collision frame.
+                 "collision_frames": [] if collision is None else [collision],
+             }
++            speed_points = points_from_json(marker_value.get("speed_points"))
++            if speed_points:
++                # Optional key: files without speed points stay byte-identical.
++                normalized_marker["speed_points"] = points_to_json(speed_points)
++            normalized_markers[str(marker_key)] = normalized_marker
+         self.markers_by_video = normalized_markers
+         normalized_rotations: dict[str, int] = {}
+         known_videos = {str(Path(path)).casefold() for path in self.videos}
+@@ -216,6 +222,72 @@ class InvestigationCase:
+         collision = self.collision_frame
+         return [] if collision is None else [collision]
+ 
++    @property
++    def speed_points(self) -> list[SpeedPoint]:
++        """Speed reference points of the active video, ordered by frame."""
++
++        return points_from_json(self._current_markers().get("speed_points"))
++
++    def _store_speed_points(self, points: list[SpeedPoint]) -> None:
++        marker = self._current_markers()
++        marker["trigger_frame"] = marker.get("trigger_frame")
++        marker["collision_frames"] = list(marker.get("collision_frames", []))[:1]
++        if points:
++            marker["speed_points"] = points_to_json(points)
++        else:
++            marker.pop("speed_points", None)
++        self.markers_by_video[self.marker_key] = marker
++        self.mark_edited()
++
++    def toggle_speed_point(self, frame: int) -> bool:
++        """Add a point at ``frame`` or remove the one already there.
++
++        Returns True when a point was added. A new point inherits the distance
++        of the previous segment, since reference features are usually evenly
++        spaced (lane dashes, crosswalk stripes).
++        """
++
++        frame = max(0, int(frame))
++        points = self.speed_points
++        earlier = [point for point in points if point.frame < frame]
++        later = [point for point in points if point.frame > frame]
++        removed = next((point for point in points if point.frame == frame), None)
++        if removed is not None:
++            if earlier and later:
++                # A→P→B becomes A→B: the distances add up when both are known.
++                following = later[0]
++                merged = (
++                    removed.distance_m + following.distance_m
++                    if removed.distance_m is not None and following.distance_m is not None
++                    else None
++                )
++                later[0] = SpeedPoint(following.frame, merged)
++            elif later:
++                # The new first point has no predecessor.
++                later[0] = SpeedPoint(later[0].frame, None)
++            self._store_speed_points([*earlier, *later])
++            return False
++        inherited = next(
++            (point.distance_m for point in reversed(earlier) if point.distance_m is not None),
++            None,
++        )
++        distance = inherited if earlier else None
++        if later:
++            # Inserting between A and B splits A→B, so B's distance must be re-entered.
++            later[0] = SpeedPoint(later[0].frame, None)
++        self._store_speed_points([*earlier, SpeedPoint(frame, distance), *later])
++        return True
++
++    def set_speed_distance(self, frame: int, distance_m: float | None) -> None:
++        points = [
++            SpeedPoint(point.frame, distance_m) if point.frame == int(frame) else point
++            for point in self.speed_points
++        ]
++        self._store_speed_points(points)
++
++    def clear_speed_points(self) -> None:
++        self._store_speed_points([])
++
+     @property
+     def missing(self) -> list[str]:
+         return (
+diff --git a/investigator/speed_estimation.py b/investigator/speed_estimation.py
+new file mode 100644
+index 0000000..ea6a965
+--- /dev/null
++++ b/investigator/speed_estimation.py
+@@ -0,0 +1,393 @@
++"""Estimate the vehicle speed at the trigger moment from user-placed reference points.
++
++The investigator steps through the video and adds a *speed point* every time the
++camera vehicle passes a reference feature on the road (the end of a lane dash,
++a crosswalk stripe, a pole …) and types the real distance between that feature
++and the previous one. Each consecutive pair of points is a segment with a known
++distance and a measured duration, i.e. an average speed.
++
++The speed *at* the trigger frame is then estimated from the points nearest to
++it: with three or more points a constant-acceleration (quadratic) position
++model is fitted and differentiated at T; with two points the segment average is
++used. Marker placement is only accurate to about half a frame, so every result
++is reported with the range obtained by shifting each point by ±0.5 frame.
++
++This module is pure Python so it can be unit-tested without Qt.
++"""
++
++from __future__ import annotations
++
++import itertools
++import math
++from collections.abc import Iterable, Sequence
++from dataclasses import dataclass, field
++
++from investigator.schema import TRIGGER_VEHICLE_SPEED_CHOICES
++
++MS_TO_KPH = 3.6
++#: Points used around T for the local fit. More points smooth noise but blur
++#: genuine acceleration changes far from the trigger.
++FIT_WINDOW = 4
++#: Fits implying more than ~1 g of acceleration are treated as marker noise.
++MAX_PLAUSIBLE_ACCELERATION = 9.81
++#: Bounds that combine every ±0.5 frame shift are exact up to this many points.
++EXHAUSTIVE_BOUND_POINTS = 8
++
++STOPPED = TRIGGER_VEHICLE_SPEED_CHOICES[0].value
++CREEP = TRIGGER_VEHICLE_SPEED_CHOICES[1].value
++LOW = TRIGGER_VEHICLE_SPEED_CHOICES[2].value
++MEDIUM = TRIGGER_VEHICLE_SPEED_CHOICES[3].value
++HIGH = TRIGGER_VEHICLE_SPEED_CHOICES[4].value
++
++#: (exclusive upper bound in km/h, stored choice value). A value exactly on a
++#: boundary belongs to the faster class, e.g. 10 km/h is 저속.
++SPEED_BANDS: tuple[tuple[float, str], ...] = (
++    (1.0, STOPPED),
++    (10.0, CREEP),
++    (30.0, LOW),
++    (60.0, MEDIUM),
++    (math.inf, HIGH),
++)
++SPEED_BAND_LIMITS = (10.0, 30.0, 60.0)
++
++
++@dataclass(frozen=True, slots=True)
++class SpeedPoint:
++    """A reference point; ``distance_m`` is measured from the previous point."""
++
++    frame: int
++    distance_m: float | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class SpeedSegment:
++    index: int
++    start_frame: int
++    end_frame: int
++    distance_m: float
++    kph: float
++    kph_low: float
++    kph_high: float
++
++    @property
++    def frames(self) -> int:
++        return self.end_frame - self.start_frame
++
++
++@dataclass(slots=True)
++class SpeedEstimate:
++    segments: list[SpeedSegment] = field(default_factory=list)
++    trigger_frame: int | None = None
++    kph: float | None = None
++    kph_low: float | None = None
++    kph_high: float | None = None
++    method: str = ""
++    points_used: tuple[int, ...] = ()
++    #: Coefficients of v(t) = c0 + c1·t in km/h around T, for plotting the fit.
++    velocity_line: tuple[float, float] | None = None
++    warnings: list[str] = field(default_factory=list)
++
++    @property
++    def label(self) -> str | None:
++        return None if self.kph is None else speed_label(self.kph)
++
++    @property
++    def label_uncertain(self) -> bool:
++        if self.kph_low is None or self.kph_high is None:
++            return False
++        return speed_label(self.kph_low) != speed_label(self.kph_high)
++
++
++def speed_label(kph: float) -> str:
++    """Map a speed to the stored value of the 차량 속도 (추정) choice."""
++
++    value = max(0.0, float(kph))
++    for upper, label in SPEED_BANDS:
++        if value < upper:
++            return label
++    return HIGH
++
++
++def normalize_points(points: Iterable[SpeedPoint]) -> list[SpeedPoint]:
++    """Sort by frame and keep one point per frame (the last one wins)."""
++
++    by_frame: dict[int, SpeedPoint] = {}
++    for point in points:
++        by_frame[int(point.frame)] = point
++    return [by_frame[frame] for frame in sorted(by_frame)]
++
++
++def _usable_distance(point: SpeedPoint) -> float | None:
++    if point.distance_m is None:
++        return None
++    try:
++        distance = float(point.distance_m)
++    except (TypeError, ValueError):
++        return None
++    return distance if distance > 0 and math.isfinite(distance) else None
++
++
++def _segment_kph(distance: float, seconds: float) -> float:
++    return math.inf if seconds <= 0 else distance / seconds * MS_TO_KPH
++
++
++def _chains(points: Sequence[SpeedPoint]) -> list[list[tuple[int, float]]]:
++    """Split points into runs whose consecutive distances are all known.
++
++    Each chain is a list of ``(frame, cumulative_metres)`` starting at 0.
++    """
++
++    chains: list[list[tuple[int, float]]] = []
++    current: list[tuple[int, float]] = []
++    for index, point in enumerate(points):
++        distance = _usable_distance(point) if index else None
++        if current and distance is not None and point.frame > current[-1][0]:
++            current.append((point.frame, current[-1][1] + distance))
++            continue
++        if len(current) >= 2:
++            chains.append(current)
++        current = [(point.frame, 0.0)]
++    if len(current) >= 2:
++        chains.append(current)
++    return chains
++
++
++def _fit_velocity(times: Sequence[float], positions: Sequence[float], at: float) -> tuple[float, float, float]:
++    """Return (velocity m/s at ``at``, slope c1 of v(t), acceleration) from a fit.
++
++    Two points: constant speed. Three or more: least-squares quadratic in time,
++    centred on ``at`` for numerical stability.
++    """
++
++    if len(times) == 2:
++        velocity = (positions[1] - positions[0]) / (times[1] - times[0])
++        return velocity, 0.0, 0.0
++    xs = [t - at for t in times]
++    # Normal equations for s = a + b·x + c·x².
++    sums = [sum(x**power for x in xs) for power in range(5)]
++    rhs = [sum(s * x**power for s, x in zip(positions, xs, strict=True)) for power in range(3)]
++    matrix = [
++        [sums[0], sums[1], sums[2]],
++        [sums[1], sums[2], sums[3]],
++        [sums[2], sums[3], sums[4]],
++    ]
++    _, b, c = _solve3(matrix, rhs)
++    return b, 2 * c, 2 * c
++
++
++def _solve3(matrix: list[list[float]], rhs: list[float]) -> tuple[float, float, float]:
++    """Solve a 3×3 linear system with Cramer's rule."""
++
++    def det(m: list[list[float]]) -> float:
++        return (
++            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
++            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
++            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
++        )
++
++    base = det(matrix)
++    if abs(base) < 1e-12:
++        raise ZeroDivisionError("지점 시간이 너무 가까워 계산할 수 없습니다.")
++    results = []
++    for column in range(3):
++        replaced = [row[:] for row in matrix]
++        for row in range(3):
++            replaced[row][column] = rhs[row]
++        results.append(det(replaced) / base)
++    return results[0], results[1], results[2]
++
++
++def _window(chain: list[tuple[int, float]], trigger: int) -> list[tuple[int, float]]:
++    """The ``FIT_WINDOW`` points nearest to T, kept in time order."""
++
++    if len(chain) <= FIT_WINDOW:
++        return chain
++    best_start = min(
++        range(len(chain) - FIT_WINDOW + 1),
++        key=lambda start: (
++            max(abs(frame - trigger) for frame, _ in chain[start : start + FIT_WINDOW]),
++            -start,
++        ),
++    )
++    return chain[best_start : best_start + FIT_WINDOW]
++
++
++def estimate_speed(
++    points: Iterable[SpeedPoint],
++    fps: float,
++    trigger_frame: int | None,
++) -> SpeedEstimate:
++    """Compute segment speeds and the speed at ``trigger_frame``."""
++
++    ordered = normalize_points(points)
++    estimate = SpeedEstimate(trigger_frame=trigger_frame)
++    if fps <= 0 or not math.isfinite(fps):
++        if ordered:
++            estimate.warnings.append("영상 FPS를 알 수 없어 속도를 계산할 수 없어요.")
++        return estimate
++    frame_seconds = 1.0 / fps
++
++    for index in range(1, len(ordered)):
++        previous, point = ordered[index - 1], ordered[index]
++        distance = _usable_distance(point)
++        if distance is None:
++            continue
++        seconds = (point.frame - previous.frame) / fps
++        estimate.segments.append(
++            SpeedSegment(
++                index=index,
++                start_frame=previous.frame,
++                end_frame=point.frame,
++                distance_m=distance,
++                kph=_segment_kph(distance, seconds),
++                kph_low=_segment_kph(distance, seconds + frame_seconds),
++                kph_high=_segment_kph(distance, seconds - frame_seconds),
++            )
++        )
++    if any(segment.frames <= 1 for segment in estimate.segments):
++        estimate.warnings.append(
++            "1프레임 이하로 짧은 구간이 있어요. 더 멀리 떨어진 기준 지점을 쓰면 정확해져요."
++        )
++    missing = [index + 1 for index in range(1, len(ordered)) if _usable_distance(ordered[index]) is None]
++    if missing:
++        estimate.warnings.append(
++            "거리가 비어 있는 지점이 있어요: " + ", ".join(f"{number}번" for number in missing)
++        )
++
++    if trigger_frame is None:
++        return estimate
++    chains = _chains(ordered)
++    if not chains:
++        if ordered:
++            estimate.warnings.append("거리가 입력된 구간이 2개 지점 이상 이어져야 T 속도를 계산해요.")
++        return estimate
++
++    def gap(chain: list[tuple[int, float]]) -> float:
++        first, last = chain[0][0], chain[-1][0]
++        return 0.0 if first <= trigger_frame <= last else min(abs(first - trigger_frame), abs(last - trigger_frame))
++
++    chain = min(chains, key=lambda item: (gap(item), -len(item)))
++    window = _window(chain, trigger_frame)
++    times = [frame / fps for frame, _ in window]
++    positions = [position for _, position in window]
++    at = trigger_frame / fps
++
++    try:
++        velocity, slope, acceleration = _fit_velocity(times, positions, at)
++    except ZeroDivisionError as exc:
++        estimate.warnings.append(str(exc))
++        return estimate
++
++    span_first, span_last = window[0][0], window[-1][0]
++    inside = span_first <= trigger_frame <= span_last
++    if len(window) == 2:
++        estimate.method = "구간 평균 속도" if inside else "인접 구간 평균 속도"
++    else:
++        estimate.method = "등가속도 근사" + ("" if inside else " · 범위 밖 외삽")
++
++    if len(window) >= 3 and abs(acceleration) > MAX_PLAUSIBLE_ACCELERATION:
++        estimate.warnings.append(
++            f"지점 간 속도 변화가 커서(약 {abs(acceleration) / 9.81:.1f}g) 거리나 지점 위치를 확인해 주세요. "
++            "T와 가장 가까운 구간의 평균 속도로 대신 계산했어요."
++        )
++        nearest = min(
++            zip(window, window[1:], strict=False),
++            key=lambda pair: min(abs(pair[0][0] - trigger_frame), abs(pair[1][0] - trigger_frame)),
++        )
++        window = list(nearest)
++        times = [frame / fps for frame, _ in window]
++        positions = [position for _, position in window]
++        velocity, slope, acceleration = _fit_velocity(times, positions, at)
++        estimate.method = "인접 구간 평균 속도"
++
++    if not inside:
++        span = max(1, span_last - span_first)
++        outside = min(abs(trigger_frame - span_first), abs(trigger_frame - span_last))
++        if outside > span:
++            estimate.warnings.append(
++                "T가 지점 범위에서 멀리 떨어져 있어요. T 앞뒤로 지점을 추가하면 더 정확해요."
++            )
++        else:
++            estimate.warnings.append("T가 지점 범위 밖이라 추정값이 외삽이에요.")
++
++    low, high = _bounds(window, fps, at)
++    kph = velocity * MS_TO_KPH
++    if kph < 0:
++        estimate.warnings.append("계산된 속도가 0보다 작아요. 지점 순서와 거리를 확인해 주세요.")
++    estimate.kph = max(0.0, kph)
++    estimate.kph_low = max(0.0, min(low, kph))
++    estimate.kph_high = max(0.0, max(high, kph))
++    estimate.points_used = tuple(frame for frame, _ in window)
++    # v(t) in km/h with t in seconds: c0 + c1·t
++    c1 = slope * MS_TO_KPH
++    estimate.velocity_line = (kph - c1 * at, c1)
++    return estimate
++
++
++def _bounds(window: list[tuple[int, float]], fps: float, at: float) -> tuple[float, float]:
++    """Speed range (km/h) when each point may be off by half a frame."""
++
++    half = 0.5 / fps
++    count = len(window)
++    if count <= EXHAUSTIVE_BOUND_POINTS:
++        shifts: Iterable[tuple[int, ...]] = itertools.product((-1, 1), repeat=count)
++    else:
++        shifts = [tuple(1 if i % 2 else -1 for i in range(count)), tuple(-1 if i % 2 else 1 for i in range(count))]
++    values: list[float] = []
++    positions = [position for _, position in window]
++    for signs in shifts:
++        times = [frame / fps + sign * half for (frame, _), sign in zip(window, signs, strict=True)]
++        if any(later <= earlier for earlier, later in zip(times, times[1:], strict=False)):
++            continue
++        try:
++            velocity, _, _ = _fit_velocity(times, positions, at)
++        except ZeroDivisionError:
++            continue
++        values.append(velocity * MS_TO_KPH)
++    if not values:
++        return math.inf, math.inf
++    return min(values), max(values)
++
++
++def points_from_json(raw: object) -> list[SpeedPoint]:
++    """Parse the persisted ``speed_points`` list, skipping malformed entries."""
++
++    if not isinstance(raw, list):
++        return []
++    points: list[SpeedPoint] = []
++    for item in raw:
++        if not isinstance(item, dict) or item.get("frame") is None:
++            continue
++        try:
++            frame = max(0, int(item["frame"]))
++        except (TypeError, ValueError):
++            continue
++        distance = item.get("distance_m")
++        try:
++            distance_value = None if distance in (None, "") else float(distance)
++        except (TypeError, ValueError):
++            distance_value = None
++        if distance_value is not None and not (math.isfinite(distance_value) and distance_value > 0):
++            distance_value = None
++        points.append(SpeedPoint(frame, distance_value))
++    return normalize_points(points)
++
++
++def points_to_json(points: Iterable[SpeedPoint]) -> list[dict[str, object]]:
++    return [
++        {"frame": int(point.frame), "distance_m": point.distance_m}
++        for point in normalize_points(points)
++    ]
++
++
++__all__ = [
++    "SPEED_BANDS",
++    "SPEED_BAND_LIMITS",
++    "SpeedEstimate",
++    "SpeedPoint",
++    "SpeedSegment",
++    "estimate_speed",
++    "points_from_json",
++    "points_to_json",
++    "speed_label",
++]
+diff --git a/investigator/storage.py b/investigator/storage.py
+index 7e458e8..182a0bb 100644
+--- a/investigator/storage.py
++++ b/investigator/storage.py
+@@ -683,6 +683,7 @@ class CaseRepository:
+                             if any(
+                                 marker.get("trigger_frame") is not None
+                                 or bool(marker.get("collision_frames"))
++                                or bool(marker.get("speed_points"))
+                                 for marker in case.markers_by_video.values()
+                             )
+                             else None
+diff --git a/investigator/widgets/playback_panel.py b/investigator/widgets/playback_panel.py
+index f5a2ec6..b3bfd49 100644
+--- a/investigator/widgets/playback_panel.py
++++ b/investigator/widgets/playback_panel.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ from typing import Literal
+ 
+ from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
+-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPolygon
++from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPolygon
+ from PySide6.QtWidgets import (
+     QHBoxLayout,
+     QLabel,
+@@ -21,8 +21,10 @@ from PySide6.QtWidgets import (
+ 
+ from investigator.theme import DANGER, MUTED, PRIMARY, PRIMARY_HOVER, material_icon
+ 
+-MarkerKind = Literal["trigger", "collision"]
++MarkerKind = Literal["trigger", "collision", "speed"]
+ COLLISION_HOVER = "#EA580C"
++SPEED_POINT = "#0F766E"
++SPEED_POINT_HOVER = "#14958A"
+ MARKER_INTERACTION_SIZE = 25
+ 
+ 
+@@ -49,18 +51,29 @@ class MarkerSlider(QSlider):
+         self.setAccessibleName("영상 타임라인")
+         self.trigger_frame: int | None = None
+         self.collision_frame: int | None = None
++        self.speed_frames: list[int] = []
+         self._hovered_marker: MarkerKind | None = None
++        self._hovered_speed_index: int | None = None
++        self._painted_speed_index: int | None = None
+         self.sliderMoved.connect(self.seek_requested)
+ 
+-    def set_markers(self, trigger: int | None, collision: int | None) -> None:
++    def set_markers(
++        self,
++        trigger: int | None,
++        collision: int | None,
++        speed_frames: list[int] | None = None,
++    ) -> None:
+         self.trigger_frame = trigger
+         self.collision_frame = collision
++        self.speed_frames = sorted(int(frame) for frame in (speed_frames or []))
+         self._set_hovered_marker(None)
+         descriptions = []
+         if trigger is not None:
+             descriptions.append(f"T 트리거 {int(trigger) + 1:,}번 프레임")
+         if collision is not None:
+             descriptions.append(f"C 충돌 {int(collision) + 1:,}번 프레임")
++        if self.speed_frames:
++            descriptions.append(f"속도 지점 {len(self.speed_frames)}개")
+         marker_description = ", ".join(descriptions) if descriptions else "지정된 마커 없음"
+         self.setAccessibleDescription(
+             f"{marker_description}. 마커를 클릭하면 해당 프레임으로 이동합니다."
+@@ -139,6 +152,20 @@ class MarkerSlider(QSlider):
+         x = self._x_for_value(self.collision_frame)
+         return QRect(x + 14, self.height() - 22, 32, 18).intersected(self.rect())
+ 
++    def _speed_interaction_rect(self, frame: int) -> QRect:
++        x = self._x_for_value(frame)
++        return QRect(x - 8, 2, 16, 24).intersected(self.rect())
++
++    def _speed_point_at(self, position: QPoint) -> int | None:
++        nearest: tuple[int, int] | None = None
++        for index, frame in enumerate(self.speed_frames):
++            rect = self._speed_interaction_rect(frame)
++            if rect.contains(position):
++                distance = abs(rect.center().x() - position.x())
++                if nearest is None or distance < nearest[0]:
++                    nearest = (distance, index)
++        return None if nearest is None else nearest[1]
++
+     def _marker_at(self, position: QPoint) -> tuple[MarkerKind, int] | None:
+         trigger_rect = self._trigger_interaction_rect()
+         trigger_label = self._trigger_label_rect()
+@@ -147,6 +174,10 @@ class MarkerSlider(QSlider):
+         ):
+             assert self.trigger_frame is not None
+             return "trigger", self.trigger_frame
++        speed_index = self._speed_point_at(position)
++        if speed_index is not None:
++            self._hovered_speed_index = speed_index
++            return "speed", self.speed_frames[speed_index]
+         collision_rect = self._collision_interaction_rect()
+         collision_label = self._collision_label_rect()
+         if (collision_rect is not None and collision_rect.contains(position)) or (
+@@ -159,15 +190,28 @@ class MarkerSlider(QSlider):
+     def _marker_color(self, marker: MarkerKind) -> QColor:
+         if marker == "trigger":
+             return QColor(PRIMARY_HOVER if self._hovered_marker == marker else PRIMARY)
++        if marker == "speed":
++            return QColor(SPEED_POINT)
+         return QColor(COLLISION_HOVER if self._hovered_marker == marker else DANGER)
+ 
+     def _set_hovered_marker(self, marker: MarkerKind | None) -> None:
+-        if marker == self._hovered_marker:
++        speed_index = self._hovered_speed_index if marker == "speed" else None
++        if marker == self._hovered_marker and (
++            marker != "speed" or speed_index == self._painted_speed_index
++        ):
+             return
+         self._hovered_marker = marker
++        self._hovered_speed_index = speed_index
++        self._painted_speed_index = speed_index
+         if marker is None:
+             self.unsetCursor()
+             self.setToolTip("")
++        elif marker == "speed" and speed_index is not None:
++            frame = self.speed_frames[speed_index]
++            self.setCursor(Qt.CursorShape.PointingHandCursor)
++            self.setToolTip(
++                f"속도 지점 {speed_index + 1} · {int(frame) + 1:,}번 프레임 (클릭하여 이동)"
++            )
+         else:
+             frame = self.trigger_frame if marker == "trigger" else self.collision_frame
+             label = "T 트리거" if marker == "trigger" else "C 충돌"
+@@ -185,6 +229,19 @@ class MarkerSlider(QSlider):
+         super().paintEvent(event)
+         painter = QPainter(self)
+         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
++        for index, frame in enumerate(self.speed_frames):
++            painter.save()
++            x = self._x_for_value(frame)
++            hovered = self._hovered_marker == "speed" and self._hovered_speed_index == index
++            color = QColor(SPEED_POINT_HOVER if hovered else SPEED_POINT)
++            painter.setPen(QPen(color, 2 if hovered else 1.5))
++            painter.drawLine(x, 19, x, 25)
++            font = painter.font()
++            font.setPixelSize(10)
++            font.setBold(hovered)
++            painter.setFont(font)
++            painter.drawText(QRect(x - 8, 2, 16, 16), Qt.AlignmentFlag.AlignCenter, str(index + 1))
++            painter.restore()
+         if self.trigger_frame is not None:
+             painter.save()
+             x = self._x_for_value(self.trigger_frame)
+@@ -296,6 +353,8 @@ class PlaybackPanel(QWidget):
+     toggle_playback_requested = Signal()
+     trigger_requested = Signal()
+     collision_requested = Signal()
++    speed_point_requested = Signal()
++    speed_panel_toggled = Signal(bool)
+ 
+     def __init__(self, parent: QWidget | None = None) -> None:
+         super().__init__(parent)
+@@ -314,7 +373,7 @@ class PlaybackPanel(QWidget):
+         self.time_label.setStyleSheet("font-size: 14px; font-weight: 650;")
+         timeline_header.addWidget(self.time_label)
+         timeline_header.addStretch(1)
+-        legend = QLabel("◆ T 트리거    ▼ C 충돌", self)
++        legend = QLabel("◆ T 트리거    ▼ C 충돌    1 2 3 속도 지점", self)
+         legend.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+         timeline_header.addWidget(legend)
+         root.addLayout(timeline_header)
+@@ -374,8 +433,20 @@ class PlaybackPanel(QWidget):
+         self.trigger_button.setToolTip("현재 프레임의 트리거 마커 지정/해제")
+         self.collision_button = QPushButton(material_icon("car_crash", PRIMARY), "충돌 지정", self)
+         self.collision_button.setToolTip("현재 프레임의 충돌 마커 지정/해제")
++        self.speed_point_button = QPushButton(material_icon("add_location", SPEED_POINT), "속도 지점", self)
++        self.speed_point_button.setToolTip(
++            "현재 프레임에 속도 기준 지점 추가/해제 (M)\n"
++            "차량이 차선 끝, 횡단보도 줄 같은 기준을 지날 때마다 추가하세요."
++        )
++        self.speed_panel_button = QToolButton(self)
++        self.speed_panel_button.setIcon(material_icon("speed", PRIMARY))
++        self.speed_panel_button.setCheckable(True)
++        self.speed_panel_button.setToolTip("속도 추정 패널 열기/닫기")
++        self.speed_panel_button.setAccessibleName("속도 추정 패널")
+         bottom.addWidget(self.trigger_button)
+         bottom.addWidget(self.collision_button)
++        bottom.addWidget(self.speed_point_button)
++        bottom.addWidget(self.speed_panel_button)
+         bottom.addStretch(1)
+         root.addLayout(bottom)
+ 
+@@ -388,6 +459,8 @@ class PlaybackPanel(QWidget):
+         self.next_1s.clicked.connect(lambda: self.relative_seconds_requested.emit(1.0))
+         self.trigger_button.clicked.connect(self.trigger_requested)
+         self.collision_button.clicked.connect(self.collision_requested)
++        self.speed_point_button.clicked.connect(self.speed_point_requested)
++        self.speed_panel_button.toggled.connect(self.speed_panel_toggled)
+         self.go_button.clicked.connect(
+             lambda: self.seek_requested.emit(self.frame_input.value() - 1)
+         )
+@@ -426,7 +499,7 @@ class PlaybackPanel(QWidget):
+         self.frame_input.setValue(1)
+         self.frame_total.setText("/ 0")
+         self.time_label.setText("00:00.00 / 00:00.00")
+-        self.timeline.set_markers(None, None)
++        self.timeline.set_markers(None, None, [])
+         self.set_video_enabled(False)
+ 
+     def update_total_frames(self, total_frames: int) -> None:
+@@ -449,6 +522,7 @@ class PlaybackPanel(QWidget):
+             self.next_1s,
+             self.trigger_button,
+             self.collision_button,
++            self.speed_point_button,
+             self.frame_input,
+             self.go_button,
+         ):
+@@ -480,8 +554,13 @@ class PlaybackPanel(QWidget):
+         self.play_button.setToolTip(label)
+         self.play_button.setAccessibleName(label)
+ 
+-    def set_markers(self, trigger: int | None, collision: int | None) -> None:
+-        self.timeline.set_markers(trigger, collision)
++    def set_markers(
++        self,
++        trigger: int | None,
++        collision: int | None,
++        speed_frames: list[int] | None = None,
++    ) -> None:
++        self.timeline.set_markers(trigger, collision, speed_frames)
+ 
+ 
+ __all__ = ["MarkerSlider", "PlaybackPanel", "format_timestamp"]
+diff --git a/investigator/widgets/speed_panel.py b/investigator/widgets/speed_panel.py
+new file mode 100644
+index 0000000..e7edbb9
+--- /dev/null
++++ b/investigator/widgets/speed_panel.py
+@@ -0,0 +1,441 @@
++"""Speed reference points, per-segment speeds, and the trigger-speed estimate."""
++
++from __future__ import annotations
++
++import math
++
++from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
++from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
++from PySide6.QtWidgets import (
++    QAbstractItemView,
++    QDoubleSpinBox,
++    QHBoxLayout,
++    QHeaderView,
++    QLabel,
++    QPushButton,
++    QSizePolicy,
++    QTableWidget,
++    QTableWidgetItem,
++    QVBoxLayout,
++    QWidget,
++)
++
++from investigator.speed_estimation import (
++    SPEED_BAND_LIMITS,
++    SpeedEstimate,
++    SpeedPoint,
++)
++from investigator.theme import BORDER, MUTED, PRIMARY, TEXT, material_icon
++from investigator.widgets.playback_panel import SPEED_POINT, format_timestamp
++
++WARNING_TEXT = "#8A5300"
++WARNING_BACKGROUND = "#FFF4DC"
++BAND_NAMES = ("크립", "저속", "중속", "고속")
++
++
++def _kph(value: float | None) -> str:
++    if value is None:
++        return "-"
++    if math.isinf(value):
++        return "∞"
++    return f"{value:.0f}" if value >= 10 else f"{value:.1f}"
++
++
++class SpeedChart(QWidget):
++    """Speed over time: segment averages, the local fit, and the value at T."""
++
++    point_clicked = Signal(int)
++
++    def __init__(self, parent: QWidget | None = None) -> None:
++        super().__init__(parent)
++        self.setMinimumSize(QSize(260, 150))
++        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
++        self.setAccessibleName("속도 그래프")
++        self.setMouseTracking(True)
++        self._points: list[SpeedPoint] = []
++        self._estimate = SpeedEstimate()
++        self._fps = 0.0
++        self._tick_hitboxes: list[tuple[QRectF, int]] = []
++
++    def set_data(self, points: list[SpeedPoint], estimate: SpeedEstimate, fps: float) -> None:
++        self._points = points
++        self._estimate = estimate
++        self._fps = fps
++        description = "지점이 없습니다."
++        if estimate.kph is not None:
++            description = f"T 시점 약 {_kph(estimate.kph)} km/h"
++        elif estimate.segments:
++            description = f"구간 {len(estimate.segments)}개"
++        self.setAccessibleDescription(description)
++        self.update()
++
++    def _plot_rect(self) -> QRectF:
++        return QRectF(44, 10, max(10, self.width() - 56), max(10, self.height() - 40))
++
++    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
++        del event
++        painter = QPainter(self)
++        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
++        plot = self._plot_rect()
++        estimate = self._estimate
++        fps = self._fps
++        self._tick_hitboxes = []
++        font = painter.font()
++        font.setPixelSize(11)
++        painter.setFont(font)
++
++        frames = [point.frame for point in self._points]
++        if estimate.trigger_frame is not None:
++            frames.append(estimate.trigger_frame)
++        if fps <= 0 or len(frames) < 2:
++            painter.setPen(QColor(MUTED))
++            painter.drawText(
++                self.rect(),
++                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
++                "기준 지점을 2개 이상 추가하고 거리를 입력하면\n구간별 속도가 그래프로 나타나요.",
++            )
++            return
++
++        t_min, t_max = min(frames) / fps, max(frames) / fps
++        pad = max(0.05, (t_max - t_min) * 0.06)
++        t_min, t_max = t_min - pad, t_max + pad
++        speeds = [s.kph_high for s in estimate.segments if math.isfinite(s.kph_high)]
++        speeds += [s.kph for s in estimate.segments if math.isfinite(s.kph)]
++        if estimate.kph_high is not None and math.isfinite(estimate.kph_high):
++            speeds.append(estimate.kph_high)
++        top = max([20.0, *speeds]) * 1.15
++        nice = next((step for step in (20, 40, 60, 80, 100, 120, 160, 200, 300) if step >= top), top)
++
++        def x_of(seconds: float) -> float:
++            return plot.left() + (seconds - t_min) / (t_max - t_min) * plot.width()
++
++        def y_of(kph: float) -> float:
++            return plot.bottom() - min(max(kph, 0.0), nice) / nice * plot.height()
++
++        # Label bands: the thresholds that decide the 차량 속도 category.
++        painter.setPen(QPen(QColor(BORDER), 1, Qt.PenStyle.DashLine))
++        for limit in SPEED_BAND_LIMITS:
++            if limit < nice:
++                painter.drawLine(QPointF(plot.left(), y_of(limit)), QPointF(plot.right(), y_of(limit)))
++        painter.setPen(QColor(MUTED))
++        lower = 0.0
++        for limit, name in zip((*SPEED_BAND_LIMITS, math.inf), BAND_NAMES, strict=True):
++            upper = min(limit, nice)
++            if lower < nice and y_of(lower) - y_of(upper) > 13:
++                painter.drawText(
++                    QRectF(plot.right() - 40, y_of(upper), 38, y_of(lower) - y_of(upper)),
++                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
++                    name,
++                )
++            lower = limit
++        for value in (0, nice / 2, nice):
++            painter.drawText(
++                QRectF(0, y_of(value) - 8, plot.left() - 6, 16),
++                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
++                f"{value:.0f}",
++            )
++        painter.save()
++        painter.translate(10, plot.center().y())
++        painter.rotate(-90)
++        painter.drawText(QRectF(-30, -10, 60, 14), Qt.AlignmentFlag.AlignCenter, "km/h")
++        painter.restore()
++
++        # Axis with ticks labelled 1, 2, 3 … and T (the layout the investigator sketched).
++        painter.setPen(QPen(QColor(TEXT), 1.2))
++        painter.drawLine(QPointF(plot.left(), plot.bottom()), QPointF(plot.right(), plot.bottom()))
++        for number, point in enumerate(self._points, start=1):
++            x = x_of(point.frame / fps)
++            painter.setPen(QPen(QColor(SPEED_POINT), 1.2))
++            painter.drawLine(QPointF(x, plot.bottom() - 4), QPointF(x, plot.bottom() + 4))
++            box = QRectF(x - 10, plot.bottom() + 5, 20, 16)
++            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, str(number))
++            self._tick_hitboxes.append((box.adjusted(-4, -10, 4, 2), point.frame))
++
++        # Segment averages as flat bars with their ±0.5 frame range.
++        for segment in estimate.segments:
++            x0, x1 = x_of(segment.start_frame / fps), x_of(segment.end_frame / fps)
++            if math.isfinite(segment.kph_high):
++                band = QColor(SPEED_POINT)
++                band.setAlpha(28)
++                painter.fillRect(
++                    QRectF(x0, y_of(segment.kph_high), x1 - x0, y_of(segment.kph_low) - y_of(segment.kph_high)),
++                    band,
++                )
++            if math.isfinite(segment.kph):
++                painter.setPen(QPen(QColor(SPEED_POINT), 2))
++                painter.drawLine(QPointF(x0, y_of(segment.kph)), QPointF(x1, y_of(segment.kph)))
++
++        # Local fit used for T, drawn over the points it used and out to T.
++        if estimate.velocity_line is not None and estimate.points_used and estimate.trigger_frame is not None:
++            c0, c1 = estimate.velocity_line
++            used = [frame / fps for frame in estimate.points_used] + [estimate.trigger_frame / fps]
++            start, end = min(used), max(used)
++            path = QPainterPath()
++            steps = 24
++            for step in range(steps + 1):
++                seconds = start + (end - start) * step / steps
++                point = QPointF(x_of(seconds), y_of(c0 + c1 * seconds))
++                if step:
++                    path.lineTo(point)
++                else:
++                    path.moveTo(point)
++            painter.setPen(QPen(QColor(PRIMARY), 1.5, Qt.PenStyle.DashLine))
++            painter.drawPath(path)
++
++        if estimate.trigger_frame is not None:
++            x = x_of(estimate.trigger_frame / fps)
++            painter.setPen(QPen(QColor(PRIMARY), 1.2))
++            painter.drawLine(QPointF(x, plot.bottom() - 4), QPointF(x, plot.bottom() + 4))
++            font.setBold(True)
++            painter.setFont(font)
++            painter.drawText(QRectF(x - 10, plot.bottom() + 5, 20, 16), Qt.AlignmentFlag.AlignCenter, "T")
++            font.setBold(False)
++            painter.setFont(font)
++            if estimate.kph is not None:
++                if estimate.kph_low is not None and estimate.kph_high is not None and math.isfinite(estimate.kph_high):
++                    painter.setPen(QPen(QColor(PRIMARY), 1.5))
++                    painter.drawLine(QPointF(x, y_of(estimate.kph_low)), QPointF(x, y_of(estimate.kph_high)))
++                    for value in (estimate.kph_low, estimate.kph_high):
++                        painter.drawLine(QPointF(x - 4, y_of(value)), QPointF(x + 4, y_of(value)))
++                painter.setPen(Qt.PenStyle.NoPen)
++                painter.setBrush(QColor(PRIMARY))
++                painter.drawEllipse(QPointF(x, y_of(estimate.kph)), 4.5, 4.5)
++                top_y = y_of(estimate.kph_high) if (
++                    estimate.kph_high is not None and math.isfinite(estimate.kph_high)
++                ) else y_of(estimate.kph)
++                label_rect = QRectF(x - 40, top_y - 22, 80, 18)
++                label_rect.moveLeft(min(max(label_rect.left(), plot.left()), plot.right() - 80))
++                if label_rect.top() < 0:
++                    label_rect.moveTop(y_of(estimate.kph) + 8)
++                painter.setPen(Qt.PenStyle.NoPen)
++                painter.setBrush(QColor(255, 255, 255, 220))
++                painter.drawRoundedRect(label_rect.adjusted(14, 1, -14, -1), 4, 4)
++                font.setBold(True)
++                painter.setFont(font)
++                painter.setPen(QColor(PRIMARY))
++                painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, f"T {_kph(estimate.kph)} km/h")
++
++    def mousePressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
++        position = event.position()
++        for box, frame in self._tick_hitboxes:
++            if box.contains(position):
++                self.point_clicked.emit(frame)
++                event.accept()
++                return
++        super().mousePressEvent(event)
++
++
++class SpeedPanel(QWidget):
++    """Lists speed points, their distances, segment speeds, and the T estimate."""
++
++    add_point_requested = Signal()
++    remove_point_requested = Signal(int)
++    clear_requested = Signal()
++    distance_changed = Signal(int, object)
++    seek_requested = Signal(int)
++    apply_requested = Signal(str)
++
++    COLUMNS = ("지점", "프레임", "시각", "이전 지점부터 거리", "구간 평균 속도")
++
++    def __init__(self, parent: QWidget | None = None) -> None:
++        super().__init__(parent)
++        self.setObjectName("panel")
++        self._fps = 0.0
++        self._points: list[SpeedPoint] = []
++        self._estimate = SpeedEstimate()
++        self._updating = False
++        self._can_apply = True
++
++        root = QVBoxLayout(self)
++        root.setContentsMargins(18, 10, 18, 12)
++        root.setSpacing(8)
++
++        header = QHBoxLayout()
++        title = QLabel("트리거 시점 속도 추정", self)
++        title.setStyleSheet("font-size: 14px; font-weight: 650;")
++        header.addWidget(title)
++        hint = QLabel(
++            "차량이 차선 끝·횡단보도 줄 같은 기준을 지날 때마다 지점을 추가하고, 실제 거리를 입력하세요.",
++            self,
++        )
++        hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
++        hint.setWordWrap(True)
++        header.addWidget(hint, 1)
++        self.add_button = QPushButton(material_icon("add_location", SPEED_POINT), "현재 프레임 추가 (M)", self)
++        self.remove_button = QPushButton(material_icon("delete", PRIMARY), "선택 삭제", self)
++        self.clear_button = QPushButton("모두 삭제", self)
++        for button in (self.add_button, self.remove_button, self.clear_button):
++            header.addWidget(button)
++        root.addLayout(header)
++
++        body = QHBoxLayout()
++        body.setSpacing(12)
++        self.table = QTableWidget(0, len(self.COLUMNS), self)
++        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
++        self.table.verticalHeader().setVisible(False)
++        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
++        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
++        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
++        self.table.setAccessibleName("속도 기준 지점 목록")
++        header_view = self.table.horizontalHeader()
++        for column in range(len(self.COLUMNS)):
++            header_view.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
++        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
++        self.table.setMinimumWidth(380)
++        body.addWidget(self.table, 5)
++        self.chart = SpeedChart(self)
++        body.addWidget(self.chart, 4)
++        root.addLayout(body, 1)
++
++        result = QHBoxLayout()
++        result.setSpacing(10)
++        self.result_label = QLabel(self)
++        self.result_label.setTextFormat(Qt.TextFormat.RichText)
++        self.result_label.setStyleSheet("font-size: 13px;")
++        result.addWidget(self.result_label, 1)
++        self.apply_button = QPushButton(material_icon("check", PRIMARY), "차량 속도에 적용", self)
++        self.apply_button.setToolTip("트리거 탭의 차량 속도 (추정) 항목에 이 구간을 입력합니다.")
++        result.addWidget(self.apply_button)
++        root.addLayout(result)
++        self.warning_label = QLabel(self)
++        self.warning_label.setWordWrap(True)
++        self.warning_label.setStyleSheet(
++            f"color: {WARNING_TEXT}; background: {WARNING_BACKGROUND}; border-radius: 6px; padding: 6px 10px; font-size: 12px;"
++        )
++        root.addWidget(self.warning_label)
++
++        self.add_button.clicked.connect(self.add_point_requested)
++        self.remove_button.clicked.connect(self._remove_selected)
++        self.clear_button.clicked.connect(self.clear_requested)
++        self.apply_button.clicked.connect(self._apply)
++        self.table.cellClicked.connect(self._row_clicked)
++        self.table.itemSelectionChanged.connect(self._update_buttons)
++        self.chart.point_clicked.connect(self.seek_requested)
++        self.set_data([], SpeedEstimate(), 0.0)
++
++    def set_apply_available(self, available: bool) -> None:
++        self._can_apply = available
++        self._update_buttons()
++
++    def set_data(self, points: list[SpeedPoint], estimate: SpeedEstimate, fps: float) -> None:
++        selected_frame = self._selected_frame()
++        self._points = points
++        self._estimate = estimate
++        self._fps = fps
++        segment_by_end = {segment.end_frame: segment for segment in estimate.segments}
++        self._updating = True
++        try:
++            self.table.setRowCount(len(points))
++            for row, point in enumerate(points):
++                number = QTableWidgetItem(str(row + 1))
++                number.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
++                number.setForeground(QColor(SPEED_POINT))
++                if point.frame in estimate.points_used:
++                    number.setToolTip("T 속도 계산에 사용한 지점")
++                    font = number.font()
++                    font.setBold(True)
++                    number.setFont(font)
++                self.table.setItem(row, 0, number)
++                self.table.setItem(row, 1, QTableWidgetItem(f"{point.frame + 1:,}"))
++                seconds = point.frame / fps if fps else 0.0
++                self.table.setItem(row, 2, QTableWidgetItem(format_timestamp(seconds)))
++                if row == 0:
++                    first = QTableWidgetItem("시작 지점")
++                    first.setForeground(QColor(MUTED))
++                    self.table.removeCellWidget(row, 3)
++                    self.table.setItem(row, 3, first)
++                else:
++                    self.table.setItem(row, 3, QTableWidgetItem())
++                    editor = self.table.cellWidget(row, 3)
++                    if not isinstance(editor, QDoubleSpinBox):
++                        editor = self._distance_editor()
++                        self.table.setCellWidget(row, 3, editor)
++                    editor.setProperty("frame", point.frame)
++                    editor.setAccessibleName(f"{row + 1}번 지점까지 거리")
++                    if not editor.hasFocus():
++                        editor.blockSignals(True)
++                        editor.setValue(point.distance_m or 0.0)
++                        editor.blockSignals(False)
++                segment = segment_by_end.get(point.frame) if row else None
++                speed_text = "-"
++                if segment is not None:
++                    speed_text = f"{_kph(segment.kph)} km/h  ({_kph(segment.kph_low)}–{_kph(segment.kph_high)})"
++                speed = QTableWidgetItem(speed_text)
++                speed.setForeground(QColor(TEXT if segment else MUTED))
++                self.table.setItem(row, 4, speed)
++                if point.frame == selected_frame:
++                    self.table.selectRow(row)
++        finally:
++            self._updating = False
++        self.chart.set_data(points, estimate, fps)
++        self._update_result()
++        self._update_buttons()
++
++    def _distance_editor(self) -> QDoubleSpinBox:
++        editor = QDoubleSpinBox(self.table)
++        editor.setRange(0.0, 500.0)
++        editor.setDecimals(2)
++        editor.setSingleStep(0.5)
++        editor.setSuffix(" m")
++        editor.setSpecialValueText("거리 입력")
++        editor.setKeyboardTracking(False)
++        editor.valueChanged.connect(lambda value, editor=editor: self._distance_edited(editor, value))
++        return editor
++
++    def _distance_edited(self, editor: QDoubleSpinBox, value: float) -> None:
++        frame = editor.property("frame")
++        if self._updating or frame is None:
++            return
++        self.distance_changed.emit(int(frame), value if value > 0 else None)
++
++    def _update_result(self) -> None:
++        estimate = self._estimate
++        if estimate.trigger_frame is None:
++            text = f"<span style='color:{MUTED}'>T 트리거를 지정하면 T 시점의 속도를 계산해요.</span>"
++        elif estimate.kph is None:
++            text = f"<span style='color:{MUTED}'>T 근처에 거리가 입력된 지점이 2개 이상 필요해요.</span>"
++        else:
++            label = estimate.label or ""
++            text = (
++                f"T 시점 약 <b style='font-size:16px'>{_kph(estimate.kph)} km/h</b> "
++                f"<span style='color:{MUTED}'>({_kph(estimate.kph_low)}–{_kph(estimate.kph_high)} km/h · "
++                f"{estimate.method} · 지점 {len(estimate.points_used)}개)</span>"
++                f" → <b style='color:{PRIMARY}'>{label}</b>"
++            )
++        self.result_label.setText(text)
++        warnings = list(estimate.warnings)
++        if estimate.label_uncertain:
++            warnings.insert(
++                0,
++                "추정 범위가 속도 구간 경계에 걸쳐 있어요. 영상을 다시 확인하거나 지점을 더 추가해 주세요.",
++            )
++        self.warning_label.setText("\n".join(f"· {warning}" for warning in warnings))
++        self.warning_label.setVisible(bool(warnings))
++
++    def _selected_frame(self) -> int | None:
++        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
++        if not rows or not (0 <= rows[0].row() < len(self._points)):
++            return None
++        return self._points[rows[0].row()].frame
++
++    def _update_buttons(self) -> None:
++        self.remove_button.setEnabled(self._selected_frame() is not None)
++        self.clear_button.setEnabled(bool(self._points))
++        self.apply_button.setEnabled(self._can_apply and self._estimate.label is not None)
++
++    def _row_clicked(self, row: int, column: int) -> None:
++        del column
++        if 0 <= row < len(self._points):
++            self.seek_requested.emit(self._points[row].frame)
++
++    def _remove_selected(self) -> None:
++        frame = self._selected_frame()
++        if frame is not None:
++            self.remove_point_requested.emit(frame)
++
++    def _apply(self) -> None:
++        if self._estimate.label is not None:
++            self.apply_requested.emit(self._estimate.label)
++
++
++__all__ = ["SpeedChart", "SpeedPanel"]
+diff --git a/tests/test_speed_estimation.py b/tests/test_speed_estimation.py
+new file mode 100644
+index 0000000..26fa64a
+--- /dev/null
++++ b/tests/test_speed_estimation.py
+@@ -0,0 +1,131 @@
++import json
++import math
++
++import pytest
++
++from investigator.models import InvestigationCase
++from investigator.speed_estimation import (
++    SpeedPoint,
++    estimate_speed,
++    points_from_json,
++    speed_label,
++)
++
++
++def test_constant_speed_between_points():
++    # 10 m/s = 36 km/h; a 5 m reference every 15 frames at 30 fps.
++    points = [SpeedPoint(0)] + [SpeedPoint(15 * i, 5.0) for i in range(1, 5)]
++    result = estimate_speed(points, 30.0, trigger_frame=40)
++    assert [round(s.kph, 6) for s in result.segments] == [36.0] * 4
++    assert result.kph == pytest.approx(36.0)
++    assert result.kph_low < 36.0 < result.kph_high
++    assert result.label == "중속(30-60kph)"
++    assert result.method == "등가속도 근사"
++    assert not result.warnings
++
++
++def test_constant_acceleration_is_recovered_at_trigger():
++    fps, v0, accel = 30.0, 5.0, 2.0  # m/s, m/s²
++    frames = [0, 20, 38, 55, 70]
++    pos = [v0 * (f / fps) + 0.5 * accel * (f / fps) ** 2 for f in frames]
++    points = [SpeedPoint(frames[0])] + [
++        SpeedPoint(f, pos[i] - pos[i - 1]) for i, f in enumerate(frames) if i
++    ]
++    trigger = 62
++    result = estimate_speed(points, fps, trigger)
++    expected = (v0 + accel * trigger / fps) * 3.6
++    assert result.kph == pytest.approx(expected, rel=1e-6)
++    assert result.points_used == (20, 38, 55, 70)
++
++
++def test_two_points_use_segment_average_and_warn_when_far_outside():
++    points = [SpeedPoint(100), SpeedPoint(130, 8.0)]
++    result = estimate_speed(points, 30.0, trigger_frame=10)
++    assert result.kph == pytest.approx(8.0 / 1.0 * 3.6)
++    assert result.method == "인접 구간 평균 속도"
++    assert any("멀리" in w for w in result.warnings)
++
++
++def test_missing_distance_breaks_chain_and_is_reported():
++    points = [SpeedPoint(0), SpeedPoint(30, 10.0), SpeedPoint(60), SpeedPoint(90, 10.0)]
++    result = estimate_speed(points, 30.0, trigger_frame=75)
++    assert len(result.segments) == 2
++    assert result.points_used == (60, 90)
++    assert any("3번" in w for w in result.warnings)
++
++
++def test_no_trigger_still_gives_segments():
++    result = estimate_speed([SpeedPoint(0), SpeedPoint(30, 3.0)], 30.0, None)
++    assert result.kph is None and len(result.segments) == 1
++
++
++@pytest.mark.parametrize(
++    ("kph", "label"),
++    [
++        (0.0, "정차(0kph)"),
++        (0.9, "정차(0kph)"),
++        (1.0, "크립(0-10kph)"),
++        (9.99, "크립(0-10kph)"),
++        (10.0, "저속(10-30kph)"),
++        (30.0, "중속(30-60kph)"),
++        (59.9, "중속(30-60kph)"),
++        (60.0, "고속(60kph이상)"),
++    ],
++)
++def test_speed_labels(kph, label):
++    assert speed_label(kph) == label
++
++
++def test_label_uncertain_near_boundary():
++    # 30 km/h with very short segments: the ±0.5 frame range crosses 30.
++    points = [SpeedPoint(0), SpeedPoint(3, 0.8333333), SpeedPoint(6, 0.8333333)]
++    result = estimate_speed(points, 30.0, trigger_frame=4)
++    assert result.label_uncertain
++
++
++def test_implausible_acceleration_falls_back():
++    points = [SpeedPoint(0), SpeedPoint(30, 1.0), SpeedPoint(36, 20.0)]
++    result = estimate_speed(points, 30.0, trigger_frame=33)
++    assert result.method == "인접 구간 평균 속도"
++    assert any("g" in w for w in result.warnings)
++
++
++def test_points_from_json_skips_bad_values():
++    raw = [{"frame": "5", "distance_m": None}, {"frame": 2, "distance_m": -1}, "x", {"frame": 9, "distance_m": "4.5"}]
++    assert points_from_json(raw) == [SpeedPoint(2, None), SpeedPoint(5, None), SpeedPoint(9, 4.5)]
++
++
++def test_case_speed_points_insert_remove_and_roundtrip(tmp_path):
++    video = tmp_path / "1234567890123.mp4"
++    video.write_bytes(b"")
++    case = InvestigationCase(videos=[str(video)])
++    assert case.toggle_speed_point(10)
++    assert case.toggle_speed_point(40)
++    case.set_speed_distance(40, 8.0)
++    assert case.toggle_speed_point(70)  # inherits 8 m
++    assert [p.distance_m for p in case.speed_points] == [None, 8.0, 8.0]
++    # Inserting between 10 and 40 clears 40's distance (it was 10→40).
++    assert case.toggle_speed_point(25)
++    assert [p.distance_m for p in case.speed_points] == [None, None, None, 8.0]
++    case.set_speed_distance(25, 8.0)
++    case.set_speed_distance(40, 3.0)
++    # Removing 25 merges 8 + 3 back into 40.
++    assert not case.toggle_speed_point(25)
++    assert [(p.frame, p.distance_m) for p in case.speed_points] == [(10, None), (40, 11.0), (70, 8.0)]
++    # Removing the first point leaves the new first without a distance.
++    case.toggle_speed_point(10)
++    assert case.speed_points[0].distance_m is None
++
++    restored = InvestigationCase.from_dict(json.loads(json.dumps(case.to_dict())))
++    assert restored.speed_points == case.speed_points
++    case.set_trigger(55)
++    assert case.speed_points == restored.speed_points  # T edits keep speed points
++    case.clear_speed_points()
++    assert "speed_points" not in case.markers_by_video[str(video.resolve())]
++
++
++def test_old_files_without_speed_points_are_unchanged():
++    data = {"markers_by_video": {"a.mp4": {"trigger_frame": 3, "collision_frames": [9]}}, "videos": ["a.mp4"]}
++    case = InvestigationCase.from_dict(data)
++    assert case.to_dict()["markers_by_video"] == {"a.mp4": {"trigger_frame": 3, "collision_frames": [9]}}
++    assert math.isclose(0, len(case.speed_points))

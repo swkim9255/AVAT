@@ -1,0 +1,8 @@
+# -*- coding: utf-8 -*-
+# 개발용 의존성: 실행용 requirements.txt 전체 + 테스트·린트 도구.
+# 프로젝트 루트에서: python -m pip install -r local_dev/requirements-dev.txt
+# PyTorch는 requirements.txt 머리말의 1)처럼 먼저 설치합니다.
+-r ../requirements.txt
+pytest>=8,<10
+pytest-qt>=4.4,<5
+ruff>=0.6,<1

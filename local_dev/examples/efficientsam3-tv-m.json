@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "source": "../../efficientsam3",
+  "checkpoint": "efficientsam3_ft/efficientsam3_tinyvit.pt",
+  "backbone_type": "tinyvit",
+  "model_name": "11m",
+  "source_commit": "bd0936c788fed8d51fa799437f05abd97b401b06"
+}

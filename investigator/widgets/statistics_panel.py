@@ -7,15 +7,13 @@ from pathlib import Path
 from statistics import quantiles
 from typing import Any
 
-from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QDateEdit,
-    QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -33,13 +31,19 @@ from PySide6.QtWidgets import (
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from investigator.butterfly import build_butterfly, butterfly_groups
+from investigator.butterfly import (
+    build_butterfly,
+    butterfly_groups,
+    group_value_key,
+    normalize_group_values,
+)
 from investigator.form_definition import FormDefinition
 from investigator.models import InvestigationCase
 from investigator.schema import FieldKind
@@ -47,13 +51,18 @@ from investigator.statistics import (
     INTERVAL_KEY,
     SEVERITY_KEY,
     TRIGGER_SPEED_KEY,
+    AnyOf,
     Category,
     CrossTableLimitError,
     Distribution,
+    FilterItem,
     StatisticsEngine,
     StatsCondition,
     StatsFilter,
+    normalize_condition,
+    normalize_filter_items,
 )
+from investigator.statistics_conditions import clean_field_label, condition_text
 from investigator.theme import PRIMARY, material_icon
 from investigator.widgets.scroll_safe_combo import ScrollSafeComboBox
 from investigator.widgets.statistics_charts import (
@@ -65,6 +74,11 @@ from investigator.widgets.statistics_charts import (
     StatisticsScatterPlot,
     StatisticsStackedChart,
 )
+from investigator.widgets.statistics_condition_dialog import (
+    StatisticsConditionDialog as StatisticsConditionDialog,
+)
+from investigator.widgets.statistics_condition_popup import StatisticsConditionPopup
+from investigator.widgets.statistics_group_popup import StatisticsGroupPopup
 
 
 def label(text: str, name: str = "secondaryText") -> QLabel:
@@ -214,81 +228,6 @@ class StatisticsToggle(QFrame):
         self.currentIndexChanged.emit(index)
 
 
-class StatisticsConditionDialog(QDialog):
-    def __init__(self, engine: StatisticsEngine, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.engine = engine
-        self.condition: StatsCondition | None = None
-        self.setWindowTitle("통계 조건 추가")
-        self.setMinimumWidth(420)
-        layout = QVBoxLayout(self)
-        layout.addWidget(label("항목"))
-        self.field = ScrollSafeComboBox(self)
-        for spec in engine.fields:
-            self.field.addItem(spec.label, spec.key)
-        layout.addWidget(self.field)
-        self.operator = ScrollSafeComboBox(self)
-        for text, value in (("값이 같음 / 포함", "eq"), ("미입력", "missing"), ("숫자 범위", "range")):
-            self.operator.addItem(text, value)
-        layout.addWidget(self.operator)
-        self.value = ScrollSafeComboBox(self)
-        self.value.setEditable(True)
-        layout.addWidget(self.value)
-        range_row = QHBoxLayout()
-        self.lower = QLineEdit(self)
-        self.lower.setPlaceholderText("이상 · 비우면 제한 없음")
-        self.upper = QLineEdit(self)
-        self.upper.setPlaceholderText("미만 · 비우면 제한 없음")
-        range_row.addWidget(self.lower)
-        range_row.addWidget(self.upper)
-        layout.addLayout(range_row)
-        self.field.currentIndexChanged.connect(self._field_changed)
-        self.operator.currentIndexChanged.connect(self._operator_changed)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("조건 추가")
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self._field_changed()
-
-    def _field_changed(self) -> None:
-        self.value.clear()
-        for choice in self.engine.field(self.field.currentData()).choices:
-            self.value.addItem(choice.label, choice.value)
-        self.operator.model().item(2).setEnabled(self.engine.is_numeric(self.field.currentData()))
-        if self.operator.currentData() == "range" and not self.engine.is_numeric(self.field.currentData()):
-            self.operator.setCurrentIndex(0)
-        self._operator_changed()
-
-    def _operator_changed(self) -> None:
-        operator = self.operator.currentData()
-        self.value.setVisible(operator == "eq")
-        self.lower.setVisible(operator == "range")
-        self.upper.setVisible(operator == "range")
-
-    def _accept(self) -> None:
-        key, operator = self.field.currentData(), self.operator.currentData()
-        if operator == "range":
-            try:
-                low = float(self.lower.text()) if self.lower.text().strip() else None
-                high = float(self.upper.text()) if self.upper.text().strip() else None
-                if any(v is not None and not math.isfinite(v) for v in (low, high)) or (low is not None and high is not None and low >= high):
-                    raise ValueError
-            except ValueError:
-                QMessageBox.warning(self, "조건", "올바른 숫자 범위를 입력해 주세요.")
-                return
-            self.condition = StatsCondition(key, operator=operator, lower=low, upper=high)
-        else:
-            value = self.value.currentData()
-            if self.value.currentIndex() < 0 or self.value.currentText() != self.value.itemText(self.value.currentIndex()):
-                value = self.value.currentText().strip()
-            if operator == "eq" and not value:
-                QMessageBox.warning(self, "조건", "비교할 값을 입력해 주세요.")
-                return
-            self.condition = StatsCondition(key, value, operator)
-        self.accept()
-
-
 class StatisticsPanel(QWidget):
     case_activated = Signal(str, str)
     media_requested = Signal()
@@ -298,7 +237,14 @@ class StatisticsPanel(QWidget):
         self.setObjectName("statisticsPanel")
         self.engine = StatisticsEngine([], FormDefinition.default())
         self.workspace = Path.cwd()
-        self.conditions: list[StatsCondition] = []
+        self.conditions: list[FilterItem] = []
+        # Only used when accepting an older in-memory project state. New filters
+        # keep graph conditions in the same top-level AND list as manual ones.
+        self.required_conditions: list[StatsCondition] = []
+        self._selected_conditions: set[int] = set()
+        self._condition_popup: StatisticsConditionPopup | None = None
+        self._group_popup: StatisticsGroupPopup | None = None
+        self._condition_menu: QMenu | None = None
         self.pinned_fields = ["collision_targets", "incident_day", "weather", "driver_age"]
         self._updating = False
         self._selection: tuple[tuple[str, ...], tuple[StatsCondition, ...], str] | None = None
@@ -352,7 +298,6 @@ class StatisticsPanel(QWidget):
         self.target_label = label("대상 0건 / 전체 0건")
         self.target_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.target_label.setWordWrap(False)
-        top.addWidget(self.target_label)
         self.export_button = QPushButton(material_icon("download", PRIMARY), "내보내기", self)
         menu = QMenu(self.export_button)
         for title, kind in (("현재 그래프 이미지 · PNG", "png"), ("현재 보기의 표 · CSV", "csv"), ("개요 보고서 · PDF", "pdf")):
@@ -360,15 +305,34 @@ class StatisticsPanel(QWidget):
         self.export_button.setMenu(menu)
         top.addWidget(self.export_button)
         filter_layout.addLayout(top)
+        condition_row = QHBoxLayout()
+        condition_row.setSpacing(8)
+        self.group_conditions_button = QPushButton("OR로 묶기", self)
+        self.group_conditions_button.setObjectName("groupStatisticsConditions")
+        self.group_conditions_button.setMinimumHeight(32)
+        self.group_conditions_button.setEnabled(False)
+        self.group_conditions_button.setToolTip("칩 왼쪽 체크박스로 조건을 2개 이상 선택하세요. 묶음은 다시 묶을 수 없습니다.")
+        self.group_conditions_button.clicked.connect(self.group_selected_conditions)
+        condition_row.addWidget(self.group_conditions_button)
+        self.condition_hint = label("기본은 AND, 선택한 조건끼리 OR로 묶습니다.")
+        condition_row.addWidget(self.condition_hint, 1)
+        filter_layout.addLayout(condition_row)
         self.chips_scroll = QScrollArea(self)
         self.chips_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.chips_scroll.setWidgetResizable(True)
-        self.chips_scroll.setMaximumHeight(52)
+        self.chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chips_scroll.setFixedHeight(self._condition_chip_height())
+        self.chips_scroll.horizontalScrollBar().rangeChanged.connect(self._resize_condition_strip)
         self.chips_widget = QWidget(self)
         self.chips_layout = QHBoxLayout(self.chips_widget)
         self.chips_layout.setContentsMargins(0, 0, 0, 0)
+        self.chips_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.chips_scroll.setWidget(self.chips_widget)
-        filter_layout.addWidget(self.chips_scroll)
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(12)
+        chip_row.addWidget(self.chips_scroll, 1)
+        chip_row.addWidget(self.target_label)
+        filter_layout.addLayout(chip_row)
         root.addWidget(filters)
         self.view_tabs = QTabBar(self)
         self.view_tabs.setObjectName("statisticsViews")
@@ -441,10 +405,34 @@ class StatisticsPanel(QWidget):
 
     def set_data(self, cases: list[InvestigationCase], definition: FormDefinition,
                  video_fps: dict[str, float] | None = None, workspace: Path | None = None) -> None:
+        self._close_condition_popup()
         self.engine = StatisticsEngine(cases, definition, video_fps)
         if workspace is not None:
             self.workspace = workspace
-        self.conditions = [c for c in self.conditions if c.field_key in {f.key for f in self.engine.fields}]
+        old_count = sum(len(item.conditions) if isinstance(item, AnyOf) else 1 for item in self.conditions)
+        old_count += len(self.required_conditions)
+
+        def compatible(condition: StatsCondition) -> bool:
+            try:
+                self.engine.validate_condition(condition)
+            except (KeyError, ValueError):
+                return False
+            return True
+
+        kept: list[FilterItem] = []
+        for item in (*self.conditions, *self.required_conditions):
+            if isinstance(item, AnyOf):
+                members = tuple(condition for condition in item.conditions if compatible(condition))
+                if members:
+                    kept.append(AnyOf(members) if len(members) > 1 else members[0])
+            elif compatible(item):
+                kept.append(item)
+        self.conditions = kept
+        self.required_conditions.clear()
+        self._selected_conditions.clear()
+        removed = old_count - sum(len(item.conditions) if isinstance(item, AnyOf) else 1 for item in kept)
+        if removed:
+            self.condition_hint.setText(f"조사 양식 변경으로 사용할 수 없는 조건 {removed}개를 해제했습니다.")
         self.clear_selection()
         self.refresh()
 
@@ -454,12 +442,17 @@ class StatisticsPanel(QWidget):
             self.date_from.date().toString("yyyyMMdd") if self.period.isChecked() else "",
             self.date_to.date().toString("yyyyMMdd") if self.period.isChecked() else "",
             tuple(self.conditions),
+            required_conditions=tuple(self.required_conditions),
         )
 
     def capture_state(self) -> dict[str, Any]:
         return {"status": self.status.currentData(), "period": self.period.isChecked(),
                 "from": self.date_from.date(), "to": self.date_to.date(),
-                "conditions": tuple(self.conditions), "pinned": tuple(self.pinned_fields),
+                "conditions": normalize_filter_items(self.conditions, required_conditions=self.required_conditions),
+                "pinned": tuple(self.pinned_fields),
+                "filter_version": 2,
+                "condition_mode": "all",
+                "required_conditions": (),
                 "view": self.view_tabs.currentIndex(), "item": getattr(self, "_item_key", "collision_targets"),
                 "row": getattr(self, "_row_key", "weather"), "column": getattr(self, "_column_key", SEVERITY_KEY),
                 "video_group": getattr(self, "_video_group", "collision_targets"),
@@ -471,16 +464,24 @@ class StatisticsPanel(QWidget):
                 "butterfly_unit": getattr(self, "_butterfly_unit", "percent"),
                 "butterfly_group_key": getattr(self, "_butterfly_group_key", None),
                 "butterfly_left": getattr(self, "_butterfly_left", None),
-                "butterfly_right": getattr(self, "_butterfly_right", None)}
+                "butterfly_right": getattr(self, "_butterfly_right", None),
+                "butterfly_left_values": getattr(self, "_butterfly_left_values", ()),
+                "butterfly_right_values": getattr(self, "_butterfly_right_values", ())}
 
     def restore_state(self, state: dict[str, Any]) -> None:
+        self._close_condition_popup()
         self._updating = True
         try:
             self.status.setCurrentIndex(max(0, self.status.findData(state.get("status", "completed"))))
             self.period.setChecked(state.get("period", False))
             self.date_from.setDate(state.get("from", QDate(QDate.currentDate().year(), 1, 1)))
             self.date_to.setDate(state.get("to", QDate.currentDate()))
-            self.conditions = list(state.get("conditions", ()))
+            self.conditions = list(normalize_filter_items(
+                state.get("conditions", ()), state.get("condition_mode", "all"),
+                state.get("required_conditions", ()),
+            ))
+            self.required_conditions.clear()
+            self._selected_conditions.clear()
             self.pinned_fields = list(state.get("pinned", ("collision_targets", "incident_day", "weather", "driver_age")))
             self._item_key = state.get("item", "collision_targets")
             self._row_key, self._column_key = state.get("row", "weather"), state.get("column", SEVERITY_KEY)
@@ -492,6 +493,10 @@ class StatisticsPanel(QWidget):
             self._butterfly_group_key = state.get("butterfly_group_key")
             self._butterfly_left = state.get("butterfly_left")
             self._butterfly_right = state.get("butterfly_right")
+            for side in ("left", "right"):
+                old = state.get(f"butterfly_{side}")
+                selected = state.get(f"butterfly_{side}_values", (old,) if old is not None else ())
+                setattr(self, f"_butterfly_{side}_values", normalize_group_values(selected))
             self._video_group = state.get("video_group", "collision_targets")
             self.view_tabs.setCurrentIndex(state.get("view", 0))
         finally:
@@ -519,56 +524,171 @@ class StatisticsPanel(QWidget):
     def _filters_changed(self) -> None:
         if self._updating:
             return
+        self._close_condition_popup()
+        self._reset_condition_hint()
+        self._selected_conditions.clear()
         self.clear_selection()
         self.refresh()
 
     def _view_changed(self, index: int) -> None:
         if self._updating:
             return
+        self._close_condition_popup()
         self.clear_selection()
         self.refresh()
         if index == 3:
             self.media_requested.emit()
 
     def add_condition_dialog(self) -> None:
-        dialog = StatisticsConditionDialog(self.engine, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.condition:
-            self.add_condition(dialog.condition)
+        self._open_condition_popup(self.add_condition_button)
 
-    def add_condition(self, condition: StatsCondition) -> None:
+    def _close_condition_popup(self) -> None:
+        if self._group_popup is not None:
+            self._group_popup.close()
+            self._group_popup.deleteLater()
+            self._group_popup = None
+        if self._condition_popup is not None:
+            self._condition_popup.close()
+            self._condition_popup.deleteLater()
+            self._condition_popup = None
+        if self._condition_menu is not None:
+            self._condition_menu.close()
+            self._condition_menu.deleteLater()
+            self._condition_menu = None
+
+    def _open_condition_popup(self, anchor: QWidget, condition: StatsCondition | None = None,
+                              index: int | None = None, member: int | None = None) -> None:
+        self._close_condition_popup()
+        popup = StatisticsConditionPopup(
+            self.engine, self.filters(), condition, self, ignore_status=self.view_tabs.currentIndex() == 4,
+        )
+        self._condition_popup = popup
+
+        def apply(updated: StatsCondition) -> None:
+            if index is None:
+                self.add_condition(updated)
+            elif member is None:
+                self.conditions[index] = updated
+                self._conditions_edited()
+            else:
+                group = self.conditions[index]
+                if not isinstance(group, AnyOf):
+                    return
+                members = list(group.conditions)
+                members[member] = updated
+                self.conditions[index] = AnyOf(tuple(members))
+                self._conditions_edited()
+
+        popup.applied.connect(apply)
+        popup.open_at(anchor)
+
+    def edit_condition(self, index: int) -> None:
+        if not 0 <= index < len(self.conditions):
+            return
+        condition = self.conditions[index]
+        anchor = self.add_condition_button
+        for position in range(self.chips_layout.count()):
+            chip = self.chips_layout.itemAt(position).widget()
+            if chip is not None and chip.property("conditionIndex") == index:
+                anchor = chip.findChild(QPushButton, "filterChip") or anchor
+                break
+        if not isinstance(condition, AnyOf):
+            self._open_condition_popup(anchor, normalize_condition(condition), index)
+            return
+        # A group has no single field: choose the member to edit, then show the
+        # same checklist popup. This menu never introduces nested OR groups.
+        self._close_condition_popup()
+        menu = QMenu(self)
+        self._condition_menu = menu
+        heading = menu.addAction("OR 묶음 · 수정할 조건을 선택하세요")
+        heading.setEnabled(False)
+        for member, item in enumerate(condition.conditions):
+            action = menu.addAction(self.condition_text(item))
+            action.triggered.connect(
+                lambda checked=False, c=item, m=member: QTimer.singleShot(
+                    0, lambda: self._open_condition_popup(anchor, normalize_condition(c), index, m),
+                ),
+            )
+        menu.popup(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _reset_condition_hint(self) -> None:
+        self.condition_hint.setText("기본은 AND, 선택한 조건끼리 OR로 묶습니다.")
+
+    def _conditions_edited(self) -> None:
+        self._selected_conditions.clear()
+        self._reset_condition_hint()
+        self.clear_selection()
+        self.refresh()
+
+    def add_condition(self, condition: FilterItem) -> None:
+        self.engine.validate_condition(condition)
         if condition not in self.conditions:
             self.conditions.append(condition)
-        self.clear_selection()
-        self.refresh()
+        self._conditions_edited()
 
     def clear_conditions(self) -> None:
+        self._close_condition_popup()
         self.conditions.clear()
-        self.clear_selection()
-        self.refresh()
+        self.required_conditions.clear()
+        self._conditions_edited()
 
-    def _remove_condition(self, condition: StatsCondition) -> None:
-        self.conditions.remove(condition)
-        self.clear_selection()
-        self.refresh()
+    def _remove_condition(self, condition: FilterItem) -> None:
+        self._remove_condition_at(self.conditions.index(condition))
 
-    def condition_text(self, condition: StatsCondition) -> str:
-        try:
-            spec = self.engine.field(condition.field_key)
-        except KeyError:
-            return condition.field_key
-        if condition.operator == "missing":
-            value = "미입력"
-        elif condition.operator == "not_applicable":
-            value = "해당 없음"
-        elif condition.operator == "invalid":
-            value = "형식 오류"
-        elif condition.operator == "range":
-            low = f"{condition.lower:g} 이상" if condition.lower is not None else ""
-            high = f"{condition.upper:g} 미만" if condition.upper is not None else ""
-            value = f"{low} {high}".strip() or "모든 숫자"
+    def _remove_condition_at(self, index: int) -> None:
+        self._close_condition_popup()
+        if 0 <= index < len(self.conditions):
+            del self.conditions[index]
+            self._conditions_edited()
+
+    def _remove_required_condition(self, condition: StatsCondition) -> None:
+        self.required_conditions.remove(condition)
+        self._conditions_edited()
+
+    def _select_condition(self, index: int, selected: bool) -> None:
+        if selected and 0 <= index < len(self.conditions) and not isinstance(self.conditions[index], AnyOf):
+            self._selected_conditions.add(index)
         else:
-            value = next((c.label for c in spec.choices if c.value == condition.value), str(condition.value))
-        return f"{spec.label} = {value}"
+            self._selected_conditions.discard(index)
+        self.group_conditions_button.setEnabled(len(self._selected_conditions) >= 2)
+
+    def group_selected_conditions(self) -> None:
+        indices = sorted(i for i in self._selected_conditions
+                         if 0 <= i < len(self.conditions) and not isinstance(self.conditions[i], AnyOf))
+        if len(indices) < 2:
+            return
+        self._close_condition_popup()
+        group = AnyOf(tuple(self.conditions[i] for i in indices))
+        selected = set(indices)
+        self.conditions = [group if i == indices[0] else item
+                           for i, item in enumerate(self.conditions) if i not in selected or i == indices[0]]
+        self._conditions_edited()
+
+    def ungroup_condition(self, index: int) -> None:
+        if 0 <= index < len(self.conditions) and isinstance(self.conditions[index], AnyOf):
+            self._close_condition_popup()
+            self.conditions[index:index + 1] = self.conditions[index].conditions
+            self._conditions_edited()
+
+    def _condition_context_menu(self, index: int, anchor: QWidget, position) -> None:
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.addAction("묶음 풀기", lambda: self.ungroup_condition(index))
+        menu.popup(anchor.mapToGlobal(position))
+
+    def condition_text(self, condition: FilterItem) -> str:
+        return condition_text(self.engine, condition)
+
+    def _condition_chip_height(self) -> int:
+        self.group_conditions_button.ensurePolished()
+        return max(32, self.group_conditions_button.sizeHint().height())
+
+    def _resize_condition_strip(self, minimum: int, maximum: int) -> None:
+        # Reserve scrollbar space only for overflowing chips, not as permanent
+        # empty padding above/below every condition.
+        scrollbar_height = self.chips_scroll.horizontalScrollBar().sizeHint().height()
+        self.chips_scroll.setFixedHeight(self._condition_chip_height()
+                                        + (scrollbar_height if maximum > minimum else 0))
 
     def filter_description(self) -> str:
         parts = [self.status.currentText()]
@@ -576,14 +696,79 @@ class StatisticsPanel(QWidget):
             parts.append(f"{self.date_from.text()} ~ {self.date_to.text()}")
         else:
             parts.append("전체 기간")
-        parts.extend(self.condition_text(c) for c in self.conditions)
+        if self.conditions:
+            parts.append(" AND ".join(self.condition_text(c) for c in self.conditions))
+        if self.required_conditions:
+            parts.append("AND 그래프 선택: (" + " AND ".join(
+                self.condition_text(c) for c in self.required_conditions
+            ) + ")")
         if self.view_tabs.currentIndex() == 4:
             parts.append("데이터 품질은 상태 필터를 제외")
         return " · ".join(parts)
 
+    def _condition_chip(self, index: int, condition: FilterItem) -> QFrame:
+        chip = QFrame(self.chips_widget)
+        chip.setObjectName("statisticsConditionChip")
+        chip.setProperty("conditionIndex", index)
+        chip.setFixedHeight(self._condition_chip_height())
+        chip.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        chip.setStyleSheet(
+            "QFrame#statisticsConditionChip { background:#FFFFFF; border:1px solid #C9CED6; border-radius:6px; }"
+            "QPushButton#filterChip { border:0; background:transparent; border-radius:0; padding:0 3px; min-width:0; min-height:26px; }"
+            "QPushButton#filterChip:hover { color:#225FC1; background:#F1F4F8; }"
+            "QToolButton#filterChipRemove { border:0; background:transparent; padding:0; min-width:0; min-height:0; font-size:17px; }"
+            "QToolButton#filterChipRemove:hover { color:#A52A2A; background:#FFF1F1; }"
+        )
+        row = QHBoxLayout(chip)
+        row.setContentsMargins(5, 0, 3, 0)
+        row.setSpacing(2)
+        selector = QCheckBox(chip)
+        selector.setObjectName("filterChipSelect")
+        selector.setFixedWidth(16)
+        selector.setProperty("conditionIndex", index)
+        selector.setAccessibleName("OR로 묶을 조건 선택")
+        selector.setChecked(index in self._selected_conditions)
+        selector.setEnabled(not isinstance(condition, AnyOf))
+        selector.setToolTip("묶음은 다시 묶을 수 없습니다." if isinstance(condition, AnyOf)
+                            else "다른 조건과 OR로 묶으려면 선택하세요.")
+        selector.toggled.connect(lambda checked, i=index: self._select_condition(i, checked))
+        row.addWidget(selector)
+        text = self.condition_text(condition)
+        body = QPushButton(chip)
+        body.setObjectName("filterChip")
+        body.setProperty("conditionIndex", index)
+        body.setText(body.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, 360))
+        body.setAccessibleName(text + " · 조건 수정")
+        body.setToolTip(text + "\n클릭하여 수정" + (" · 우클릭하여 묶음 풀기" if isinstance(condition, AnyOf) else ""))
+        body.clicked.connect(lambda checked=False, i=index: self.edit_condition(i))
+        row.addWidget(body)
+        remove = QToolButton(chip)
+        remove.setObjectName("filterChipRemove")
+        remove.setProperty("conditionIndex", index)
+        remove.setText("×")
+        remove.setFixedSize(22, 26)
+        remove.setAccessibleName(text + " · 조건 삭제")
+        remove.setToolTip("조건 삭제")
+        remove.clicked.connect(lambda checked=False, i=index: self._remove_condition_at(i))
+        row.addWidget(remove)
+        if isinstance(condition, AnyOf):
+            for widget in (chip, body):
+                widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                widget.customContextMenuRequested.connect(
+                    lambda pos, i=index, anchor=widget: self._condition_context_menu(i, anchor, pos),
+                )
+        # Keep each chip content-sized; otherwise a crowded row compresses the
+        # labels instead of exposing the scroll area's horizontal scrollbar.
+        chip.ensurePolished()
+        chip.setFixedWidth(chip.sizeHint().width())
+        return chip
+
     def refresh(self) -> None:
         if self._updating:
             return
+        if self.required_conditions:
+            self.conditions.extend(self.required_conditions)
+            self.required_conditions.clear()
         filters = self.filters()
         view = self.view_tabs.currentIndex()
         selected = self.engine.filtered_cases(filters, ignore_status=view == 4)
@@ -592,16 +777,15 @@ class StatisticsPanel(QWidget):
         self.note.setText("조건에 해당하는 사고가 없습니다. 필터를 조정해 주세요." if not selected else
                           f"대상 사고가 {len(selected)}건입니다. 비율과 함께 실제 건수를 확인해 주세요.")
         clear_layout(self.chips_layout)
-        for condition in self.conditions:
-            text = self.condition_text(condition)
-            button = QPushButton(text + "  ×", self)
-            button.setObjectName("filterChip")
-            button.setMaximumWidth(400)
-            button.setToolTip(text)
-            button.clicked.connect(lambda checked=False, c=condition: self._remove_condition(c))
-            self.chips_layout.addWidget(button)
+        self._selected_conditions.intersection_update(
+            i for i, item in enumerate(self.conditions) if not isinstance(item, AnyOf)
+        )
+        self.group_conditions_button.setEnabled(len(self._selected_conditions) >= 2)
+        for index, condition in enumerate(self.conditions):
+            if index:
+                self.chips_layout.addWidget(inline_label("AND"))
+            self.chips_layout.addWidget(self._condition_chip(index, condition))
         self.chips_layout.addStretch(1)
-        self.chips_scroll.setVisible(bool(self.conditions))
         self.clear_button.setEnabled(bool(self.conditions))
         clear_layout(self.page_layouts[view])
         for index in range(self.pages.count()):
@@ -943,14 +1127,21 @@ class StatisticsPanel(QWidget):
         if len(groups) < 2:
             inner.addWidget(label("좌우를 비교할 수 있는 그룹이 2개 이상인 항목을 선택해 주세요.", "warningNote"))
             return
-        values = [group.value for group in groups]
+        values = tuple(group.value for group in groups)
+        available = {group_value_key(value) for value in values}
         if getattr(self, "_butterfly_group_key", None) != group_key:
-            self._butterfly_left, self._butterfly_right = values[:2]
+            self._butterfly_left_values, self._butterfly_right_values = (values[0],), (values[1],)
         self._butterfly_group_key = group_key
-        if getattr(self, "_butterfly_left", None) not in values:
-            self._butterfly_left = values[0]
-        if getattr(self, "_butterfly_right", None) not in values or self._butterfly_right == self._butterfly_left:
-            self._butterfly_right = next(value for value in values if value != self._butterfly_left)
+        left = tuple(value for value in getattr(self, "_butterfly_left_values", ())
+                     if group_value_key(value) in available) or (values[0],)
+        left_keys = {group_value_key(value) for value in left}
+        right = tuple(value for value in getattr(self, "_butterfly_right_values", ())
+                      if group_value_key(value) in available and group_value_key(value) not in left_keys)
+        if not right:
+            right = tuple(value for value in values if group_value_key(value) not in left_keys)[:1]
+        self._butterfly_left_values, self._butterfly_right_values = left, right
+        self._butterfly_left = left[0] if left else None
+        self._butterfly_right = right[0] if right else None
         self.butterfly_mode = StatisticsToggle(self)
         self.butterfly_mode.addItem("두 그룹", "two")
         self.butterfly_mode.addItem("한 그룹 vs 나머지", "rest")
@@ -967,22 +1158,22 @@ class StatisticsPanel(QWidget):
         controls.addWidget(self.butterfly_unit)
         inner.addLayout(controls)
         selectors = QGridLayout()
-        self.butterfly_left = ScrollSafeComboBox(self)
-        self.butterfly_right = ScrollSafeComboBox(self)
-        for combo in (self.butterfly_left, self.butterfly_right):
-            combo.setMinimumWidth(0)
-            combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        for group in groups:
-            self.butterfly_left.addItem(group.label, group.value)
-            if group.value != self._butterfly_left:
-                self.butterfly_right.addItem(group.label, group.value)
-        self.butterfly_left.setCurrentIndex(self.butterfly_left.findData(self._butterfly_left))
+        self.butterfly_left = QPushButton(self)
+        self.butterfly_right = QPushButton(self)
+        labels = {group_value_key(group.value): group.label for group in groups}
+        for side, button in (("left", self.butterfly_left), ("right", self.butterfly_right)):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            button.setMinimumHeight(34)
+            selected = getattr(self, f"_butterfly_{side}_values")
+            text = ", ".join(labels[group_value_key(value)] for value in selected) or "값 선택"
+            button.setText(button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, 330) + "  ▾")
+            button.setToolTip(text + "\n클릭하여 여러 값을 선택합니다.")
+            button.setAccessibleName(("왼쪽" if side == "left" else "오른쪽") + " 그룹 값 선택: " + text)
+            button.clicked.connect(lambda checked=False, s=side, k=group_key, g=groups: self._open_butterfly_group(s, k, g))
         if self._butterfly_mode == "rest":
-            self.butterfly_right.clear()
-            self.butterfly_right.addItem("나머지 전체", None)
+            self.butterfly_right.setText("나머지 전체")
             self.butterfly_right.setEnabled(False)
-        else:
-            self.butterfly_right.setCurrentIndex(self.butterfly_right.findData(self._butterfly_right))
         left_label, right_label = label("■ 왼쪽 그룹"), label("■ 오른쪽 그룹")
         left_label.setStyleSheet(f"color:{StatisticsButterflyChart.LEFT_COLOR};")
         right_label.setStyleSheet(f"color:{StatisticsButterflyChart.RIGHT_COLOR};")
@@ -993,12 +1184,12 @@ class StatisticsPanel(QWidget):
         selectors.setColumnStretch(0, 1)
         selectors.setColumnStretch(1, 1)
         inner.addLayout(selectors)
-        for combo in (self.butterfly_mode, self.butterfly_unit, self.butterfly_left, self.butterfly_right):
+        for combo in (self.butterfly_mode, self.butterfly_unit):
             combo.currentIndexChanged.connect(self._change_butterfly)
         try:
             report = build_butterfly(
-                self.engine, axis_key, group_key, self.filters(), left_value=self._butterfly_left,
-                right_value=self._butterfly_right, mode=self._butterfly_mode,
+                self.engine, axis_key, group_key, self.filters(), left_values=self._butterfly_left_values,
+                right_values=self._butterfly_right_values, mode=self._butterfly_mode,
             )
         except (ValueError, CrossTableLimitError) as exc:
             inner.addWidget(label(str(exc), "warningNote"))
@@ -1039,8 +1230,26 @@ class StatisticsPanel(QWidget):
                 uids = row.left_uids if side == 0 else row.right_uids
             chart.set_selection(index, side)
             group_label = (report.left_label, report.right_label, "좌우 전체")[side]
-            # Complements and numeric bins cannot be represented by a single equality filter.
-            self.select_cases(uids, (), f"{report.axis_label} · {row.label} · {group_label}")
+            if side == 0:
+                group_condition = StatsCondition(group_key, values=self._butterfly_left_values)
+            elif side == 1 and self._butterfly_mode == "rest":
+                group_condition = StatsCondition(group_key, values=(None, *self._butterfly_left_values), exclude=True)
+            elif side == 1:
+                group_condition = StatsCondition(group_key, values=self._butterfly_right_values)
+            elif self._butterfly_mode == "rest":
+                group_condition = StatsCondition(group_key, values=(None,), exclude=True)
+            else:
+                group_condition = StatsCondition(group_key, values=normalize_group_values(
+                    (*self._butterfly_left_values, *self._butterfly_right_values)))
+            conditions = (row.condition, group_condition) if row.condition is not None else ()
+            # Invalid group answers are deliberately excluded from cohorts. Pin
+            # only if the predicates reproduce the exact displayed accidents.
+            if conditions:
+                matched = {case.uid for case in self.engine.filtered_cases(self.filters())
+                           if all(self.engine.matches(case, condition) for condition in conditions)}
+                if matched != set(uids):
+                    conditions = ()
+            self.select_cases(uids, conditions, f"{report.axis_label} · {row.label} · {group_label}")
             left, right = percentages(row)
             difference = f" · 비율 차이 {left - right:+.1f}%p" if report.left_total and report.right_total else ""
             self.butterfly_readout.setText(
@@ -1079,13 +1288,32 @@ class StatisticsPanel(QWidget):
             ])
 
     def _change_butterfly(self) -> None:
+        self._close_condition_popup()
         self._butterfly_mode = self.butterfly_mode.currentData()
         self._butterfly_unit = self.butterfly_unit.currentData()
-        self._butterfly_left = self.butterfly_left.currentData()
-        if self.butterfly_right.isEnabled():
-            self._butterfly_right = self.butterfly_right.currentData()
         self.clear_selection()
         self.refresh()
+
+    def _open_butterfly_group(self, side: str, key: str, groups: tuple[Category, ...]) -> None:
+        self._close_condition_popup()
+        other = "right" if side == "left" else "left"
+        blocked = getattr(self, f"_butterfly_{other}_values", ()) if self._butterfly_mode == "two" else ()
+        popup = StatisticsGroupPopup(
+            groups, getattr(self, f"_butterfly_{side}_values", ()),
+            title=("왼쪽" if side == "left" else "오른쪽") + " 그룹 · " + clean_field_label(self.engine.field(key).label),
+            blocked=blocked, parent=self,
+        )
+        self._group_popup = popup
+
+        def apply(values: tuple) -> None:
+            if self._butterfly_group_key != key:
+                return
+            setattr(self, f"_butterfly_{side}_values", normalize_group_values(values))
+            self.clear_selection()
+            self.refresh()
+
+        popup.applied.connect(apply)
+        popup.open_at(self.butterfly_left if side == "left" else self.butterfly_right)
 
     def _cross_categorical(self, inner: QVBoxLayout) -> None:
         try:
@@ -1470,8 +1698,7 @@ class StatisticsPanel(QWidget):
             for condition in self._selection[1]:
                 if condition not in self.conditions:
                     self.conditions.append(condition)
-            self.clear_selection()
-            self.refresh()
+            self._conditions_edited()
 
     def export_dialog(self, kind: str) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "통계 내보내기", str(self.workspace / f"statistics.{kind}"), f"{kind.upper()} (*.{kind})")

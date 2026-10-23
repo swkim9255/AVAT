@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDrag, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -134,6 +135,7 @@ class CaseListPanel(QWidget):
     delete_video_requested = Signal(str, int)
     case_reordered = Signal(str, int)
     cases_reordered = Signal(list, int)
+    sort_ascending_requested = Signal()
     export_requested = Signal()
     report_export_requested = Signal()
 
@@ -178,7 +180,21 @@ class CaseListPanel(QWidget):
             material_icon("search", MUTED), QLineEdit.ActionPosition.LeadingPosition
         )
         self.search.textChanged.connect(self._filter)
-        root.addWidget(self.search)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        search_row.addWidget(self.search, 1)
+        self.sort_button = QToolButton(self)
+        self.sort_button.setObjectName("sortCasesAscendingButton")
+        self.sort_button.setIcon(material_icon("format_list_numbered", PRIMARY))
+        self.sort_button.setIconSize(QSize(20, 20))
+        self.sort_button.setFixedSize(36, 36)
+        self.sort_button.setStyleSheet("QToolButton#sortCasesAscendingButton { padding: 0; }")
+        self.sort_button.setToolTip("사고번호 오름차순 정렬")
+        self.sort_button.setAccessibleName("사고번호 오름차순 정렬")
+        self.sort_button.setEnabled(False)
+        self.sort_button.clicked.connect(self.sort_ascending_requested)
+        search_row.addWidget(self.sort_button)
+        root.addLayout(search_row)
 
         self.tree = CaseTreeWidget(self)
         self.tree.setObjectName("caseTree")
@@ -252,7 +268,12 @@ class CaseListPanel(QWidget):
             "expanded": {uid: item.isExpanded() for uid, item in self._items_by_uid.items()},
             "selected": [
                 (str(item.data(0, UID_ROLE)), int(item.data(0, VIDEO_INDEX_ROLE)))
-                for item in self.tree.selectedItems()
+                # Qt's selectedItems() excludes hidden rows even when their
+                # selected flag is retained. Preserve them through sorting a
+                # filtered project, so clearing the filter restores selection.
+                for parent in self._items_by_uid.values()
+                for item in [parent, *(parent.child(i) for i in range(parent.childCount()))]
+                if item.isSelected()
             ],
             "current": self._selected_target(),
             "scroll": self.tree.verticalScrollBar().value(),
@@ -434,6 +455,7 @@ class CaseListPanel(QWidget):
 
     def _update_count_label(self) -> None:
         self.count_label.setText(f"{len(self._completed_uids)}/{len(self._items_by_uid)} 완료")
+        self.sort_button.setEnabled(bool(self._items_by_uid))
 
     def _sync_video_items(self, case: InvestigationCase, item: QTreeWidgetItem) -> None:
         """Reuse video rows by path, retaining selections through attachment edits."""

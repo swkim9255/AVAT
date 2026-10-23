@@ -18,10 +18,15 @@ def open_video_capture(path: str) -> cv2.VideoCapture:
     thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
     if thread_property is None:
         raise RuntimeError("OpenCV does not support single-threaded FFmpeg decoding.")
+    params = [thread_property, 1]
+    # Software decoding only: a metadata probe must never open a GPU decoder.
+    hw_property = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
+    if hw_property is not None:
+        params += [hw_property, cv2.VIDEO_ACCELERATION_NONE]
 
     capture = None
     try:
-        capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, [thread_property, 1])
+        capture = cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
         if not capture.isOpened():
             raise RuntimeError("Unable to open the video with single-threaded FFmpeg decoding.")
     except Exception:
