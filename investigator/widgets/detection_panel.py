@@ -150,8 +150,8 @@ class DetectionSettingsDialog(QDialog):
         note = QLabel(
             "기본 실행·배포 모델은 Grounding DINO입니다. 박스만 검출하며 Base/Tiny를 선택할 수 있습니다. "
             "다른 모델 선택지는 기존 설정 호환용으로 유지되며 이번 배포 준비물에는 포함하지 않습니다. "
-            "AVAT 본체와 같은 환경을 사용할 수 있습니다. "
-            "별도 지정이 없으면 작업 공간의 detection-runtime.json을 사용하고, "
+            "검출용 Python을 비워 두면 AVAT 본체와 같은 환경(EXE 배포본은 내장 환경)을 사용합니다. "
+            "별도 지정이 없으면 프로그램 폴더의 detection-runtime.json을 사용하고, "
             "해당 파일도 없으면 AVAT를 실행한 Python을 사용합니다.",
             self,
         )
@@ -170,7 +170,7 @@ class DetectionSettingsDialog(QDialog):
         self._backend_settings = {settings.backend: settings}
         python_row = QHBoxLayout()
         self.python_edit = QLineEdit(settings.python, self)
-        self.python_edit.setPlaceholderText(r"예: C:\avat\.venv-grounding-dino\Scripts\python.exe")
+        self.python_edit.setPlaceholderText("비워 두면 AVAT 내장 환경 사용 (별도 Python을 쓸 때만 지정)")
         browse = QPushButton("찾기…", self)
         browse.clicked.connect(self._browse)
         python_row.addWidget(self.python_edit, 1)

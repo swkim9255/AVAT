@@ -20,8 +20,10 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QTimer, Signal
 
 from investigator.object_detection import worker_class_config
+from investigator.runtime_paths import application_root, worker_command
 
-REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+# 소스 실행은 저장소 루트, EXE는 AVAT.exe 폴더가 설정·모델 상대 경로의 기준이다.
+REPOSITORY_ROOT = application_root()
 SETTINGS_PYTHON = "detection/python"
 SETTINGS_MODEL = "detection/model"
 SETTINGS_DEVICE = "detection/device"
@@ -196,15 +198,20 @@ def _load_runtime_manifest(path: Path) -> tuple[DetectionSettings | None, str]:
         if backend not in {"sam3", "efficientsam3", "yoloe", "grounding_dino"}:
             raise ValueError("backend는 yoloe, sam3, efficientsam3 또는 grounding_dino이어야 합니다.")
         paths: dict[str, Path] = {}
-        for key in ("python", "model"):
-            value = data.get(key)
+        # python을 생략하거나 빈 문자열로 두면 AVAT를 실행한 Python(EXE는 내장 환경)을 쓴다.
+        python_value = data.get("python", "")
+        if not isinstance(python_value, str):
+            raise ValueError("python 경로는 문자열이어야 합니다.")
+        for key, value in (("python", python_value), ("model", data.get("model"))):
+            if key == "python" and not value.strip():
+                continue
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{key} 경로를 지정해 주세요.")
             resolved = Path(value.strip()).expanduser()
             if not resolved.is_absolute():
                 resolved = path.parent / resolved
             paths[key] = resolved.resolve()
-        if not paths["python"].is_file():
+        if "python" in paths and not paths["python"].is_file():
             raise ValueError(f"검출용 Python 파일이 없습니다: {paths['python']}")
         if backend == "yoloe":
             if not paths["model"].is_file() or paths["model"].suffix.lower() != ".pt":
@@ -215,7 +222,7 @@ def _load_runtime_manifest(path: Path) -> tuple[DetectionSettings | None, str]:
             _validate_dino_model(str(paths["model"]), offline=True)
         dino_options = _dino_options(data) if backend == "grounding_dino" else {}
         return DetectionSettings(
-            python=str(paths["python"]),
+            python=str(paths.get("python", "")),
             model=str(paths["model"]),
             device=device,
             offline=offline,
@@ -393,7 +400,12 @@ class DetectionJob(QObject):
             environment.insert("HF_HUB_DISABLE_TELEMETRY", "1")
         self._process.setProcessEnvironment(environment)
         self._process.setWorkingDirectory(str(REPOSITORY_ROOT))
-        self._process.setProgram(self.settings.executable)
+        try:
+            program, arguments = worker_command(self.settings.executable, arguments)
+        except ValueError as exc:
+            self._finish_failed(str(exc))
+            return
+        self._process.setProgram(program)
         self._process.setArguments(arguments)
         self.status.emit("검출 프로세스를 시작합니다…")
         self._process.start()

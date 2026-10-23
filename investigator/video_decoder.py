@@ -19,6 +19,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 from PySide6.QtGui import QImage
 
+from investigator.runtime_paths import DECODER_WORKER, application_root, worker_command
+
 # Under the "investigator" logger so failures reach %LOCALAPPDATA%/AVAT/logs.
 LOGGER = logging.getLogger("investigator.video_decoder")
 MAX_FRAME_BYTES = 256 * 1024 * 1024
@@ -66,11 +68,12 @@ class ProcessDecoder(QObject):
         """Bound only initial file opening; all subsequent requests are async."""
         names = {str(path), path.as_posix(), path.name}
         self._private_names = tuple(sorted(filter(None, names), key=len, reverse=True))
-        self.process.setWorkingDirectory(str(Path(__file__).resolve().parent.parent))
-        self.process.start(sys.executable, [
-            "-u", "-m", "investigator.video_decode_worker", "--path", str(path),
-            "--threads", str(threads),
+        self.process.setWorkingDirectory(str(application_root()))
+        # 소스 실행은 python -u -m, EXE는 AVAT.exe --avat-worker로 같은 worker를 실행한다.
+        program, arguments = worker_command(sys.executable, [
+            "-u", "-m", DECODER_WORKER, "--path", str(path), "--threads", str(threads),
         ])
+        self.process.start(program, arguments)
         if not self.process.waitForStarted(3000):
             self._error = self.process.errorString()
             self.close()

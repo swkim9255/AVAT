@@ -1,0 +1,144 @@
+# AVAT Windows 배포본(EXE) 빌드·검증
+#
+# - tests: Windows에서 공유 테스트(local_dev/tests)와 ruff를 실행한다.
+# - build: CPU판·CUDA판 PyInstaller 배포 폴더를 만들고, 빌드한 AVAT.exe로
+#   디코더·Grounding DINO 실제 추론(인터넷 차단 상태)·GUI 실행을 확인한 뒤 업로드한다.
+#   모델 가중치는 검증에만 쓰고 배포 결과물에는 넣지 않는다.
+name: Windows EXE 빌드
+
+on:
+  push:
+    branches: [main, "claude/**", "wip/**"]
+    paths:
+      - "investigator/**"
+      - "main.py"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "packaging/**"
+      - "local_dev/tests/**"
+      - "local_dev/pytest.ini"
+      - "local_dev/requirements-dev.txt"
+      - ".github/workflows/build-windows-exe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-exe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  TORCH_VERSION: "2.11.0"
+  TORCHVISION_VERSION: "0.26.0"
+  PYINSTALLER_VERSION: "6.22.3"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUTF8: "1"
+
+jobs:
+  tests:
+    name: 테스트 (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: 개발 의존성 설치 (CPU PyTorch)
+        run: |
+          python -m pip install torch==${{ env.TORCH_VERSION }} torchvision==${{ env.TORCHVISION_VERSION }} --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r local_dev/requirements-dev.txt
+      - name: ruff
+        run: python -m ruff check investigator main.py packaging local_dev/tests/test_runtime_paths.py
+      - name: 공유 테스트
+        run: python -m pytest -c local_dev/pytest.ini local_dev/tests -q -p no:cacheprovider
+
+  build:
+    name: EXE 빌드 (${{ matrix.variant }})
+    runs-on: windows-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cpu, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 실행 의존성 설치
+        shell: pwsh
+        run: |
+          $index = if ('${{ matrix.variant }}' -eq 'cuda') { 'cu128' } else { 'cpu' }
+          python -m pip install torch==${{ env.TORCH_VERSION }} torchvision==${{ env.TORCHVISION_VERSION }} --index-url "https://download.pytorch.org/whl/$index"
+          python -m pip install -r requirements.txt pyinstaller==${{ env.PYINSTALLER_VERSION }} pip-licenses
+          python -m pip freeze --exclude-editable | Out-File -Encoding utf8 build-packages.txt
+          python -c "import torch, transformers, cv2, PySide6; print('torch', torch.__version__, 'cuda', torch.version.cuda); print('transformers', transformers.__version__, 'opencv', cv2.__version__, 'PySide6', PySide6.__version__)"
+
+      - name: PyInstaller 빌드
+        run: python -m PyInstaller packaging/avat.spec --noconfirm --clean --distpath dist --workpath build
+
+      - name: 검증용 Grounding DINO 모델 캐시
+        uses: actions/cache@v4
+        with:
+          path: ci-model/grounding-dino-base
+          key: grounding-dino-base-7files-v1
+
+      - name: 검증용 모델·샘플 이미지 내려받기
+        shell: pwsh
+        run: |
+          python -c "from huggingface_hub import snapshot_download; snapshot_download('IDEA-Research/grounding-dino-base', local_dir='ci-model/grounding-dino-base', allow_patterns=['config.json','model.safetensors','preprocessor_config.json','special_tokens_map.json','tokenizer.json','tokenizer_config.json','vocab.txt'])"
+          Remove-Item -Recurse -Force ci-model/grounding-dino-base/.cache -ErrorAction SilentlyContinue
+          Get-ChildItem ci-model/grounding-dino-base | Format-Table Name, Length
+          try {
+            Invoke-WebRequest -Uri "https://github.com/ultralytics/assets/releases/download/v0.0.0/bus.jpg" -OutFile ci-sample.jpg
+          } catch {
+            Write-Warning "샘플 이미지를 내려받지 못해 합성 영상으로 점검합니다: $_"
+          }
+
+      - name: 배포 폴더 구성
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile vc_redist.x64.exe
+          pip-licenses --from=mixed --with-license-file --no-license-path --format=plain-vertical `
+            --ignore-packages pyinstaller pyinstaller-hooks-contrib altgraph pefile pywin32-ctypes pip-licenses prettytable wcwidth pip setuptools `
+            --output-file python-packages-licenses.txt
+          python packaging/assemble_package.py --dist dist/AVAT --out package/AVAT --variant ${{ matrix.variant }} `
+            --vc-redist vc_redist.x64.exe --licenses python-packages-licenses.txt --freeze build-packages.txt `
+            --model-dir ci-model/grounding-dino-base
+          $size = (Get-ChildItem package/AVAT -Recurse -File | Measure-Object Length -Sum).Sum
+          "배포 폴더 크기: {0:N0} MB" -f ($size / 1MB)
+
+      - name: 모델을 배포 위치에 넣고 무결성 확인
+        shell: pwsh
+        run: |
+          Copy-Item ci-model/grounding-dino-base/* package/AVAT/runtime/models/grounding-dino-base/
+          powershell -NoProfile -ExecutionPolicy Bypass -File package/AVAT/verify-package.ps1
+          if ($LASTEXITCODE -ne 0) { throw "verify-package.ps1 실패" }
+
+      - name: 빌드한 EXE 오프라인 실행 점검 (디코더·Grounding DINO·GUI)
+        shell: pwsh
+        run: |
+          $extra = @()
+          if (Test-Path ci-sample.jpg) { $extra = @('--image', 'ci-sample.jpg', '--require-detections') }
+          python packaging/smoke_test_exe.py --exe package/AVAT/AVAT.exe --detect @extra
+
+      - name: 배포 결과물에서 모델 가중치 제거
+        if: always()
+        shell: pwsh
+        run: |
+          $keep = @('MODEL-SHA256SUMS.txt', '여기에_모델_파일_7개를_복사.txt')
+          Get-ChildItem package/AVAT/runtime/models/grounding-dino-base -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin $keep } | Remove-Item -Force
+          Get-ChildItem package/AVAT/runtime/models/grounding-dino-base -ErrorAction SilentlyContinue
+
+      - name: 배포본 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: AVAT-windows-${{ matrix.variant }}
+          path: package/
+          if-no-files-found: error
+          retention-days: 30
