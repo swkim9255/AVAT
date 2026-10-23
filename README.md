@@ -161,7 +161,7 @@ AVAT 본체와 검출은 **하나의 독립 Python 환경에 함께 설치**합�
 
 **설정 → 객체 검출 환경…**에서 Python·로컬 모델 경로·오프라인 실행을 확인합니다. 청크 크기(기본 8), 박스 임계값(0.30), 텍스트 임계값(0.25), CUDA FP16 사용 여부도 조정할 수 있습니다. 대분류별 프롬프트는 같은 청크에 유지하며 한 대분류의 프롬프트가 청크 크기보다 많으면 해당 청크만 설정 크기를 초과할 수 있습니다. Grounding DINO는 **박스 전용**이므로 마스크를 만들지 않습니다. 기존 클래스별 임계값, 중복 제거, 위치 기반 추적, 검수 절차는 유지하며 매핑할 수 없는 라벨은 결과 JSON의 `mapping_failures`와 로그에 보존합니다.
 
-검출은 보조 수단이므로 라벨은 반드시 사람이 확인하세요. 작은 시설물과 화단·흙더미·도로낙하물은 누락·오검출이 있을 수 있습니다. 구간 내 프레임을 읽지 못하면 이번 검출을 실패 처리하고 기존 라벨을 유지합니다. 실제 모델 추론과 인터넷이 차단된 대상 PC에서의 동작은 아직 이번 구성으로 검증하지 않았습니다.
+검출은 보조 수단이므로 라벨은 반드시 사람이 확인하세요. 작은 시설물과 화단·흙더미·도로낙하물은 누락·오검출이 있을 수 있습니다. 구간 내 프레임을 읽지 못하면 이번 검출을 실패 처리하고 기존 라벨을 유지합니다. 빌드한 EXE의 Grounding DINO 실제 추론은 빌드 서버에서 인터넷을 차단하고 CPU로 확인했습니다. RTX 5080 GPU 추론과 실제 폐쇄망 대상 PC의 동작은 아래 [검증 결과와 남은 확인 사항](#검증-결과와-남은-확인-사항)과 같이 대상 PC에서 확인해야 합니다.
 
 ### 기존 개발 환경을 재사용할 때
 
@@ -394,30 +394,109 @@ CSV 저장 위치를 선택하면 기존 조사 CSV와 `<CSV 파일명>_속도�
 
 ## 다른 PC·폐쇄망 배포
 
-### 현재 코드 기준으로 확인된 사항
+### 권장 방식: EXE 배포 폴더 + 모델 7개 파일
 
-- 이번 실행·배포 구성은 **Grounding DINO 단일 모델**입니다. 다른 모델 구현을 제거한 것은 아니며, 기존 사용자 설정을 자동으로 바꾸지 않습니다.
-- 앱은 소스 실행(`python main.py`) 기준이며 EXE 빌드 설정은 아직 없습니다. 영상 디코더와 객체 검출은 각각 `<Python 실행 파일> -m <모듈>` 형태의 별도 프로세스입니다.
-- `detection-runtime.json`에 **로컬 모델 폴더**와 `offline: true`를 지정합니다. 예시 파일은 자동으로 실행 설정이 되지 않으므로 실제 파일로 복사해야 합니다. 설정 파일 없이 온라인 모델 ID 기본값에 의존하는 방식은 폐쇄망 배포 절차가 아닙니다.
-- 재생·조사·저장·통계·보고서 기능은 네트워크를 쓰지 않습니다. 글꼴·아이콘·데이터 명세서·Word 서식·검출 분류 JSON은 `investigator/assets/`에 포함되어 있습니다.
+폐쇄망 PC에는 PyInstaller로 묶은 **EXE 배포 폴더**를 옮깁니다. 대상 PC에 Python·pip·가상환경을 설치하지 않으며, 실행 중 인터넷에 접속하지 않습니다. 배포 폴더는 한 파일(onefile)이 아닌 **폴더(onedir)** 형태입니다. 실행할 때마다 수 GB를 임시 폴더에 풀지 않아 시작이 빠르고, Qt(LGPL) DLL을 교체할 수 있는 형태를 유지합니다.
 
-### Git 복제 후 별도로 준비할 항목
+| 항목 | 위치 | 배포 폴더 포함 |
+|---|---|---|
+| Python 3.11 런타임, PySide6(Qt·QtMultimedia), OpenCV(FFmpeg 포함), NumPy, PyTorch·Torchvision, Transformers·Tokenizers·Safetensors·huggingface-hub, Pillow 및 전이 의존성 | `AVAT\_internal\` | 포함 |
+| 글꼴·아이콘·데이터 명세서·Word 서식·검출 분류(`investigator/assets/`) | `AVAT\_internal\investigator\assets\` | 포함 |
+| Visual C++ 런타임 DLL(`vcruntime140*.dll`, `msvcp140.dll`) | `AVAT\_internal\` | 포함(빌드 시 존재 확인) |
+| Visual C++ 재배포 패키지 설치 파일 | `AVAT\prerequisites\vc_redist.x64.exe` | 포함(DLL 오류가 날 때만 설치) |
+| 검출 설정(Grounding DINO, 로컬 모델, `offline: true`, `python` 생략 = 내장 환경) | `AVAT\detection-runtime.json` | 포함 |
+| **Grounding DINO 모델 7개 파일**(약 934MB) | `AVAT\runtime\models\grounding-dino-base\` | **미포함 — 별도 반입** |
+| 조사 DB·영상·개인 설정 | 각 작업 폴더, `%LOCALAPPDATA%\AVAT`, 레지스트리 `HKCU\Software\AVAT` | 미포함(대상 PC에서 생성) |
 
-이 브랜치는 **진행 중인 개발 체크포인트**이며 실행 환경·가중치·EXE 배포 완료본은 포함하지 않습니다.
+모델을 EXE 안에 넣지 않는 이유는 다음과 같습니다.
 
-| 구분 | 준비할 항목 |
-|---|---|
-| OS·런타임 | 사용하는 Qt·PyTorch가 지원하는 Windows 64비트, 호환되는 Microsoft Visual C++ 재배포 패키지(x64). 대상 PC의 ICU DLL 호환성도 확인 |
-| Python | Python 3.11~3.13 64비트. 이전 개발 환경은 3.11.9를 사용했으며 새 배포 환경은 별도 검증 필요 |
-| 실행 라이브러리 | `requirements.txt` 전체: PySide6·OpenCV·NumPy, torch·torchvision·transformers·Pillow와 전이 의존성 |
-| 폐쇄망 설치 자료 | 대상 Windows·Python·CPU/GPU에 맞는 **전이 의존성까지 포함한 휠 전체**, Python·VC++ 설치 파일, GPU 사용 시 호환 드라이버 |
-| 모델 | `runtime/models/grounding-dino-base/`의 위 7개 파일. 약 934MB이며 다운로드용 `.cache/` 제외 |
-| 실행 설정 | `detection-runtime.example.json`을 복사한 `detection-runtime.json`. `backend: "grounding_dino"`, 올바른 Python·로컬 모델 경로, `device: "auto"`, `offline: true` |
-| 기존 작업을 이어갈 때만 | 앱을 정상 종료한 뒤 백업한 프로젝트 DB와 연결 영상. 프로젝트 밖의 영상도 따로 복사하고 경로 확인 |
+- 용량이 큽니다.
+- 프로그램과 모델을 따로 교체·승인할 수 있습니다.
+- 빌드 결과물(GitHub 아티팩트)에 가중치를 올리지 않아도 됩니다.
 
-GPU가 없으면 CPU 추론도 가능하지만 느릴 수 있습니다. 가상환경 폴더는 PC 간 복사하지 말고 대상 PC에 독립 환경을 설치하세요. 기본 실행 의존성에는 CLIP Git URL이 없으므로 **CLIP 휠을 별도로 빌드할 필요가 없습니다.** `safetensors`, `tokenizers`, `huggingface-hub` 등 전이 의존성은 함께 준비해야 합니다.
+배포 폴더에는 `배포_안내.txt`(설치·문제 해결), `BUILD-INFO.txt`(소스 커밋·CPU/CUDA 구분), `SHA256SUMS.txt`·`verify-package.ps1`(반입 후 무결성 확인), `runtime\models\grounding-dino-base\MODEL-SHA256SUMS.txt`(빌드 검증에 쓴 모델 파일의 체크섬), `licenses\`(제3자 고지·포함 패키지 라이선스·빌드 패키지 목록)를 함께 넣습니다.
 
-다음은 승인된 준비 PC에서 완성한 휠 묶음을 대상 PC로 반입한 뒤의 설치 예입니다. GPU/CPU에 맞는 torch·torchvision 휠을 같은 묶음에 포함하고, 해당 환경에서 오프라인 설치를 먼저 시험하세요.
+### EXE 실행 구조
+
+- `main.py`가 PyInstaller 진입점입니다. `AVAT.exe`가 `--avat-worker <모듈>` 인자로 다시 실행되면 Qt를 불러오기 전에 영상 디코더(`investigator.video_decode_worker`) 또는 객체 검출(`investigator.detection_worker`) worker로 분기합니다(`investigator/runtime_paths.py`). 소스 실행은 기존과 같이 `python -m <모듈>`을 사용합니다.
+- 설정 파일과 `runtime/models/` 상대 경로는 내부 라이브러리 폴더(`_internal`)가 아닌 `AVAT.exe`가 있는 폴더를 기준으로 합니다.
+- 창 없는 EXE의 worker 표준 입출력은 UTF-8로 고정해 한국어 Windows(cp949)에서도 진행·오류 메시지가 깨지지 않습니다.
+- 보존된 비교용 백엔드(YOLOE·SAM3·EfficientSAM3)의 코드는 남아 있지만 Ultralytics·CLIP 등 전용 패키지는 배포 폴더에 넣지 않습니다. 배포본에서는 Grounding DINO만 사용합니다.
+
+### 배포본 만들기
+
+**GitHub Actions(권장)**: `.github/workflows/build-windows-exe.yml`이 앱 코드·패키징·테스트 파일을 바꾼 push와 수동 실행(`workflow_dispatch`, 기본 브랜치에 워크플로가 있을 때)에서 동작합니다.
+
+1. **테스트**: Windows에서 `ruff`와 `local_dev/tests` 전체를 실행합니다.
+2. **빌드**: CUDA 12.8판(`AVAT-windows-cuda`)을 PyInstaller로 빌드하고 배포 폴더를 구성합니다. 포함된 PyTorch에 RTX 50 시리즈용 GPU 코드(`sm_120`)가 있는지도 확인합니다. CPU 전용판이 필요하면 워크플로의 `matrix.variant`에 `cpu`를 추가합니다.
+3. **실제 실행 점검**: 빌드한 `AVAT.exe`로 다음을 확인합니다. 검증용 모델은 이 단계가 끝난 뒤 결과물에서 제거합니다.
+   - 영상 디코더 열기·탐색
+   - 검출: 배포 폴더의 `detection-runtime.json`과 모델 위치를 그대로 사용하고, 앱과 같은 인자로 CPU에서 Grounding DINO 실제 추론을 실행합니다. `HF_HUB_OFFLINE=1`과 연결할 수 없는 프록시를 지정해 인터넷을 차단한 상태입니다.
+   - GUI 창 표시
+   - `verify-package.ps1` 무결성 확인
+4. **업로드**: 결과는 실행 페이지의 **Artifacts**에서 zip으로 내려받습니다(보관 30일).
+
+**Windows PC에서 직접 빌드**(인터넷 연결 필요, 프로젝트 루트):
+
+```powershell
+py -3.11 -m venv .venv-build
+.\.venv-build\Scripts\python.exe -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+.\.venv-build\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
+.\.venv-build\Scripts\python.exe -m PyInstaller packaging/avat.spec --noconfirm --clean
+.\.venv-build\Scripts\python.exe packaging/assemble_package.py --dist dist/AVAT --out package/AVAT --variant cuda
+# 선택: 모델을 package\AVAT\runtime\models\grounding-dino-base\에 넣은 뒤 실제 실행 점검
+.\.venv-build\Scripts\python.exe packaging/smoke_test_exe.py --exe package/AVAT/AVAT.exe --detect
+```
+
+`--vc-redist`, `--licenses`, `--freeze`, `--model-dir` 옵션으로 재배포 패키지·라이선스 목록·빌드 패키지 목록·모델 체크섬을 추가할 수 있습니다(워크플로 참고).
+
+### 대상 GPU: RTX 5080 (CUDA 12.8판)
+
+배포 대상은 **NVIDIA RTX 5080**이며 CUDA 12.8용 PyTorch(`torch 2.11.0+cu128`)를 포함한 배포본을 사용합니다.
+
+- **RTX 50 시리즈 지원**: RTX 50 시리즈(Blackwell, `sm_120`)는 CUDA 12.8 이상으로 빌드한 PyTorch가 필요합니다. 빌드 서버에서 포함된 PyTorch의 `sm_120` 지원을 확인합니다.
+- **대상 PC 요구 사항**:
+  - Windows 10/11 64비트
+  - NVIDIA 그래픽 드라이버(RTX 50 시리즈는 R570 이상)
+  - CUDA Toolkit·cuDNN은 배포 폴더에 포함되어 있어 따로 설치하지 않습니다.
+- **검출 설정**: `device: "auto"`와 `dino_fp16: true`(기본값)로 GPU FP16 추론을 사용합니다. GPU를 찾지 못하면 자동으로 CPU로 실행되지만 매우 느립니다(빌드 서버 4코어 CPU 기준 4프레임 약 250초). 이때는 그래픽 드라이버를 확인하세요.
+- **용량**: 배포 폴더 약 4.5GB(zip 약 3.0GB)이며 대부분이 CUDA 라이브러리입니다. 모델 7개 파일(약 934MB)은 별도입니다.
+
+### 다른 PC로 옮기는 방법
+
+1. **준비**: 인터넷이 되는 PC에서 다음 두 묶음을 준비합니다.
+   - Actions 아티팩트 `AVAT-windows-cuda` zip(약 3.0GB, 또는 직접 빌드한 `package\AVAT`)
+   - 모델 7개 파일 폴더. 기존 `runtime\models\grounding-dino-base\`를 그대로 씁니다.
+2. **반입**: 두 묶음과 각 SHA-256 값을 승인된 반입 매체나 망연계 절차로 옮깁니다. 모델은 프로그램을 업데이트할 때 다시 옮길 필요가 없습니다.
+3. **설치**: 대상 PC의 `C:\AVAT`처럼 쓰기 가능한 로컬 경로에 압축을 풉니다. 모델 7개 파일은 `C:\AVAT\runtime\models\grounding-dino-base\`에 복사합니다.
+4. **확인**: `powershell -ExecutionPolicy Bypass -File .\verify-package.ps1`로 프로그램·모델 파일을 확인합니다.
+5. **실행·점검**: `AVAT.exe`를 실행하고 영상 열기·재생·저장·CSV·보고서와 Grounding DINO 단일 프레임/구간 검출·취소를 확인합니다.
+
+다른 PC에서 이전 설정(다른 모델·Python 경로)을 저장한 적이 있으면 **설정 → 객체 검출 환경…**에서 Grounding DINO와 배포 폴더의 모델 경로로 바꾸고, **검출용 Python은 비워 둡니다**. 기존 작업을 이어갈 때만 앱을 정상 종료한 뒤 프로젝트 폴더(`investigations.db`와 연결 영상)를 함께 옮깁니다.
+
+### GitHub 사용 기준
+
+- **코드 백업**: 패키징 전에 소스를 커밋·push하는 것이 좋습니다. `BUILD-INFO.txt`에 소스 커밋이 기록되므로 배포본이 어느 코드에서 만들어졌는지 추적할 수 있습니다. 작업 브랜치에서 검증한 뒤 `main`에 병합하고, 배포한 버전에는 태그(예: `v0.1.0`)를 붙이는 방식을 권장합니다.
+- **EXE·가중치는 Git에 커밋하지 않습니다.** GitHub는 100MB가 넘는 파일을 거부하고, 커밋한 대용량 파일은 삭제해도 저장소 기록에 남습니다. `.gitignore`가 `dist/`·`build/`·`*.safetensors`·`runtime/models/` 등을 제외합니다.
+- **EXE 배포본 보관**: Actions 아티팩트(30일 보관) 또는 GitHub Release 첨부 파일(파일당 2GB 제한)이 일반적인 방법입니다. CUDA판 zip은 약 3.0GB라 Release에는 분할이 필요합니다. 아티팩트는 기한이 지나면 삭제되므로 내려받아 승인된 내부 파일 서버에 보관하세요.
+- **공개 저장소 주의**: 현재 저장소는 공개(public)이므로 코드·작업 브랜치·Actions 아티팩트도 외부에서 볼 수 있습니다. 내부 전용 프로그램이면 저장소를 비공개로 바꾸는 것을 검토하세요. 비공개 저장소는 Actions 무료 사용량(월 실행 시간, 아티팩트 저장 용량 500MB)이 제한되어 수 GB의 배포본은 Actions 아티팩트로 보관하기 어렵습니다. 이 경우 직접 빌드한 결과를 내부 저장소에 보관합니다.
+- **모델 가중치**: `IDEA-Research/grounding-dino-base` 모델 카드는 Apache-2.0을 표시하지만, 반입·재배포는 기관 승인 절차를 따르세요. 출처·체크섬(`MODEL-SHA256SUMS.txt`)을 함께 기록합니다.
+
+### 프로젝트 루트의 `Ultralytics/`·`runs/` 폴더
+
+`Ultralytics/`·`runs/`는 과거 기본값이던 **YOLOE**로 검출을 실행할 때 Ultralytics 라이브러리가 만든 폴더이며, 다음 두 가지로 생깁니다.
+
+- **`Ultralytics/`**: 설정 폴더(`YOLO_CONFIG_DIR`)를 지정하지 않으면 Ultralytics가 기본 위치나 현재 작업 폴더에 설정 파일을 만듭니다.
+- **`runs/segment/predictN`**: `save=False`로 예측해도 매번 빈 예측 폴더를 만듭니다.
+
+현재 YOLOE 코드는 두 폴더를 검출 작업의 임시 폴더로 보내므로 새로 생기지 않습니다. Grounding DINO 실행·EXE 배포에는 **두 폴더 모두 필요하지 않습니다**. 개발 PC에 남은 폴더는 안에 설정 파일과 빈 `predict` 폴더뿐인지 확인한 뒤 삭제해도 됩니다. Git에서는 이미 제외되어 있습니다.
+
+### 소스 실행 방식으로 옮길 때(대안)
+
+EXE를 쓰지 않고 소스와 Python 환경을 옮길 수도 있습니다. 인터넷이 되는 준비 PC에서 다음 휠을 모두 `wheelhouse\`에 받아 함께 반입합니다.
+
+- 대상 Windows·Python·CPU/GPU에 맞는 **전이 의존성까지 포함한 휠 전체**
+- GPU/CPU에 맞는 torch·torchvision 휠
 
 ```powershell
 py -3.11 -m venv .venv
@@ -426,63 +505,45 @@ Copy-Item .\detection-runtime.example.json .\detection-runtime.json
 .\.venv\Scripts\python.exe main.py
 ```
 
-이미 `detection-runtime.json`이 있으면 위 복사 명령으로 덮어쓰지 말고 내용을 직접 확인합니다. 새 PC의 `python`·`model` 경로를 맞춘 뒤 **설정 → 객체 검출 환경…**에서도 이전 사용자 설정이 우선하지 않는지 확인하세요. 새 프로젝트를 시작할 때 기존 DB는 필요하지 않습니다.
+가상환경 폴더는 PC 간에 복사하지 말고 대상 PC에 새로 설치합니다. 이 방식은 대상 PC에 Python 3.11~3.13 64비트 설치가 필요하므로, 폐쇄망 배포에는 EXE 방식을 권장합니다.
 
-**반입하지 않아도 되는 항목**: 다른 모델의 가중치·임베딩 캐시·연구 소스, `runtime/checkpoints/`, `runtime/tokenizers/`, `Ultralytics/`, `runs/`, `outputs/`, 다운로드 캐시·로그, 개발용 테스트·시안·패치. 기존 파일은 이번 정리에서 삭제하지 않습니다. 특히 `Ultralytics/`는 Grounding DINO 실행 의존성이 아닙니다. 폴더 정리는 사용자 결과물이 없는지 확인한 뒤 별도로 진행합니다.
+**반입하지 않아도 되는 항목**:
 
-**Git에 올리지 않는 항목**: 실제 모델 가중치·실행 설정, 가상환경, `wheelhouse/`·`offline_bundle/`, 프로젝트 DB·영상·개인 설정입니다. 필요한 파일은 승인된 별도 매체나 내부 저장소로 관리합니다. 새 PC에서 기존 탭·개인 설정을 복사할 필요는 없으며 프로젝트 폴더를 직접 열 수 있습니다.
+- 다른 모델의 가중치·임베딩 캐시·연구 소스
+- `runtime/checkpoints/`, `runtime/tokenizers/`
+- `Ultralytics/`, `runs/`, `outputs/`
+- 다운로드 캐시·로그
+- 개발용 `local_dev/`
 
-### 2026-10-23 체크포인트 검증과 남은 작업
+### 검증 결과와 남은 확인 사항
 
-- `wip/offline-stability-2026-10-23` 브랜치에 개발 중 변경을 보존합니다. 배포 완료나 `main` 병합을 의미하지 않습니다.
-- **이전 체크포인트 `121cf53`**에서는 Python 214개 문법 검사와 핵심 테스트 80개가 통과했습니다. 실제 모델 추론은 실행하지 않았으며, 이 수치는 이번 Grounding DINO 기본 설정 변경 후 전체 테스트 통과를 뜻하지 않습니다.
-- 같은 이전 체크포인트의 추가 테스트는 가중치가 없는 작업 폴더에서 **328 통과·1 건너뜀·10 실패** 시점에 중단됐습니다. 당시 가짜 worker 테스트가 기본 YOLOE 가중치의 존재 검사에 걸렸으며, 이번 기본값 변경과 테스트용 로컬 설정 분리 후 아래 최신 테스트에서는 재현되지 않았습니다.
-- **이번 Grounding DINO 구성 변경 후** 공유 Python **215개 문법 검사**와 `local_dev/tests`의 **841개 통과·1개 건너뜀**을 확인했습니다. 실제 GPU 추론 테스트는 제외했으며 가중치가 없는 작업 폴더에서 가짜 worker·사용자 설정 격리를 사용한 결과입니다.
-- 별도로 영상·통계 미디어·CSV 테스트 **44개가 통과**했습니다. 구형 검출 테스트 3개 파일은 **19개 통과·6개 실패**이며, 이전 UI 속성 및 이전 세분류 계약을 기대하는 테스트가 남아 있습니다. 최신 테스트 묶음의 통과를 모든 레거시 테스트 통과로 해석하지 않습니다.
-- 독립 검출 환경 설치, 나머지 레거시 회귀 테스트, **Grounding DINO 실제 추론·폐쇄망 대상 PC 검증**, EXE 실행 경로 구현은 별도 확인이 필요합니다. 설정·문서 수정만으로 실제 모델 실행 검증까지 완료된 것은 아닙니다.
+**빌드 서버에서 확인한 사항**(GitHub Actions Windows, 소스 커밋은 배포본의 `BUILD-INFO.txt` 참고)
 
-### 현재 권장 소스 배포 구성
+- 공유 테스트 `local_dev/tests` **852개 통과·1개 건너뜀**(Windows, CPU PyTorch). 같은 테스트 중 2개 파일은 Linux offscreen에서만 Qt 네이티브 오류로 중단되며 Windows에서는 통과합니다.
+- PyInstaller 빌드 성공: `AVAT.exe` + `_internal`. Visual C++ 런타임 DLL 포함 확인. 배포 폴더 약 4.5GB(5,339개 파일), zip 약 3.0GB.
+- `verify-package.ps1`: 프로그램 파일 전체와 모델 7개 파일 체크섬 일치.
+- 빌드한 `AVAT.exe`로 다음을 확인했습니다.
+  - **디코더 worker**: 810×1080 영상 열기·탐색
+  - **Grounding DINO 실제 추론**: 인터넷을 차단한 상태에서, 배포 폴더의 `detection-runtime.json`과 `runtime\models\grounding-dino-base`를 그대로 사용
+    - 샘플 사진(버스·보행자) 4프레임에서 검출 8개(차량 4·도로낙하물 4)
+    - 진행·완료 이벤트의 UTF-8 전달 정상
+  - **GUI**: `AVAT` 창 표시, 진단 로그에 오류 없음
+- 빌드 서버에는 GPU가 없어 검출은 CPU로 실행됐습니다. 이로써 CUDA판이 GPU가 없을 때 CPU로 자동 전환되는 것을 확인했습니다.
+- 이전 CPU판 빌드(같은 코드)도 같은 점검을 통과했습니다(배포 폴더 770MB). 현재 배포 대상에서는 제외합니다.
 
-```text
-AVAT\
-├── main.py, requirements.txt, investigator\ 등 실행 소스·자산
-├── .venv\                           # 대상 PC에 새로 설치
-├── detection-runtime.json           # Grounding DINO·로컬 모델·오프라인
-└── runtime\models\grounding-dino-base\
-    ├── config.json
-    ├── model.safetensors
-    ├── preprocessor_config.json
-    ├── special_tokens_map.json
-    ├── tokenizer.json
-    ├── tokenizer_config.json
-    └── vocab.txt
-```
+**아직 확인하지 않은 사항(대상 PC에서 확인 필요)**
 
-1. 인터넷이 되는 준비 PC에서 대상 Windows·Python·CPU/GPU에 맞는 휠·모델을 준비하고 네트워크 없이 설치·실행 가능한지 확인합니다.
-2. 실행 소스·번들 자산과 모델·설치 자료를 구분해 묶고 SHA-256 체크섬 목록을 만듭니다.
-3. 승인된 반입 매체나 망연계 절차로 옮겨 체크섬을 확인하고 `C:\AVAT`처럼 쓰기 가능한 로컬 경로에 배치합니다.
-4. 대상 PC에서 영상 열기·재생·저장·CSV·보고서와 Grounding DINO 단일 프레임/구간 검출·취소를 확인합니다.
-
-### EXE로 묶기 전에 필요한 코드 변경(미적용)
-
-1. **작업 프로세스 실행**: 디코더·검출 프로세스가 `sys.executable -m <모듈>`을 사용합니다. EXE의 `sys.executable`은 `AVAT.exe`이므로 worker를 구분하는 진입점 또는 별도 Python worker 구성이 필요합니다. 창 없는 EXE의 표준 입출력도 별도 검토해야 합니다.
-2. **경로 기준**: 실행 설정과 모델 상대 경로를 묶인 내부 라이브러리 폴더가 아닌 `AVAT.exe`가 있는 폴더 기준으로 처리해야 합니다.
-3. **단일 환경**: `requirements.txt`의 Grounding DINO 실행 의존성을 한 번들에 넣고 과거 연결형 가상환경에 의존하지 않도록 합니다.
-4. **데이터 파일**: `investigator/assets/`와 필요한 패키지 데이터를 포함하고, Grounding DINO의 7개 모델 파일은 EXE 옆 별도 모델 폴더로 관리합니다.
-5. **라이선스**: 실제 배포하는 라이브러리·모델의 라이선스와 고지 의무를 확인합니다. 기존 타모델 코드를 보존했다는 이유만으로 해당 의존성까지 번들에 넣지 않습니다.
-
-EXE 패키징을 진행할 때는 모델을 실행 파일 안에 포함하지 않고 별도 폴더로 유지합니다. 현재 구현으로 옮기려면 위의 **소스 + 대상 PC에 새로 설치한 Python 환경** 방식을 사용합니다.
-
-### 코드·배포물 관리
-
-- 진행 중인 소스는 별도 작업 브랜치에 커밋하고 검증이 끝난 뒤 `main`에 병합합니다. 공개 저장소의 작업 브랜치도 공개됩니다.
-- 저장소에는 소스·작은 설정 예시·번들 자산을 두고 실제 가중치·DB·영상은 제외합니다. 모델은 출처·라이선스·체크섬을 함께 기록해 승인된 별도 저장소에서 관리합니다. 가중치의 공개 재배포 가능 여부는 이번 작업에서 승인하거나 검증하지 않았습니다.
+- **RTX 5080에서의 실제 GPU(FP16) 추론과 속도.** 빌드 서버에 GPU가 없습니다. 대상 PC에서 단일 프레임과 짧은 구간 검출로 먼저 확인하세요. 작업 관리자의 GPU 사용률로 GPU 사용 여부를 볼 수 있습니다.
+- 실제 폐쇄망 PC의 백신·SmartScreen·보안 정책 영향, 긴 실제 사고 영상 처리, 장시간 사용.
+- 검출 품질: 샘플 사진의 보행자가 현재 임계값(박스 0.30, 표시 신뢰도 0.50)에서 검출되지 않았습니다. 실제 영상으로 임계값을 검토하고 라벨은 반드시 사람이 확인하세요.
+- 레거시 회귀 테스트 `local_dev/avat-detection-tests`는 이번 검증에 포함하지 않았습니다. 이전 점검에서 기존 UI 속성·세분류 계약을 기대하는 일부 테스트가 실패했습니다.
+- 모델 가중치·배포 라이브러리의 반입·재배포 승인(`licenses\` 폴더의 고지 참고).
 
 ## 저장소 설정
 
 `.gitignore`는 공통 제외 규칙, `.gitattributes`는 줄바꿈·바이너리 처리 규칙, `pyproject.toml`은 패키지·실행 명령과 공통 도구 설정을 관리하므로 저장소에 포함합니다. 개인 작업 경로의 제외 규칙은 Git이 추적하지 않는 `.git/info/exclude`에서 관리합니다. 이 파일은 다른 환경으로 복제되지 않으므로 새 환경에서는 개인 규칙을 별도로 설정해야 합니다.
 
-앱·객체탐지 코드와 함께 `local_dev/`의 테스트·도구·시안·패치·문서와 `runtime/tools/`의 기존 연구 도구를 보존합니다. 과거 타모델용 코드·테스트·예시는 보존 자료이며 현재 Grounding DINO 설치·배포에 포함할 의존성이나 준비물을 뜻하지 않습니다. `avat_ai/`는 별도 프로그램이라 이 저장소에 포함하지 않습니다. 가중치·모델 다운로드 자료·가상환경·실제 DB/영상·비밀 설정·생성 결과물(`outputs/`, `runs/`, `Ultralytics/` 등)은 제외합니다. 실행 환경 설정은 `detection-runtime*.example.json` 예시만 공유합니다. 별도 Git 저장소로 복제한 연구 소스는 제외를 유지하며 Grounding DINO 배포에 필요하지 않습니다.
+앱·객체탐지 코드와 함께 `local_dev/`의 테스트·도구·시안·패치·문서와 `runtime/tools/`의 기존 연구 도구를 보존합니다. 과거 타모델용 코드·테스트·예시는 보존 자료이며 현재 Grounding DINO 설치·배포에 포함할 의존성이나 준비물을 뜻하지 않습니다. `avat_ai/`는 별도 프로그램이라 이 저장소에 포함하지 않습니다. 가중치·모델 다운로드 자료·가상환경·실제 DB/영상·비밀 설정·생성 결과물(`outputs/`, `runs/`, `Ultralytics/`, `dist/`, `build/`, `package/` 등)은 제외합니다. EXE 배포본은 Git이 아니라 Actions 아티팩트나 내부 저장소로 관리합니다. 실행 환경 설정은 `detection-runtime*.example.json` 예시만 공유합니다. 별도 Git 저장소로 복제한 연구 소스는 제외를 유지하며 Grounding DINO 배포에 필요하지 않습니다.
 
 앱 실행에 필요한 코드는 `investigator/`, 번들 자산은 `investigator/assets/`에 둡니다. CSV 내보내기에 쓰이는 데이터 명세서와 글꼴·아이콘 및 해당 라이선스도 배포에 포함합니다.
 

@@ -127,7 +127,8 @@ def main() -> int:
         prerequisites.mkdir()
         shutil.copyfile(args.vc_redist, prerequisites / "vc_redist.x64.exe")
 
-    torch_note = "CUDA 12.8 (NVIDIA GPU 사용, GPU가 없으면 CPU로 실행)" if args.variant == "cuda" else "CPU 전용"
+    torch_note = ("CUDA 12.8 (RTX 50 시리즈 포함 NVIDIA GPU 사용, GPU가 없으면 CPU로 실행)"
+                  if args.variant == "cuda" else "CPU 전용")
     (app / "BUILD-INFO.txt").write_text(
         "AVAT Windows 배포본\n"
         f"빌드 시각(UTC): {datetime.now(UTC):%Y-%m-%d %H:%M:%S}\n"
