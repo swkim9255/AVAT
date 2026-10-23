@@ -29,6 +29,8 @@
 
 ## 설치 및 실행
 
+Python이 없는 PC나 폐쇄망 PC에는 **EXE 배포본**(`AVAT.exe` + 내장 라이브러리 폴더)을 사용합니다. 배포본 만들기와 설치는 아래 [다른 PC·폐쇄망 배포](#다른-pc폐쇄망-배포)를 참고하세요. 이 절은 소스 코드로 직접 실행하는 개발·검토용 방법입니다.
+
 Python 3.11~3.13 환경을 권장합니다. 의존성 파일은 실행용 `requirements.txt`(본체 + 객체 검출)와 개발용 `local_dev/requirements-dev.txt`(실행용 + 테스트·린트) 두 개입니다. PyTorch는 PC의 GPU 드라이버에 맞는 휠을 먼저 설치하며, CPU 전용 PC는 아래 index URL을 `https://download.pytorch.org/whl/cpu`로 바꿉니다.
 
 ```powershell
@@ -126,7 +128,7 @@ AVAT 본체와 검출은 **하나의 독립 Python 환경에 함께 설치**합�
 
 패키지 설치의 `python -m pip install ".[detection]"`도 같은 Grounding DINO 의존성을 사용합니다. 자동 검출 없이 재생·조사·수동 박스 편집만 쓰는 PC는 `python -m pip install -e .`로 본체 의존성(PySide6·OpenCV·NumPy)만 설치할 수 있습니다.
 
-검출은 UI 응답성과 오류 격리를 위해 별도 **프로세스**(`<Python> -m investigator.detection_worker`)에서 실행하지만 별도 가상환경은 필요하지 않습니다. 실행용 라이브러리는 앱을 실행하는 `.venv`에 모두 설치합니다. 검출용 Python은 앱의 사용자 설정, 프로그램 폴더의 `detection-runtime.json`, 앱을 실행한 Python 순서로 정합니다. 이전에 저장한 설정이 파일보다 우선할 수 있으므로 **설정 → 객체 검출 환경…**에서 Grounding DINO와 새 환경의 Python·모델 경로를 확인하세요.
+검출은 UI 응답성과 오류 격리를 위해 별도 **프로세스**(소스 실행: `<Python> -m investigator.detection_worker`, EXE: `AVAT.exe --avat-worker investigator.detection_worker`)에서 실행하지만 별도 가상환경은 필요하지 않습니다. 실행용 라이브러리는 앱을 실행하는 `.venv`에 모두 설치합니다. 검출용 Python은 앱의 사용자 설정, 프로그램 폴더의 `detection-runtime.json`, 앱을 실행한 Python 순서로 정합니다. `detection-runtime.json`의 `python` 항목은 선택 사항이며, 생략하거나 빈 문자열로 두면 AVAT를 실행한 Python(EXE 배포본은 `AVAT.exe`의 내장 환경)을 사용합니다. 이전에 저장한 설정이 파일보다 우선할 수 있으므로 **설정 → 객체 검출 환경…**에서 Grounding DINO와 새 환경의 Python·모델 경로를 확인하세요.
 
 ### Grounding DINO 오프라인 설정과 모델
 
@@ -143,7 +145,7 @@ AVAT 본체와 검출은 **하나의 독립 Python 환경에 함께 설치**합�
 }
 ```
 
-상대 경로는 이 JSON 파일이 있는 폴더 기준입니다. Git에 포함되지 않는 실제 설정 파일과 로컬 가중치는 새 PC에서 별도로 준비합니다. `device: "auto"`는 사용 가능한 장치를 선택하며 CPU 추론도 가능하지만 느릴 수 있습니다. CUDA 사용 시에는 대상 드라이버와 호환되는 PyTorch 휠을 준비해야 합니다.
+상대 경로는 이 JSON 파일이 있는 폴더 기준입니다. 소스 실행에서는 저장소 루트, EXE 배포본에서는 `AVAT.exe`가 있는 폴더가 프로그램 폴더입니다. EXE 배포본의 `detection-runtime.json`(원본 `packaging/detection-runtime.json`)은 `python`을 생략해 내장 환경을 사용합니다. Git에 포함되지 않는 실제 설정 파일과 로컬 가중치는 새 PC에서 별도로 준비합니다. `device: "auto"`는 사용 가능한 장치를 선택하며 CPU 추론도 가능하지만 느릴 수 있습니다. CUDA 사용 시에는 대상 드라이버와 호환되는 PyTorch 휠을 준비해야 합니다.
 
 `runtime/models/grounding-dino-base/`에는 다음 **7개 파일**을 함께 둡니다. 현재 로컬 파일 합계는 약 **934MB(891MiB)**이며 `model.safetensors` 하나만 복사해서는 실행할 수 없습니다.
 
@@ -488,12 +490,15 @@ EXE 패키징을 진행할 때는 모델을 실행 파일 안에 포함하지 �
 
 ```text
 .
-├── main.py                          # 소스 실행 진입점
+├── main.py                          # 소스 실행·EXE 진입점(worker 분기 포함)
 ├── requirements.txt                 # 실행용 의존성(본체 + 객체 검출)
 ├── pyproject.toml                   # 패키지 정보·도구 설정
-├── detection-runtime*.example.json  # 검출 실행 설정 예시(실제 설정·모델은 Git 제외)
+├── detection-runtime*.example.json  # 소스 실행용 검출 설정 예시(실제 설정·모델은 Git 제외)
+├── packaging/                       # EXE 배포본: PyInstaller spec, 배포 폴더 구성·점검·무결성 확인, 배포 안내
+├── .github/workflows/               # Windows 테스트·CPU/CUDA EXE 빌드·오프라인 실행 점검
 ├── investigator/                    # 앱 코드
 │   ├── app.py                       # Qt 앱 초기화·진단 로그 시작
+│   ├── runtime_paths.py             # 소스/EXE 실행 경로 기준·worker 실행 명령
 │   ├── main_window.py               # 전체 워크플로 연결
 │   ├── schema.py, form_definition.py # 필드·검증·CSV 계약, 사용자 조사 양식
 │   ├── models.py                    # 사고 조사 모델

@@ -23,6 +23,7 @@ node_modules/
 # 폐쇄망 반입용 패키지와 배포 묶음은 소스와 별도로 보관
 /wheelhouse/
 /offline_bundle/
+/package/
 
 # Runtime workspace and temporary files
 workspace/
