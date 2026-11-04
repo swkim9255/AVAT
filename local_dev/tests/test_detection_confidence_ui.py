@@ -38,6 +38,21 @@ def _object(uid, scores, *, source=SOURCE_AUTOMATIC, reviewed=False):
     )
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    # 개발 PC의 실제 설정(레지스트리)을 건드리지 않고 앱 설정 저장소 경로로 검증한다.
+    path = tmp_path / "detection-settings.ini"
+    monkeypatch.setattr(
+        panel_module, "detection_settings_store",
+        lambda: QSettings(str(path), QSettings.Format.IniFormat),
+    )
+    return path
+
+
+def _store() -> QSettings:
+    return panel_module.detection_settings_store()
+
+
 @pytest.fixture()
 def panel(qtbot):
     widget = DetectionPanel()
@@ -113,7 +128,7 @@ def test_threshold_persists_and_does_not_trigger_detection(panel, qtbot):
     calls = []
     panel.run_requested.connect(lambda: calls.append(True))
     panel.confidence_spin.setValue(0.75)
-    assert QSettings().value(SETTINGS_CONFIDENCE_THRESHOLD, type=float) == 0.75
+    assert _store().value(SETTINGS_CONFIDENCE_THRESHOLD, type=float) == 0.75
     reopened = DetectionPanel()
     qtbot.addWidget(reopened)
     assert reopened.confidence_threshold == 0.75
@@ -122,7 +137,7 @@ def test_threshold_persists_and_does_not_trigger_detection(panel, qtbot):
 
 @pytest.mark.parametrize("stored", ["bad", "nan", "inf", []])
 def test_invalid_persisted_threshold_uses_safe_default(qtbot, stored):
-    QSettings().setValue(SETTINGS_CONFIDENCE_THRESHOLD, stored)
+    _store().setValue(SETTINGS_CONFIDENCE_THRESHOLD, stored)
     panel = DetectionPanel()
     qtbot.addWidget(panel)
     assert panel.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD

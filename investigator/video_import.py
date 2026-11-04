@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,30 +81,33 @@ def parse_accident_video_name(path: str | Path) -> tuple[str, int] | None:
     return match.group("number"), sequence
 
 
-def scan_video_folder(folder: str | Path) -> VideoFolderScan:
-    """Scan the nested video tree and return deterministic accident groups.
+def video_path_key(path: str | Path) -> str:
+    """대소문자·구분자를 정규화한 영상 경로 식별자(파일 시스템 접근 없음).
 
-    Only filenames carrying the existing 13-digit accident identifier are
-    automatically grouped; generic camera names must still be attached to a
-    user-selected accident, not guessed from an arbitrary folder name.
+    저장된 영상 경로와 스캔 결과는 이미 링크를 거치지 않는 절대 경로이므로
+    파일마다 resolve()를 다시 호출하지 않고 문자열만 정규화해 비교한다.
     """
+    return os.path.normpath(os.path.abspath(str(path))).casefold()
 
+
+def _group_scanned_videos(videos: list[Path] | tuple[Path, ...]) -> VideoFolderScan:
     grouped: dict[str, list[tuple[int, str, str]]] = {}
     ignored: list[str] = []
     seen_paths: set[str] = set()
-    videos, _ = scan_video_tree(folder)
     for entry in videos:
-        resolved = str(entry.resolve())
-        path_key = resolved.casefold()
+        # scan_video_tree는 resolve한 루트 아래에서 링크·정션을 따르지 않으므로
+        # 항목 경로가 곧 정규 경로다. 파일마다 resolve()하지 않는다.
+        text = str(entry)
+        path_key = text.casefold()
         if path_key in seen_paths:
             continue
         seen_paths.add(path_key)
         parsed = parse_accident_video_name(entry)
         if parsed is None:
-            ignored.append(resolved)
+            ignored.append(text)
             continue
         accident_number, sequence = parsed
-        grouped.setdefault(accident_number, []).append((sequence, entry.name.casefold(), resolved))
+        grouped.setdefault(accident_number, []).append((sequence, entry.name.casefold(), text))
 
     groups = tuple(
         (
@@ -115,6 +119,54 @@ def scan_video_folder(folder: str | Path) -> VideoFolderScan:
     return VideoFolderScan(groups, tuple(sorted(ignored, key=str.casefold)))
 
 
+def scan_video_folder(folder: str | Path) -> VideoFolderScan:
+    """Scan the nested video tree and return deterministic accident groups.
+
+    Only filenames carrying the existing 13-digit accident identifier are
+    automatically grouped; generic camera names must still be attached to a
+    user-selected accident, not guessed from an arbitrary folder name.
+    """
+
+    videos, _ = scan_video_tree(folder)
+    return _group_scanned_videos(videos)
+
+
+def scan_video_files(paths: Iterable[str | Path], folder: str | Path) -> VideoFolderScan:
+    """지정한 파일(예: 폴더 감시로 새로 들어온 영상)만 전체 스캔과 같은 규칙으로 묶는다.
+
+    전체 트리를 다시 훑지 않는다. 스캔 루트 밖, 관리·백업 폴더, 숨김 폴더,
+    링크, 없는 파일, 지원하지 않는 확장자는 전체 스캔과 마찬가지로 제외한다.
+    """
+    root = Path(folder).expanduser().resolve()
+    accepted: list[Path] = []
+    for raw in paths:
+        candidate = Path(raw)
+        if not candidate.is_absolute() or candidate.suffix.casefold() not in VIDEO_EXTENSIONS:
+            continue
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            continue
+        if not relative.parts or any(
+            part.startswith(".") or part.casefold() in IGNORED_VIDEO_DIRECTORIES
+            for part in relative.parts[:-1]
+        ):
+            continue
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            if any(
+                getattr(parent.lstat(), "st_file_attributes", 0) & 0x400
+                for parent in candidate.parents
+                if parent != root and parent.is_relative_to(root)
+            ):
+                continue  # 정션 아래 파일은 전체 스캔도 따르지 않는다.
+        except OSError:
+            continue
+        accepted.append(root / relative)
+    return _group_scanned_videos(accepted)
+
+
 __all__ = [
     "ACCIDENT_VIDEO_STEM",
     "VIDEO_EXTENSIONS",
@@ -122,6 +174,8 @@ __all__ = [
     "IGNORED_VIDEO_DIRECTORIES",
     "VideoFolderScan",
     "parse_accident_video_name",
+    "scan_video_files",
     "scan_video_folder",
     "scan_video_tree",
+    "video_path_key",
 ]

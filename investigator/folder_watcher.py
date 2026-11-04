@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,17 +38,28 @@ class ProjectFolderWatcher(QObject):
         self._poll.setInterval(poll_ms)
         self._poll.timeout.connect(self._check_pending)
 
-    def add_directory(self, folder: str | Path, *, known_paths: set[str] | None = None) -> None:
+    def is_watching(self, folder: str | Path) -> bool:
+        return str(Path(folder).resolve()) in self._directories
+
+    def add_directory(
+        self,
+        folder: str | Path,
+        *,
+        known_paths: set[str] | None = None,
+        scan: tuple[tuple[Path, ...], tuple[Path, ...]] | None = None,
+    ) -> None:
+        """감시를 시작한다. ``scan``을 주면 화면 스레드에서 전체 트리를 다시 훑지 않는다."""
         root = str(Path(folder).resolve())
         if root not in self._directories:
             try:
-                videos, directories = scan_video_tree(root)
+                videos, directories = scan if scan is not None else scan_video_tree(root)
             except OSError:
                 self.watch_error.emit("프로젝트 폴더 감시를 시작할 수 없습니다.")
                 return
             known = videos if known_paths is None else known_paths
             self._directories[root] = _Directory(
-                seen={str(Path(p).resolve()).casefold() for p in known},
+                # 저장된 영상 경로와 스캔 경로는 이미 정규 절대 경로라 resolve()하지 않는다.
+                seen={os.path.normpath(str(p)).casefold() for p in known},
                 watched_directories={str(path) for path in directories},
             )
         self._sync_native_directories()

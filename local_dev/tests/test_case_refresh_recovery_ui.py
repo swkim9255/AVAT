@@ -230,16 +230,20 @@ def test_workspace_folders_are_tabs_and_list_contains_accidents_and_videos(refre
     window = refresh_window(workspace)
     panel = window.case_list
     assert len(window.cases) == 2
-    for case in window.cases:
-        item = panel.case_item(case.uid)
-        assert item is not None
+    labels = [window.project_tabs.tabText(i) for i in range(window.project_tabs.count())]
+    assert labels == ["2021년", "2023년"]
+    # 현재 폴더 탭의 사고만 목록 항목으로 만든다(다른 폴더 사고는 숨기지 않고 생략).
+    for label, video in (("2021년", video_2021), ("2023년", video_2023)):
+        assert window.switch_video_folder(labels.index(label))
+        items = panel.tree.case_items()
+        assert len(items) == 1
+        item = items[0]
+        assert not item.isHidden()
         assert item.parent() is None
         assert item.childCount() == 1
         assert item.child(0).parent() is item
-        assert item.child(0).toolTip(0) in {video_2021, video_2023}
-    assert [window.project_tabs.tabText(i) for i in range(window.project_tabs.count())] == ["2021년", "2023년"]
-    assert sum(not item.isHidden() for item in panel.tree.case_items()) == 1
-    assert set(panel.tree.case_items()) == {panel.case_item(case.uid) for case in window.cases}
+        assert item.child(0).toolTip(0) == video
+        assert panel.case_item(item.data(0, 256)) is item
 
 
 def test_refresh_in_empty_project_does_not_make_manual_placeholder(refresh_window, tmp_path):

@@ -113,6 +113,35 @@ class FormDefinition:
     # Read legacy workspaces without letting their historical export order
     # override the live form. to_dict() writes the current order for old readers.
     csv_column_order: list[str] = field(default_factory=list, compare=False)
+    # 봉인(seal)된 양식만 파생 구조를 캐시한다. None이면 매번 새로 계산한다.
+    _derived: dict[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+
+    def seal(self) -> FormDefinition:
+        """더 이상 제자리 편집하지 않는 양식의 파생 구조를 캐시한다.
+
+        작업 폴더에 적용된 양식은 편집 시 from_dict로 통째로 교체되고, 양식
+        편집기는 자기 복사본만 수정한다. 사고 수만큼 반복되는 미입력·오류 계산이
+        매번 전체 항목 스펙을 다시 만들지 않도록 적용 중인 양식만 봉인한다.
+        """
+        if self._derived is None:
+            self._derived = {}
+        return self
+
+    def _invalidate(self) -> None:
+        # 제자리 변경이 일어나면 이후로는 캐시 없이 동작한다.
+        self._derived = None
+
+    def _cached(self, name: str, build: Any) -> Any:
+        cache = self._derived
+        if cache is None:
+            return build()
+        try:
+            return cache[name]
+        except KeyError:
+            value = cache[name] = build()
+            return value
 
     @classmethod
     def default(cls) -> FormDefinition:
@@ -133,6 +162,7 @@ class FormDefinition:
 
     def _initialize_layout(self) -> None:
         """Upgrade the formerly hard-coded screen layout, once, for older forms."""
+        self._invalidate()
         collision_order = [
             "collision_targets",
             "incident_damage_unknown",
@@ -196,6 +226,7 @@ class FormDefinition:
         Version 5 keeps deliberate edits, including the same wording, unchanged.
         A prior explicit individual-column edit has history and is preserved too.
         """
+        self._invalidate()
         renamed_columns: dict[str, str] = {}
         originals = {
             "obstacle_pedestrians": ("어른", "어른", "obstacle_adult"),
@@ -230,6 +261,7 @@ class FormDefinition:
 
     def _upgrade_choices(self, *, initialize: bool = True) -> None:
         """Add stable editing identities without renaming existing choices or values."""
+        self._invalidate()
         for record in self.records():
             # Accept files saved during the earlier category expansion. Restore
             # only their internal editing identity; keep the saved configuration.
@@ -285,9 +317,15 @@ class FormDefinition:
         return result
 
     def records(self) -> list[dict[str, Any]]:
-        return [f for tab in self.tabs for f in tab["fields"]]
+        # 호출자가 목록 자체를 바꿔도 캐시가 오염되지 않도록 매번 새 목록을 돌려준다.
+        return list(self._cached(
+            "records", lambda: tuple(f for tab in self.tabs for f in tab["fields"])
+        ))
 
     def specs(self) -> tuple[SectionSpec, ...]:
+        return self._cached("specs", self._build_specs)
+
+    def _build_specs(self) -> tuple[SectionSpec, ...]:
         result = []
         for tab in self.tabs:
             fields = []
@@ -316,7 +354,7 @@ class FormDefinition:
 
     @property
     def fields(self) -> tuple[FieldSpec, ...]:
-        return tuple(f for s in self.specs() for f in s.fields)
+        return self._cached("fields", lambda: tuple(f for s in self.specs() for f in s.fields))
 
     def validate(self) -> None:
         if not isinstance(self.csv_column_order, list) or any(
@@ -475,26 +513,49 @@ class FormDefinition:
         return validation_errors(self.canonical_values(values), self._canonical_fields())
 
     def _canonical_fields(self) -> tuple[FieldSpec, ...]:
-        return tuple(
+        return self._cached("canonical_fields", lambda: tuple(
             replace(spec, choices=tuple(
                 replace(choice, value=record_choice.get("id", record_choice["value"]))
                 for choice, record_choice in zip(spec.choices, record["choices"], strict=True)
             ))
             for spec, record in zip(self.fields, self.records(), strict=True)
-        )
+        ))
+
+    def _canonical_maps(self) -> tuple[tuple[str, dict[Any, Any]], ...]:
+        return self._cached("canonical_maps", lambda: tuple(
+            (record["key"], {c["value"]: c.get("id", c["value"]) for c in record["choices"]})
+            for record in self.records()
+        ))
 
     def canonical_values(self, values: dict[str, Any]) -> dict[str, Any]:
         result = dict(values)
-        for record in self.records():
-            mapping = {c["value"]: c.get("id", c["value"]) for c in record["choices"]}
-            value = result.get(record["key"])
+        for key, mapping in self._canonical_maps():
+            value = result.get(key)
             if isinstance(value, list):
-                result[record["key"]] = [mapping.get(item, item) for item in value]
+                result[key] = [mapping.get(item, item) for item in value]
             elif isinstance(value, str):
-                result[record["key"]] = mapping.get(value, value)
+                result[key] = mapping.get(value, value)
         return result
 
+    def _stored_maps(self) -> dict[str, dict[Any, Any]]:
+        def build() -> dict[str, dict[Any, Any]]:
+            result: dict[str, dict[Any, Any]] = {}
+            for record in self.records():
+                mapping = result.setdefault(record["key"], {})
+                for choice in record["choices"]:
+                    # 같은 식별자가 있으면 기존 next()처럼 첫 선택지가 우선한다.
+                    mapping.setdefault(choice.get("id", choice["value"]), choice["value"])
+            return result
+        return self._cached("stored_maps", build)
+
     def stored_value(self, key: str, canonical_value: Any) -> Any:
+        if self._derived is not None:
+            mapping = self._stored_maps().get(key)
+            if mapping is not None:
+                try:
+                    return mapping.get(canonical_value, canonical_value)
+                except TypeError:
+                    pass  # 해시할 수 없는 값은 아래 비교 경로로 처리한다.
         record = next(record for record in self.records() if record["key"] == key)
         return next((c["value"] for c in record["choices"]
                      if c.get("id", c["value"]) == canonical_value), canonical_value)
@@ -511,7 +572,7 @@ class FormDefinition:
         return result
 
     @staticmethod
-    def _migrate_value(record: dict[str, Any], value: Any) -> Any:
+    def _migration_mapping(record: dict[str, Any]) -> dict[Any, Any]:
         mapping = {c.get("id", c["value"]): c["value"] for c in record["choices"]}
         mapping.update({
             alias: c["value"]
@@ -519,16 +580,33 @@ class FormDefinition:
             for alias in c.get("value_aliases", [])
         })
         mapping.update({c["value"]: c["value"] for c in record["choices"]})
+        return mapping
+
+    @staticmethod
+    def _apply_migration(mapping: dict[Any, Any], value: Any) -> Any:
         if isinstance(value, list):
             return list(dict.fromkeys(mapping.get(item, item) for item in value))
         return mapping.get(value, value) if isinstance(value, str) else value
+
+    @staticmethod
+    def _migrate_value(record: dict[str, Any], value: Any) -> Any:
+        return FormDefinition._apply_migration(FormDefinition._migration_mapping(record), value)
 
     def migrate_values(
         self, values: dict[str, Any], previous: FormDefinition | None = None
     ) -> dict[str, Any]:
         """Migrate on a copy so cancelling or a failed save cannot change live cases."""
         result = deepcopy(values)
-        previous_records = {r["key"]: r for r in previous.records()} if previous else {}
+        if previous is None:
+            # 사고마다 반복되는 기본 경로: 항목별 변환표를 한 번만 만든다.
+            mappings = self._cached("migration_maps", lambda: tuple(
+                (record["key"], self._migration_mapping(record)) for record in self.records()
+            ))
+            for key, mapping in mappings:
+                if key in result:
+                    result[key] = self._apply_migration(mapping, result[key])
+            return result
+        previous_records = {r["key"]: r for r in previous.records()}
         for record in self.records():
             key = record["key"]
             if key not in result:
@@ -550,7 +628,14 @@ class FormDefinition:
     def label(self, key: str) -> str:
         from investigator.schema import field_label
 
-        return next((f.label for f in self.fields if f.key == key), field_label(key))
+        def build() -> dict[str, str]:
+            labels: dict[str, str] = {}
+            for spec in self.fields:
+                labels.setdefault(spec.key, spec.label)
+            return labels
+
+        labels = self._cached("labels", build)
+        return labels[key] if key in labels else field_label(key)
 
     def csv_headers(self) -> list[str]:
         """Export only live names, in the current tab/field/choice order.
@@ -560,7 +645,7 @@ class FormDefinition:
         editor's order. Stable field/choice identities still migrate old values.
         The date and weekday have no special ordering exception.
         """
-        return list(dict.fromkeys(
+        return list(self._cached("csv_headers", lambda: tuple(dict.fromkeys(
             column
             for record in self.records()
             for column in [
@@ -568,7 +653,7 @@ class FormDefinition:
                 *(choice.get("csv_column") for choice in record["choices"]),
             ]
             if column
-        ))
+        ))))
 
     def csv_row(self, values: dict[str, Any]) -> dict[str, str]:
         values = self.migrate_values(values)

@@ -67,8 +67,8 @@ class CaseRepository:
         self.database_path = self.workspace / DATABASE_DIRECTORY / DATABASE_FILENAME
         self.backup_directory = self.workspace / SYSTEMS_DIRECTORY / "backups"
         self.auto_import_exclusions: set[str] = set()
-        self.form_definition = FormDefinition.default()
-        self.initial_form_definition = FormDefinition.default()
+        self.form_definition = FormDefinition.default().seal()
+        self.initial_form_definition = FormDefinition.default().seal()
         self._active_case_uid: str | None = None
         self._metadata_loaded = False
 
@@ -122,8 +122,9 @@ class CaseRepository:
         try:
             if not isinstance(data.get("form_definition"), dict):
                 raise ValueError("사용자 정의 조사 양식이 누락되었습니다.")
-            definition = FormDefinition.from_dict(data.get("form_definition"))
-            initial_definition = FormDefinition.from_dict(data.get("initial_form_definition"))
+            # 적용 중인 양식은 제자리 편집되지 않으므로 사고별 계산용 캐시를 켠다.
+            definition = FormDefinition.from_dict(data.get("form_definition")).seal()
+            initial_definition = FormDefinition.from_dict(data.get("initial_form_definition")).seal()
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise WorkspaceError(f"조사 양식을 읽을 수 없습니다: {exc}") from exc
         if not isinstance(raw_cases, list):
@@ -191,8 +192,8 @@ class CaseRepository:
         exclusions: set[str],
         active: str | None,
     ) -> None:
-        self.form_definition = definition
-        self.initial_form_definition = initial_definition
+        self.form_definition = definition.seal()
+        self.initial_form_definition = initial_definition.seal()
         self.auto_import_exclusions = exclusions
         self._active_case_uid = active
         self._metadata_loaded = True
@@ -552,7 +553,11 @@ class CaseRepository:
                 # Everything needed after COMMIT is parsed before making changes.
                 # A corrupt baseline must not turn a committed save into a reported failure.
                 _, previous_definition, initial_definition, stored_exclusions, stored_active = self._decode_payload({**metadata, "cases": []}, workspace=self.workspace)
-                definition = form_definition or previous_definition
+                # 호출자가 넘긴 양식 객체는 이후 제자리 편집될 수 있으므로 복사본만 봉인한다.
+                definition = (
+                    FormDefinition.from_dict(form_definition.to_dict())
+                    if form_definition is not None else previous_definition
+                ).seal()
                 self._prepare_cases(upserts, definition)
                 changed_by_uid = {case.uid: case for case in upserts}
                 if replace_all:

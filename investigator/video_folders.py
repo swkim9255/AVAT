@@ -12,6 +12,8 @@ from investigator.video_import import (
     VIDEO_EXTENSIONS,
 )
 
+UNLINKED_FOLDER_KEY = "__unlinked__"
+
 
 @dataclass(frozen=True, slots=True)
 class VideoFolder:
@@ -23,6 +25,52 @@ class VideoFolder:
     def contains(self, video: str | Path) -> bool:
         path = Path(video)
         return path.parent == self.path if self.direct_only else path.is_relative_to(self.path)
+
+
+def _normalized(path: str | Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+class VideoFolderIndex:
+    """영상 경로가 속한 폴더 탭을 문자열 비교로 한 번만 계산해 캐시한다.
+
+    VideoFolder.contains()는 호출마다 Path 객체를 만들어 수만 건의 사고에서
+    탭 전환·목록 범위 계산을 느리게 했다. 저장된 영상 경로는 절대 경로이므로
+    대소문자를 정규화한 접두사 비교로 같은 결과를 얻는다.
+    """
+
+    def __init__(self, folders: list[VideoFolder] | tuple[VideoFolder, ...] = ()) -> None:
+        self._rules: list[tuple[str, str, str, bool]] = []
+        for folder in folders:
+            if folder.key == UNLINKED_FOLDER_KEY:
+                continue
+            base = _normalized(folder.path)
+            prefix = base if base.endswith(os.sep) else base + os.sep
+            self._rules.append((folder.key, base, prefix, folder.direct_only))
+        self._cache: dict[str, str | None] = {}
+
+    def key_for(self, video: str | Path) -> str | None:
+        """폴더 탭 키를 돌려준다. 어느 폴더에도 없으면 None(미연결)이다."""
+        text = str(video)
+        try:
+            return self._cache[text]
+        except KeyError:
+            pass
+        normalized = _normalized(text)
+        parent = os.path.dirname(normalized)
+        result = None
+        for key, base, prefix, direct_only in self._rules:
+            if (parent == base) if direct_only else normalized.startswith(prefix):
+                result = key
+                break
+        self._cache[text] = result
+        return result
+
+    def contains(self, folder: VideoFolder, video: str | Path) -> bool:
+        key = self.key_for(video)
+        if folder.key == UNLINKED_FOLDER_KEY:
+            return key is None
+        return key == folder.key
 
 
 def _video_entries(root: Path) -> tuple[list[Path], bool]:

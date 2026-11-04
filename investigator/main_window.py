@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -60,12 +61,21 @@ from investigator.theme import PRIMARY, material_icon
 from investigator.video_controller import PlaybackState, VideoController, VideoMetadata
 from investigator.video_copy import CopiedVideos, copy_videos
 from investigator.video_delete_plan import plan_video_deletion
-from investigator.video_folders import VideoFolder, discover_video_folders, video_root
+from investigator.video_folders import (
+    UNLINKED_FOLDER_KEY,
+    VideoFolder,
+    VideoFolderIndex,
+    discover_video_folders,
+    video_root,
+)
 from investigator.video_import import (
     VIDEO_EXTENSIONS,
     VideoFolderScan,
     parse_accident_video_name,
+    scan_video_files,
     scan_video_folder,
+    scan_video_tree,
+    video_path_key,
 )
 from investigator.video_relink import (
     apply_workspace_video_path_mapping,
@@ -137,6 +147,10 @@ class MainWindow(DetectionMixin, QMainWindow):
         self.repository = CaseRepository(selected)
         self._session = ProjectSession(self.repository, restored=workspace is None and tabs_state.active_folder is not None)
         self._video_folders: list[VideoFolder] = []
+        self._folder_index = VideoFolderIndex()
+        # 마지막 전체 스캔에서 본 영상과 누락 영상(새로고침 안내·감시 시작에 재사용).
+        self._last_scan_video_paths: set[str] = set()
+        self._last_missing_paths: set[str] = set()
         restore_video_state = selected == tabs_state.active_folder or (is_frozen() and workspace is None)
         self._active_video_folder: str | None = tabs_state.active_video_folder if restore_video_state else None
         self._video_folder_order = list(tabs_state.video_folder_order) if restore_video_state else []
@@ -282,18 +296,25 @@ class MainWindow(DetectionMixin, QMainWindow):
         """Persist only detached/new/edited cases and structural metadata."""
         previous = {case.uid: case for case in self.cases}
         candidate_uids = {case.uid for case in candidates}
+        deleted = previous.keys() - candidate_uids
         changes = [
             case for case in candidates
             if previous.get(case.uid) is not case or case.uid in self._dirty_cases
         ]
+        # 기존 사고의 상대 순서가 그대로이고 새 사고가 뒤에 붙기만 하면 DB는 새 행을
+        # 끝 순서로 추가한다. 이때 전체 순서(수만 건 UPDATE)를 다시 쓰지 않는다.
+        survivors = [case.uid for case in self.cases if case.uid not in deleted]
+        candidate_order = [case.uid for case in candidates]
+        order_needed = self._order_dirty or candidate_order[:len(survivors)] != survivors
+
         def prepare():
             return [self._copy_case(case) for case in changes]
 
         snapshots = self._disk_operation(prepare) if prepare_off_thread else prepare()
         self._disk_operation(
             self.repository.save_changes, snapshots,
-            deleted_uids=list(previous.keys() - candidate_uids),
-            order=[case.uid for case in candidates], active_case_uid=active_uid,
+            deleted_uids=list(deleted),
+            order=candidate_order if order_needed else None, active_case_uid=active_uid,
             auto_import_exclusions=auto_import_exclusions,
         )
         # Configured defaults are applied only to genuinely new cases.
@@ -528,6 +549,11 @@ class MainWindow(DetectionMixin, QMainWindow):
         if active_uid not in {case.uid for case in self.cases}:
             active_uid = self.cases[0].uid if self.cases else None
         self.current_uid = active_uid
+        # 경로 복구·새 영상 반영 전에는 목록 행을 만들지 않는다. 폴더 탭은 복구된
+        # 경로 기준으로 정해야 하므로, 동기화가 끝난 뒤 현재 폴더 사고로 한 번만 만든다.
+        self.case_list.set_video_filter(
+            lambda path: False, scope_key=("__loading__", self.repository.workspace), rebuild=False,
+        )
         self.case_list.set_cases(self.cases, active_uid, selected_video_index=None)
         # Clear the previous project's transient status before an import summary.
         self._update_workspace_status()
@@ -586,7 +612,8 @@ class MainWindow(DetectionMixin, QMainWindow):
         if self._workspace_load_failed:
             return False
         try:
-            definition = FormDefinition.from_dict(definition.to_dict())
+            # 적용할 새 양식은 이 복사본으로 고정되므로 전 사고 재검증용 캐시를 켠다.
+            definition = FormDefinition.from_dict(definition.to_dict()).seal()
             candidates = [
                 InvestigationCase.from_dict(
                     case.to_dict(), form_definition=self.repository.form_definition
@@ -663,12 +690,19 @@ class MainWindow(DetectionMixin, QMainWindow):
         except OSError as exc:
             self.statusBar().showMessage(f"영상 폴더를 읽지 못했습니다: {exc}", 6000)
             return
-        if any(not case.videos or any(not any(folder.contains(path) for folder in folders)
-                                      for path in case.videos) for case in self.cases):
-            folders.append(VideoFolder("__unlinked__", "미연결 / 기타 영상", self.repository.workspace))
+        # 경로→폴더 판정은 색인에 캐시해 사고 수만큼의 Path 연산을 피한다.
+        # 폴더 구성이 그대로이면 기존 색인(캐시 포함)을 재사용한다.
+        same_folders = set(folders) == {
+            folder for folder in self._video_folders if folder.key != UNLINKED_FOLDER_KEY
+        }
+        folder_index = self._folder_index if same_folders else VideoFolderIndex(folders)
+        if any(not case.videos or any(folder_index.key_for(path) is None for path in case.videos)
+               for case in self.cases):
+            folders.append(VideoFolder(UNLINKED_FOLDER_KEY, "미연결 / 기타 영상", self.repository.workspace))
         order = {key: index for index, key in enumerate(self._video_folder_order)}
         folders.sort(key=lambda folder: (order.get(folder.key, len(order)), folder.key.casefold()))
         self._video_folders = folders
+        self._folder_index = folder_index
         self._video_folder_order = [folder.key for folder in folders]
         if self._active_video_folder not in self._video_folder_order:
             current = self.current_case
@@ -694,24 +728,28 @@ class MainWindow(DetectionMixin, QMainWindow):
             self.project_tabs.blockSignals(blocked)
 
     def _folder_contains(self, folder: VideoFolder, path: str) -> bool:
-        if folder.key == "__unlinked__":
-            return not any(other.contains(path) for other in self._video_folders if other.key != "__unlinked__")
-        return folder.contains(path)
+        return self._folder_index.contains(folder, path)
 
     def _folder_cases(self) -> list[InvestigationCase]:
         folder = next((item for item in self._video_folders if item.key == self._active_video_folder), None)
         if folder is None:
             return []
-        return [case for case in self.cases if (not case.videos and folder.key == "__unlinked__")
+        return [case for case in self.cases if (not case.videos and folder.key == UNLINKED_FOLDER_KEY)
                 or any(self._folder_contains(folder, path) for path in case.videos)]
 
-    def _apply_video_folder_scope(self) -> None:
+    def _apply_video_folder_scope(self, *, rebuild_cases: bool = False) -> None:
         folder = next((item for item in self._video_folders if item.key == self._active_video_folder), None)
-        self.case_list.set_video_filter(
-            (lambda path: self._folder_contains(folder, path)) if folder else (lambda path: False),
-            show_empty=folder is not None and folder.key == "__unlinked__",
-            scope_key=(self.repository.workspace, folder.key if folder else None),
-        )
+        predicate = (lambda path: self._folder_contains(folder, path)) if folder else (lambda path: False)
+        show_empty = folder is not None and folder.key == UNLINKED_FOLDER_KEY
+        scope_key = (self.repository.workspace, folder.key if folder else None)
+        if rebuild_cases:
+            # 사고 목록 자체가 바뀐 경우: 범위를 먼저 정하고 현재 폴더 사고로 한 번만 만든다.
+            self.case_list.set_video_filter(
+                predicate, show_empty=show_empty, scope_key=scope_key, rebuild=False,
+            )
+            self.case_list.set_cases(self.cases, self.current_uid, selected_video_index=None)
+        else:
+            self.case_list.set_video_filter(predicate, show_empty=show_empty, scope_key=scope_key)
         candidates = self._folder_cases()
         previous = self.current_case
         current = next((case for case in candidates if case.uid == self.current_uid), None)
@@ -735,7 +773,7 @@ class MainWindow(DetectionMixin, QMainWindow):
             return
         folder = next((item for item in self._video_folders if (
             case.active_video and self._folder_contains(item, case.active_video)
-        ) or (not case.videos and item.key == "__unlinked__")), None)
+        ) or (not case.videos and item.key == UNLINKED_FOLDER_KEY)), None)
         if folder is not None:
             self._active_video_folder = folder.key
             blocked = self.project_tabs.blockSignals(True)
@@ -780,7 +818,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         if state:
             self.case_list.restore_view_state(state["list"])
         else:
-            self.case_list.search.clear()
+            self.case_list.clear_search()
         self._show_current_case(open_video=True)
         if self.video_controller.is_open and self.current_case and self.current_case.active_video == state.get("path"):
             self.video_controller.seek(max(0, state.get("frame", 0)))
@@ -859,7 +897,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         self.statistics_panel.restore_state(project.statistics_state)
         self._sync_project_tabs()
         self.case_list.set_cases([])
-        self.case_list.search.clear()
+        self.case_list.clear_search()
         self._update_workspace_status()
         if not project.initialized:
             self.current_uid = None
@@ -872,9 +910,8 @@ class MainWindow(DetectionMixin, QMainWindow):
             return not self._workspace_load_failed
 
         self._install_form(self.repository.form_definition)
-        current = project.list_state.get("current")
-        video_index = current[1] if current and current[1] >= 0 else None
-        self.case_list.set_cases(self.cases, self.current_uid, selected_video_index=video_index)
+        # 범위를 먼저 정하고 현재 폴더 사고만으로 목록을 만든 뒤 보기 상태를 복원한다.
+        self._apply_video_folder_scope(rebuild_cases=True)
         self.case_list.restore_view_state(project.list_state)
         self._synchronize_project_videos(open_video=False)
         self._show_current_case(open_video=True)
@@ -916,7 +953,8 @@ class MainWindow(DetectionMixin, QMainWindow):
             self._active_video_folder = None
             self._video_folder_order = []
             self._folder_view_states = {}
-            self.case_list.set_video_filter(None)
+            # 이전 프로젝트 사고로 목록을 다시 만들지 않고 범위만 초기화한다.
+            self.case_list.set_video_filter(None, rebuild=False)
             self.folder_watcher.remove_directory(previous_project.repository.workspace)
             if self._activate_workspace(project):
                 return True
@@ -951,7 +989,8 @@ class MainWindow(DetectionMixin, QMainWindow):
         success = self._synchronize_project_videos()
         if success:
             self._watch_active_project()
-            if not self._missing_video_paths():
+            # 방금 동기화에서 확인한 누락 목록을 쓴다(전체 영상 존재 확인 반복 방지).
+            if not self._last_missing_paths:
                 self.statusBar().showMessage(
                     f"목록 새로고침 완료 · 사고 {len(self.cases):,}건 · 영상 {sum(len(case.videos) for case in self.cases):,}개",
                     5000,
@@ -1057,8 +1096,16 @@ class MainWindow(DetectionMixin, QMainWindow):
         if files:
             self._import_dropped_videos(files)
 
+    @staticmethod
+    def _find_missing_videos(paths: tuple[str, ...]) -> set[str]:
+        """디스크 작업 스레드에서 실행할 수 있도록 경로 스냅숏만 받는다."""
+        return {path for path in paths if not os.path.isfile(path)}
+
+    def _video_path_snapshot(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(path for case in self.cases for path in case.videos))
+
     def _missing_video_paths(self) -> set[str]:
-        return {path for case in self.cases for path in case.videos if not Path(path).is_file()}
+        return self._find_missing_videos(self._video_path_snapshot())
 
     def relink_video_paths(
         self, mapping: dict[str, str], *, automatic: bool = False, open_video: bool = True,
@@ -1140,36 +1187,53 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._project_discovery_in_progress = True
         self._auto_import_failed = False
         try:
-            scan = self._disk_operation(scan_video_folder, video_root(self.repository.workspace))
-            discovered = [path for _, paths in scan.groups for path in paths]
-            discovered.extend(scan.ignored_videos)
+            workspace = self.repository.workspace
+            # 끊어진 연결 확인과 스캔은 디스크 작업 스레드에서 한다(화면 정지 방지).
+            missing = self._disk_operation(self._find_missing_videos, self._video_path_snapshot())
+            if only_paths is not None and not missing:
+                # 감시로 들어온 영상만 처리한다. 끊어진 연결이 없으면 복구 후보를 찾으려고
+                # 프로젝트 전체를 다시 훑을 필요가 없다.
+                scan = self._disk_operation(scan_video_files, sorted(only_paths), video_root(workspace))
+            else:
+                scan = self._disk_operation(scan_video_folder, video_root(workspace))
+                self._last_scan_video_paths = {
+                    *(path for _, paths in scan.groups for path in paths), *scan.ignored_videos,
+                }
             reserved: frozenset[str] = frozenset()
             recovered = 0
-            if self._missing_video_paths():
+            if missing:
+                discovered = [path for _, paths in scan.groups for path in paths]
+                discovered.extend(scan.ignored_videos)
                 plan = self._disk_operation(
-                    build_auto_relink_plan, self.cases, self.repository.workspace,
+                    build_auto_relink_plan, self.cases, workspace,
                     discovered_paths=discovered,
                     excluded_paths=self.repository.auto_import_exclusions,
+                    missing_paths=missing, trusted_scan=True,
                 )
                 reserved = plan.reserved_paths
                 if plan.mapping:
                     if not self.relink_video_paths(plan.mapping, automatic=True, open_video=open_video):
                         return False
                     recovered = len(plan.mapping)
+                    missing = self._disk_operation(
+                        self._find_missing_videos, self._video_path_snapshot(),
+                    )
             if reserved:
-                reserved_keys = {str(Path(path).resolve()).casefold() for path in reserved}
+                reserved_keys = {video_path_key(path) for path in reserved}
                 scan = VideoFolderScan(
                     tuple((number, matching) for number, paths in scan.groups
-                          if (matching := tuple(path for path in paths if path.casefold() not in reserved_keys))),
-                    tuple(path for path in scan.ignored_videos if path.casefold() not in reserved_keys),
+                          if (matching := tuple(path for path in paths
+                                                if video_path_key(path) not in reserved_keys))),
+                    tuple(path for path in scan.ignored_videos if video_path_key(path) not in reserved_keys),
                 )
             self.import_video_folder(
-                self.repository.workspace, quiet_when_empty=True, respect_exclusions=True,
+                workspace, quiet_when_empty=True, respect_exclusions=True,
                 only_paths=only_paths, automatic=True, _scan=scan, open_video=open_video,
             )
             if self._auto_import_failed:
                 return False
-            missing = self._missing_video_paths()
+            # 새로 가져온 영상은 방금 디스크에서 찾은 파일이라 누락 목록은 그대로다.
+            self._last_missing_paths = missing
             if missing:
                 prefix = f"영상 {recovered:,}개 자동 복구. " if recovered else ""
                 self.statusBar().showMessage(
@@ -1216,10 +1280,20 @@ class MainWindow(DetectionMixin, QMainWindow):
 
     def _watch_active_project(self) -> None:
         if not self._workspace_load_failed:
-            self.folder_watcher.add_directory(
-                self.repository.workspace,
-                known_paths={path for case in self.cases for path in case.videos},
-            )
+            workspace = self.repository.workspace
+            if self.folder_watcher.is_watching(workspace):
+                self.folder_watcher.add_directory(workspace)
+            else:
+                # 감시 시작용 전체 스캔은 디스크 작업 스레드에서 한다. 마지막 프로젝트
+                # 스캔에서 이미 본 파일(규칙에 맞지 않는 이름·제외 영상 등)은 새 영상으로
+                # 다시 보고하지 않아 시작 직후 불필요한 전체 동기화를 막는다.
+                try:
+                    scan = self._disk_operation(scan_video_tree, workspace)
+                except OSError:
+                    scan = None
+                known = {path for case in self.cases for path in case.videos}
+                known.update(self._last_scan_video_paths)
+                self.folder_watcher.add_directory(workspace, known_paths=known, scan=scan)
         self._schedule_watch_refresh()
 
     def _schedule_watch_refresh(self) -> None:
@@ -1253,7 +1327,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         if self._auto_import_failed:
             project.pending_video_paths.update(paths)
             self._watch_refresh_timer.start(5000)
-        self._sync_project_tabs()
+        # 폴더 탭은 _synchronize_project_videos가 끝에서 이미 다시 맞춘다.
 
     def _copy_import_files(self, files: list[str], *, source_root: str | Path | None = None) -> CopiedVideos | None:
         self.statusBar().showMessage("영상을 작업 폴더로 복사하고 있습니다…")
@@ -1306,11 +1380,11 @@ class MainWindow(DetectionMixin, QMainWindow):
             return False
 
         if only_paths is not None:
-            selected = {str(Path(path).resolve()).casefold() for path in only_paths}
+            selected = {video_path_key(path) for path in only_paths}
             scan = VideoFolderScan(
                 tuple((number, matching) for number, paths in scan.groups
-                      if (matching := tuple(path for path in paths if path.casefold() in selected))),
-                tuple(path for path in scan.ignored_videos if path.casefold() in selected),
+                      if (matching := tuple(path for path in paths if video_path_key(path) in selected))),
+                tuple(path for path in scan.ignored_videos if video_path_key(path) in selected),
             )
 
         if not scan.groups:
@@ -1366,11 +1440,12 @@ class MainWindow(DetectionMixin, QMainWindow):
             ): case
             for case in candidates
         }
+        # 저장된 영상 경로는 가져올 때 이미 resolve한 절대 경로라 문자열 정규화로 충분하다.
+        # (사고 수만 건에서 영상마다 resolve()를 호출하면 화면이 수 초 멈췄다.)
         path_owner: dict[str, str] = {}
         for case in candidates:
             for video in case.videos:
-                key = str(Path(video).expanduser().resolve()).casefold()
-                path_owner.setdefault(key, case.uid)
+                path_owner.setdefault(video_path_key(video), case.uid)
 
         imported_uid: str | None = None
         created_cases = 0
@@ -1385,7 +1460,7 @@ class MainWindow(DetectionMixin, QMainWindow):
                 paths = tuple(
                     path
                     for path in paths
-                    if str(Path(path).expanduser().resolve()).casefold() not in candidate_exclusions
+                    if video_path_key(path) not in candidate_exclusions
                 )
                 if not paths:
                     continue
@@ -1393,8 +1468,7 @@ class MainWindow(DetectionMixin, QMainWindow):
             case = by_identity.get(identity)
             new_paths: list[str] = []
             for path in paths:
-                key = str(Path(path).expanduser().resolve()).casefold()
-                owner = path_owner.get(key)
+                owner = path_owner.get(video_path_key(path))
                 if owner is None:
                     new_paths.append(path)
                 elif case is not None and owner == case.uid:
@@ -1433,7 +1507,7 @@ class MainWindow(DetectionMixin, QMainWindow):
             attached_videos += added
             affected_uids.add(case.uid)
             for path in new_paths[:added]:
-                key = str(Path(path).expanduser().resolve()).casefold()
+                key = video_path_key(path)
                 path_owner[key] = case.uid
                 added_videos += 1
                 if not respect_exclusions:
@@ -1779,6 +1853,8 @@ class MainWindow(DetectionMixin, QMainWindow):
         candidate_by_uid = {case.uid: case for case in candidates}
         for old in self.cases:
             survivor = candidate_by_uid.get(old.uid)
+            if survivor is old:
+                continue  # 바뀌지 않은 사고(같은 객체)는 영상도 그대로다.
             surviving_paths = {key(path) for path in survivor.videos} if survivor else set()
             for path in old.videos:
                 if key(path) not in surviving_paths:
@@ -2517,7 +2593,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         target = next(case for case in self.cases if case.uid == uid)
         self.current_uid = uid
         self._focus_case_folder(target)
-        self.case_list.search.clear()
+        self.case_list.clear_search()
         self.case_list.select_case(uid)
         self._show_current_case(open_video=True)
         if key:

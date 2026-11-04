@@ -32,6 +32,7 @@ VIDEO_INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
 KIND_ROLE = Qt.ItemDataRole.UserRole + 2
 FOLDER_KEY_ROLE = Qt.ItemDataRole.UserRole + 3
 _SELECTION_UNSET = object()
+SEARCH_DEBOUNCE_MS = 150
 
 
 class CaseTreeWidget(QTreeWidget):
@@ -224,7 +225,13 @@ class CaseListPanel(QWidget):
         self.search.addAction(
             material_icon("search", MUTED), QLineEdit.ActionPosition.LeadingPosition
         )
-        self.search.textChanged.connect(self._filter)
+        # 사용자가 입력 중일 때는 글자마다 목록 전체를 훑지 않도록 잠시 모아서 적용한다.
+        # 코드에서 검색어를 바꾸면(포커스 없음) 기존처럼 즉시 반영한다.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(SEARCH_DEBOUNCE_MS)
+        self._search_timer.timeout.connect(lambda: self._filter(self.search.text()))
+        self.search.textChanged.connect(self._search_text_changed)
         search_row = QHBoxLayout()
         search_row.setSpacing(6)
         search_row.addWidget(self.search, 1)
@@ -302,12 +309,20 @@ class CaseListPanel(QWidget):
         self._workspace = Path(workspace).resolve()
 
     def set_video_filter(self, predicate: Callable[[str], bool] | None, *, show_empty: bool = False,
-                         scope_key: object = None) -> None:
-        """Filter display only; child indices still address original case videos."""
+                         scope_key: object = None, rebuild: bool = True) -> None:
+        """Filter display only; child indices still address original case videos.
+
+        범위 밖 사고는 숨기지 않고 아예 항목을 만들지 않는다. 숨긴 행은 Qt 영속
+        인덱스를 남겨 행 삽입·삭제마다 전체를 갱신하게 하므로 사고 수만 건에서
+        목록 갱신이 제곱으로 느려졌다. ``rebuild=False``는 곧 이어질 set_cases를 위해
+        범위만 바꾼다.
+        """
         unchanged = predicate is not None and scope_key is not None and scope_key == self._video_filter_key
         self._video_filter = predicate
         self._video_filter_key = scope_key
         self._show_empty_in_scope = show_empty
+        if not rebuild:
+            return
         if unchanged:
             self._filter(self.search.text())
             self._update_count_label()
@@ -359,9 +374,15 @@ class CaseListPanel(QWidget):
             self._folder_items_by_key[key] = item
         return item
 
-    def _new_case_item(self, case: InvestigationCase) -> QTreeWidgetItem:
+    def _new_case_item(self, case: InvestigationCase, *, attach: bool = True) -> QTreeWidgetItem:
+        """``attach=False``는 범위 필터 모드에서 모아서 한 번에 삽입할 분리 항목을 만든다."""
         parent = self._parent_for_case(case)
-        item = QTreeWidgetItem(parent if parent is not None else self.tree)
+        if parent is not None:
+            item = QTreeWidgetItem(parent)
+        elif attach:
+            item = QTreeWidgetItem(self.tree)
+        else:
+            item = QTreeWidgetItem()
         item.setData(0, KIND_ROLE, "case")
         item.setData(0, UID_ROLE, case.uid)
         item.setData(0, VIDEO_INDEX_ROLE, -1)
@@ -370,8 +391,15 @@ class CaseListPanel(QWidget):
         self._items_by_uid[case.uid] = item
         return item
 
+    def _grouped(self) -> bool:
+        """범위 필터가 없을 때만 영상 폴더 묶음 항목을 사용한다."""
+        return self._video_filter is None
+
     def _arrange_case_items(self) -> None:
         """Retain case/video item identity while regrouping and applying order."""
+        if not self._grouped():
+            self._arrange_flat_items()
+            return
         current = self.tree.currentItem()
         selected = [
             item
@@ -421,6 +449,46 @@ class CaseListPanel(QWidget):
             self.tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
         for item in selected:
             item.setSelected(True)
+        self.tree.set_case_order([case.uid for case in self._cases])
+        self._filter(self.search.text())
+
+    def _top_level_uids(self) -> list[str]:
+        return [
+            str(self.tree.topLevelItem(index).data(0, UID_ROLE))
+            for index in range(self.tree.topLevelItemCount())
+        ]
+
+    def _arrange_flat_items(self) -> None:
+        """범위 필터 모드의 최상위 사고 행을 한 번에 꺼냈다가 순서대로 다시 넣는다.
+
+        행을 하나씩 꺼내고 넣으면 Qt가 행마다 모든 영속 인덱스(펼침·선택)를 갱신해
+        사고 수의 제곱으로 느려진다. 일괄 처리는 그 갱신을 두 번으로 줄인다.
+        """
+        desired = [case.uid for case in self._cases if case.uid in self._items_by_uid]
+        if self._top_level_uids() == desired:
+            self.tree.set_case_order([case.uid for case in self._cases])
+            return
+        current = self.tree.currentItem()
+        selected = [
+            item
+            for case_item in self._items_by_uid.values()
+            for item in [case_item, *(case_item.child(index) for index in range(case_item.childCount()))]
+            if item.isSelected()
+        ]
+        expanded = {uid: item.isExpanded() for uid, item in self._items_by_uid.items()}
+        updates = self.tree.updatesEnabled()
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.invisibleRootItem().takeChildren()
+            self.tree.addTopLevelItems([self._items_by_uid[uid] for uid in desired])
+            for uid, state in expanded.items():
+                self._items_by_uid[uid].setExpanded(state)
+            if current is not None:
+                self.tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            for item in selected:
+                item.setSelected(True)
+        finally:
+            self.tree.setUpdatesEnabled(updates)
         self.tree.set_case_order([case.uid for case in self._cases])
         self._filter(self.search.text())
 
@@ -517,39 +585,60 @@ class CaseListPanel(QWidget):
         self._missing_counts.clear()
         self._completed_uids.clear()
         blocked = self.tree.blockSignals(True)
-        self.tree.clear()
-        selected_item: QTreeWidgetItem | None = None
-        selected_case_item: QTreeWidgetItem | None = None
-        for case in cases:
-            item = self._new_case_item(case)
-            if case.uid == selected_uid:
-                selected_case_item = item
-                if selected_video_index is None:
-                    selected_item = item
-            self._update_case_row(case, item)
-            self._sync_video_items(case, item)
-            for index in range(item.childCount()):
-                child = item.child(index)
-                if case.uid == selected_uid and index == selected_video_index:
-                    selected_item = child
-                if (case.uid, child.toolTip(0)) in selected_targets:
-                    child.setSelected(True)
-            if (case.uid, None) in selected_targets:
-                item.setSelected(True)
-            item.setExpanded(expanded.get(case.uid, True))
-        for key, item in self._folder_items_by_key.items():
-            item.setExpanded(expanded_folders.get(key, True))
-        self.tree.set_case_order([case.uid for case in cases])
-        if selected_item is None:
-            selected_item = selected_case_item
-        if selected_item:
-            if selected_targets:
-                self.tree.setCurrentItem(selected_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
-            else:
-                self.tree.setCurrentItem(selected_item)
-        self.set_active_video(selected_uid)
-        self._update_count_label()
-        self.tree.blockSignals(blocked)
+        updates = self.tree.updatesEnabled()
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.clear()
+            grouped = self._grouped()
+            # 현재 영상 폴더 범위의 사고만 항목으로 만든다(범위 밖은 숨기지 않고 생략).
+            scoped = [case for case in cases if self._case_in_scope(case)]
+            detached: list[QTreeWidgetItem] = []
+            for case in scoped:
+                item = self._new_case_item(case, attach=grouped)
+                self._update_case_row(case, item)
+                self._sync_video_items(case, item)
+                if grouped:
+                    item.setExpanded(expanded.get(case.uid, True))
+                else:
+                    detached.append(item)
+            if detached:
+                # 한 번에 삽입해야 행마다 영속 인덱스를 갱신하는 비용이 생기지 않는다.
+                self.tree.addTopLevelItems(detached)
+                for case in scoped:
+                    self._items_by_uid[case.uid].setExpanded(expanded.get(case.uid, True))
+            selected_item: QTreeWidgetItem | None = None
+            selected_case_item: QTreeWidgetItem | None = None
+            for case in scoped:
+                item = self._items_by_uid[case.uid]
+                if case.uid == selected_uid:
+                    selected_case_item = item
+                    if selected_video_index is None:
+                        selected_item = item
+                    elif (isinstance(selected_video_index, int)
+                          and 0 <= selected_video_index < item.childCount()):
+                        selected_item = item.child(selected_video_index)
+                if selected_targets:
+                    for index in range(item.childCount()):
+                        child = item.child(index)
+                        if (case.uid, child.toolTip(0)) in selected_targets:
+                            child.setSelected(True)
+                    if (case.uid, None) in selected_targets:
+                        item.setSelected(True)
+            for key, item in self._folder_items_by_key.items():
+                item.setExpanded(expanded_folders.get(key, True))
+            self.tree.set_case_order([case.uid for case in cases])
+            if selected_item is None:
+                selected_item = selected_case_item
+            if selected_item:
+                if selected_targets:
+                    self.tree.setCurrentItem(selected_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+                else:
+                    self.tree.setCurrentItem(selected_item)
+            self.set_active_video(selected_uid)
+            self._update_count_label()
+        finally:
+            self.tree.setUpdatesEnabled(updates)
+            self.tree.blockSignals(blocked)
         self._filter(self.search.text())
         self._update_delete_button()
 
@@ -560,22 +649,31 @@ class CaseListPanel(QWidget):
     ) -> bool:
         """Refresh one existing row without rebuilding or changing selection."""
 
-        item = self._items_by_uid.get(case.uid)
-        if item is None:
+        if case.uid not in self._cases_by_uid:
             return False
-        previous_case = self._cases_by_uid[case.uid]
-        self._cases_by_uid[case.uid] = case
-        if previous_case is not case:
-            for index, previous in enumerate(self._cases):
-                if previous.uid == case.uid:
-                    self._cases[index] = case
-                    break
+        item = self._items_by_uid.get(case.uid)
+        in_scope = self._case_in_scope(case)
+        if item is None or not in_scope:
+            if item is None and not in_scope:
+                # 범위 밖 사고는 행이 없지만 탭 전환 때 쓸 최신 객체로는 바꿔 둔다.
+                self._replace_case_reference(case)
+                return False
+            # 다른 폴더 영상 추가·삭제로 범위 소속이 바뀌면 병합으로 행을 추가·제거한다.
+            self._replace_case_reference(case)
+            self.merge_cases(
+                self._cases, self._active_uid if active_uid is _SELECTION_UNSET else active_uid,
+            )
+            return case.uid in self._items_by_uid
+        self._replace_case_reference(case)
         blocked = self.tree.blockSignals(True)
         try:
             self._update_case_row(case, item)
             if self._videos_by_uid.get(case.uid) != tuple(case.videos):
                 self._sync_video_items(case, item)
-                self._arrange_case_items()
+                if self._grouped():
+                    self._arrange_case_items()
+                else:
+                    self._filter_item(item, self.search.text().strip().casefold())
             else:
                 parent = item.parent()
                 needle = self.search.text().strip().casefold()
@@ -591,25 +689,42 @@ class CaseListPanel(QWidget):
         self._update_delete_button()
         return True
 
+    def _replace_case_reference(self, case: InvestigationCase) -> None:
+        previous_case = self._cases_by_uid.get(case.uid)
+        self._cases_by_uid[case.uid] = case
+        if previous_case is not case:
+            for index, previous in enumerate(self._cases):
+                if previous.uid == case.uid:
+                    self._cases[index] = case
+                    break
+
+    def _remove_case_item(self, uid: str) -> None:
+        item = self._items_by_uid.pop(uid, None)
+        if item is None:
+            return
+        if self._active_video_item is not None and self._active_video_item.parent() is item:
+            self._active_video_item = None
+        parent = item.parent()
+        if parent is not None:
+            parent.takeChild(parent.indexOfChild(item))
+        else:
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+        self._videos_by_uid.pop(uid, None)
+        self._missing_counts.pop(uid, None)
+        self._completed_uids.discard(uid)
+
     def merge_cases(self, cases: list[InvestigationCase], active_uid: str | None) -> None:
         """Append watched accidents and refresh changed rows without a tree reset."""
         self._cases = list(cases)
+        if not self._grouped():
+            self._merge_flat_cases(cases, active_uid)
+            return
         blocked = self.tree.blockSignals(True)
         try:
             remaining = {case.uid for case in cases}
             for uid in self._items_by_uid.keys() - remaining:
-                item = self._items_by_uid.pop(uid)
-                if self._active_video_item is not None and self._active_video_item.parent() is item:
-                    self._active_video_item = None
-                parent = item.parent()
-                if parent is not None:
-                    parent.takeChild(parent.indexOfChild(item))
-                else:
-                    self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+                self._remove_case_item(uid)
                 self._cases_by_uid.pop(uid, None)
-                self._videos_by_uid.pop(uid, None)
-                self._missing_counts.pop(uid, None)
-                self._completed_uids.discard(uid)
             for case in cases:
                 if self._cases_by_uid.get(case.uid) is case and self._videos_by_uid.get(case.uid) == tuple(case.videos):
                     continue
@@ -623,6 +738,51 @@ class CaseListPanel(QWidget):
                 item.setExpanded(True)
                 self._filter_item(item, self.search.text().strip().casefold())
             self._arrange_case_items()
+            self.set_active_video(active_uid)
+            self._update_count_label()
+        finally:
+            self.tree.blockSignals(blocked)
+        self._update_delete_button()
+
+    def _merge_flat_cases(self, cases: list[InvestigationCase], active_uid: str | None) -> None:
+        """범위 필터 모드의 증분 병합: 바뀐 행만 갱신하고 새 행은 한 번에 덧붙인다."""
+        blocked = self.tree.blockSignals(True)
+        try:
+            remaining = {case.uid for case in cases}
+            for uid in self._items_by_uid.keys() - remaining:
+                self._remove_case_item(uid)
+            for uid in self._cases_by_uid.keys() - remaining:
+                del self._cases_by_uid[uid]
+            needle = self.search.text().strip().casefold()
+            new_items: list[QTreeWidgetItem] = []
+            for case in cases:
+                previous = self._cases_by_uid.get(case.uid)
+                item = self._items_by_uid.get(case.uid)
+                unchanged = previous is case and self._videos_by_uid.get(case.uid) == tuple(case.videos)
+                self._cases_by_uid[case.uid] = case
+                if unchanged:
+                    continue
+                in_scope = self._case_in_scope(case)
+                if not in_scope:
+                    self._remove_case_item(case.uid)
+                    continue
+                if item is not None:
+                    self._update_case_row(case, item)
+                    if self._videos_by_uid.get(case.uid) != tuple(case.videos):
+                        self._sync_video_items(case, item)
+                    self._filter_item(item, needle)
+                    continue
+                item = self._new_case_item(case, attach=False)
+                self._update_case_row(case, item)
+                self._sync_video_items(case, item)
+                new_items.append(item)
+            if new_items:
+                self.tree.addTopLevelItems(new_items)
+                for item in new_items:
+                    item.setExpanded(True)
+                    self._filter_item(item, needle)
+            # 새 사고가 끝에 추가되는 일반적인 경우에는 재배치하지 않는다.
+            self._arrange_flat_items()
             self.set_active_video(active_uid)
             self._update_count_label()
         finally:
@@ -646,9 +806,10 @@ class CaseListPanel(QWidget):
             item.setToolTip(1, f"미입력 {missing}개")
 
     def _update_count_label(self) -> None:
-        scoped = {case.uid for case in self._cases if self._case_in_scope(case)}
-        self.count_label.setText(f"{len(self._completed_uids & scoped)}/{len(scoped)} 완료")
-        self.sort_button.setEnabled(bool(scoped))
+        # 행은 현재 범위의 사고에만 있으므로 입력 한 번마다 전체 사고를 다시 훑지 않는다.
+        total = len(self._items_by_uid)
+        self.count_label.setText(f"{len(self._completed_uids)}/{total} 완료")
+        self.sort_button.setEnabled(bool(total))
 
     def _sync_video_items(self, case: InvestigationCase, item: QTreeWidgetItem) -> None:
         """Reuse video rows by path, retaining selections through attachment edits."""
@@ -825,6 +986,29 @@ class CaseListPanel(QWidget):
             action = menu.addAction(material_icon("delete_outline", DANGER), "사고 삭제")
             action.triggered.connect(lambda checked=False: self.delete_case_requested.emit(uid))
         menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def _search_text_changed(self, text: str) -> None:
+        if self.search.hasFocus():
+            self._search_timer.start()
+            return
+        self._search_timer.stop()
+        self._filter(text)
+
+    def flush_search(self) -> None:
+        """입력 대기 중인 검색어를 즉시 적용한다."""
+        if self._search_timer.isActive():
+            self._search_timer.stop()
+            self._filter(self.search.text())
+
+    def clear_search(self) -> None:
+        """검색어를 지우고 입력 지연 없이 바로 전체 목록을 보인다."""
+        self._search_timer.stop()
+        blocked = self.search.blockSignals(True)
+        try:
+            self.search.clear()
+        finally:
+            self.search.blockSignals(blocked)
+        self._filter("")
 
     def _filter(self, text: str) -> None:
         needle = text.strip().casefold()

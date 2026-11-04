@@ -179,6 +179,8 @@ def build_auto_relink_plan(
     *,
     excluded_paths: Iterable[str | Path] = (),
     discovered_paths: Iterable[str | Path] | None = None,
+    missing_paths: Iterable[str | Path] | None = None,
+    trusted_scan: bool = False,
 ) -> AutoRelinkPlan:
     """Recover missing links at startup without guessing ambiguous identities.
 
@@ -193,17 +195,28 @@ def build_auto_relink_plan(
     stolen as candidates. ``discovered_paths`` can reuse a caller's recursive
     scan to avoid another directory walk. Unresolved candidates are reserved so
     subsequent auto-import cannot create duplicate attachments for them.
+
+    ``missing_paths``는 호출자가 같은 작업에서 이미 확인한 누락 영상 목록이다.
+    ``trusted_scan``은 ``discovered_paths``가 같은 작업의 scan_video_tree 결과라는
+    뜻으로, 파일마다 존재·링크·resolve 확인을 반복하지 않는다(수만 건 대응).
     """
 
     root = Path(workspace).expanduser().resolve()
     cases = tuple(cases)
     excluded = {_path_key(path, root) for path in excluded_paths}
+    known_missing = (
+        None if missing_paths is None else {_path_key(path, root) for path in missing_paths}
+    )
     occupied: set[str] = set()
     missing: dict[str, str] = {}
     for case in cases:
         for path in case.videos:
             key = _path_key(path, root)
-            if _file_path(path, root).is_file():
+            exists = (
+                key not in known_missing if known_missing is not None
+                else _file_path(path, root).is_file()
+            )
+            if exists:
                 occupied.add(key)
             elif key not in excluded:
                 missing.setdefault(key, path)
@@ -214,23 +227,32 @@ def build_auto_relink_plan(
 
     if discovered_paths is None:
         discovered_paths, _ = scan_video_tree(root)
+        trusted_scan = True
     by_key: dict[str, str] = {}
     for raw_path in discovered_paths:
         candidate = _file_path(raw_path, root)
-        if candidate.suffix.casefold() not in VIDEO_EXTENSIONS or not candidate.is_file():
+        if candidate.suffix.casefold() not in VIDEO_EXTENSIONS:
             continue
-        resolved = candidate.resolve()
-        if not resolved.is_relative_to(root):
-            continue
-        # Keep reused scan input subject to the same application-directory
-        # exclusions. Symlink/reparse pruning is performed by scan_video_tree;
-        # direct file symlinks are also rejected for caller-supplied scans.
-        parts = candidate.absolute().relative_to(root).parts
-        if candidate.is_symlink() or any(
-            part.startswith(".") or part.casefold() in IGNORED_VIDEO_DIRECTORIES
-            for part in parts[:-1]
-        ):
-            continue
+        if trusted_scan:
+            # scan_video_tree가 존재 여부·링크·관리 폴더를 이미 걸렀고 경로도 정규형이다.
+            resolved = candidate
+            if not resolved.is_relative_to(root):
+                continue
+        else:
+            if not candidate.is_file():
+                continue
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(root):
+                continue
+            # Keep reused scan input subject to the same application-directory
+            # exclusions. Symlink/reparse pruning is performed by scan_video_tree;
+            # direct file symlinks are also rejected for caller-supplied scans.
+            parts = candidate.absolute().relative_to(root).parts
+            if candidate.is_symlink() or any(
+                part.startswith(".") or part.casefold() in IGNORED_VIDEO_DIRECTORIES
+                for part in parts[:-1]
+            ):
+                continue
         key = _path_key(resolved)
         if key not in occupied and key not in excluded:
             by_key.setdefault(key, str(resolved))
