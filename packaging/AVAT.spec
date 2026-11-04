@@ -43,3 +43,7 @@ for entry in list(bundle_root.iterdir()):
         entry.rename(systems_root / entry.name)
 for folder in ("01_사고동영상", "02_csv내보내기", "03_Report내보내기"):
     (bundle_root / folder).mkdir(exist_ok=True)
+# 최종 사용자용 안내서를 배포본 최상위에 둔다(업데이트·백업·복원 절차 포함).
+guide = root / "packaging" / "사용안내.txt"
+if guide.is_file():
+    (bundle_root / guide.name).write_bytes(guide.read_bytes())
