@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -256,7 +260,158 @@ def test_restore_selecting_latest_backup_itself_is_safe(window_factory, tmp_path
     assert [case.values["accident_classification"] for case in window.cases] == ["2021010100001"]
 
 
+def _auxiliary_names(path: Path) -> list[str]:
+    return sorted(item.name for item in path.parent.glob(path.name + "-*"))
+
+
+def _raw_database_copy(tmp_path: Path, *numbers: str) -> Path:
+    """다른 PC의 01_사고동영상/작업관리/작업관리.db를 그대로 복사해 온 WAL 형식 파일."""
+    other = CaseRepository(tmp_path / "other-pc")
+    other.save([_case(number) for number in numbers])
+    raw = tmp_path / "usb" / "작업관리.db"
+    raw.parent.mkdir(parents=True)
+    shutil.copyfile(other.database_path, raw)
+    assert raw.read_bytes()[18:20] == b"\x02\x02"  # WAL 형식 헤더(앱이 만든 백업은 DELETE 형식)
+    return raw
+
+
+def test_restore_from_raw_wal_database_leaves_source_folder_untouched(tmp_path):
+    raw = _raw_database_copy(tmp_path, "2021010100001", "2021010100002")
+    original = raw.read_bytes()
+    repository = CaseRepository(tmp_path / "project")
+    repository.save([_case("2022010100001")])
+    repository.restore(raw)
+    assert sorted(case.values["accident_classification"] for case in repository.load()) == [
+        "2021010100001", "2021010100002",
+    ]
+    # 고른 파일 옆에 -wal·-shm이 생기거나 원본이 바뀌지 않는다.
+    assert raw.read_bytes() == original
+    assert _auxiliary_names(raw) == []
+    assert not list(repository.database_path.parent.glob(".avat-restore.*"))
+
+
+def test_restore_includes_committed_changes_left_in_source_wal(tmp_path):
+    other = CaseRepository(tmp_path / "other-pc")
+    other.save([_case("2021010100001")])
+    raw = tmp_path / "usb" / "작업관리.db"
+    raw.parent.mkdir(parents=True)
+    # AVAT가 실행 중인 PC에서 복사한 것처럼, 마지막 변경이 -wal에만 있는 상태를 만든다.
+    reader = sqlite3.connect(other.database_path)
+    try:
+        reader.execute("SELECT COUNT(*) FROM cases").fetchone()
+        other.save([_case("2021010100001"), _case("2021010100002")])
+        shutil.copyfile(other.database_path, raw)
+        shutil.copyfile(Path(str(other.database_path) + "-wal"), Path(str(raw) + "-wal"))
+    finally:
+        reader.close()
+    before = {item.name: item.read_bytes() for item in raw.parent.iterdir()}
+    main_only = tmp_path / "main-only" / "작업관리.db"
+    main_only.parent.mkdir()
+    shutil.copyfile(raw, main_only)
+    check = CaseRepository(tmp_path / "check")
+    check.restore(main_only)
+    assert len(check.load()) == 1  # 본 파일만으로는 마지막 변경이 없다.
+    repository = CaseRepository(tmp_path / "project")
+    repository.restore(raw)
+    assert len(repository.load()) == 2
+    assert {item.name: item.read_bytes() for item in raw.parent.iterdir()} == before
+    assert not list(repository.database_path.parent.glob(".avat-restore.*"))
+
+
+def test_reinstall_restores_raw_database_placed_as_latest_backup(window_factory, tmp_path):
+    raw = _raw_database_copy(tmp_path, "2021010100001", "2021010100002")
+    reinstall = tmp_path / "new-install"
+    target = reinstall / "systems" / "사용자데이터" / "백업" / "작업관리_백업.db"
+    target.parent.mkdir(parents=True)
+    shutil.copyfile(raw, target)
+    window = window_factory(reinstall)
+    assert not window._workspace_load_failed
+    assert len(window.cases) == 2
+    assert _auxiliary_names(target) == []
+    # 백업 파일 옆에 보조 파일이 남지 않아 삭제·경로 복구 전 백업 갱신이 막히지 않는다.
+    assert window._backup_latest_before_change() == target
+    assert _auxiliary_names(target) == []
+
+
+def test_latest_backup_refresh_clears_leftover_auxiliary_files(tmp_path):
+    repository = CaseRepository(tmp_path / "project")
+    repository.save([_case("2021010100001")])
+    target = repository.backup_latest()
+    # 이전 빌드가 WAL 형식 백업 파일을 직접 열어 남긴 보조 파일
+    for suffix in ("-wal", "-shm"):
+        Path(str(target) + suffix).write_bytes(b"")
+    repository.save([_case("2021010100001"), _case("2021010100002")])
+    assert repository.backup_latest() == target
+    assert _auxiliary_names(target) == []
+    check = CaseRepository(tmp_path / "check")
+    check.restore(target)
+    assert len(check.load()) == 2
+
+
+def test_user_chosen_backup_destination_with_auxiliary_files_is_still_refused(tmp_path):
+    repository = CaseRepository(tmp_path / "project")
+    repository.save([_case("2021010100001")])
+    destination = tmp_path / "external" / "copy.db"
+    destination.parent.mkdir()
+    Path(str(destination) + "-wal").write_bytes(b"")
+    with pytest.raises(WorkspaceError, match="보조 파일"):
+        repository.backup(destination)
+    assert not destination.exists()
+
+
 # -- 중복 실행 방지 -----------------------------------------------------------------
+
+_LOCK_HOLDER = """
+import sys
+from PySide6.QtCore import QLockFile
+lock = QLockFile(sys.argv[1])
+lock.setStaleLockTime(0)
+print("locked" if lock.tryLock(0) else "failed", flush=True)
+sys.stdin.read()
+"""
+
+
+def _lock_path(workspace: Path) -> Path:
+    return workspace / MANAGED_VIDEO_DIRECTORY / "작업관리" / "작업관리.lock"
+
+
+@pytest.mark.parametrize("content", [
+    b"4242\nAVAT.exe\nOTHER-PC\n0123456789abcdef0123456789abcdef\n\n",  # 다른 PC에서 폴더째 복사됨
+    b"",  # 내용이 비거나 깨진 잠금
+], ids=["other-pc", "empty"])
+def test_leftover_lock_not_held_by_any_process_is_cleared(window_factory, tmp_path, content):
+    workspace = tmp_path / "project"
+    _video(workspace / MANAGED_VIDEO_DIRECTORY / "2021" / "2021010100001.mp4")
+    lock = _lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_bytes(content)
+    window = window_factory(workspace)
+    assert not window._workspace_load_failed
+    assert len(window.cases) == 1
+    # 정리한 뒤 이 창이 다시 잠갔으므로 같은 폴더의 두 번째 창은 여전히 거절된다.
+    assert window_factory(workspace)._workspace_load_failed
+
+
+def test_lock_held_by_running_process_is_never_removed(window_factory, tmp_path):
+    workspace = tmp_path / "project"
+    _video(workspace / MANAGED_VIDEO_DIRECTORY / "2021" / "2021010100001.mp4")
+    lock = _lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _LOCK_HOLDER, str(lock)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        refused = window_factory(workspace)
+        assert refused._workspace_load_failed
+        assert refused.cases == []
+        assert lock.is_file()
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+    # 잠근 프로세스가 비정상 종료한 뒤에는 남은 잠금이 정리되어 열린다.
+    assert not window_factory(workspace)._workspace_load_failed
 
 
 def test_second_window_on_same_workspace_is_refused(window_factory, tmp_path):

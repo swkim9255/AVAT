@@ -636,9 +636,19 @@ class MainWindow(DetectionMixin, QMainWindow):
             self._workspace_locks[workspace] = lock
             return
         if lock.error() == QLockFile.LockError.LockFailedError:
+            # Qt는 같은 PC에서 끝난 프로세스의 잠금만 스스로 정리한다. 폴더째 다른 PC에서
+            # 복사돼 온 잠금이나 내용이 비거나 깨진 잠금은 영구히 남으므로 여기서 정리한다.
+            # Windows에서는 잠금을 가진 프로세스가 잠금 파일을 연 채로 두어 지울 수 없으므로,
+            # 실제로 사용 중인 잠금은 지워지지 않고 아래 안내로 이어진다.
+            owner = lock.getLockInfo()
+            if lock.removeStaleLockFile() and lock.tryLock(0):
+                logging.getLogger(__name__).warning("stale_workspace_lock_removed owner=%r", owner)
+                self._workspace_locks[workspace] = lock
+                return
             raise WorkspaceLockedError(
                 "다른 AVAT 창에서 이 작업 폴더를 사용 중입니다.\n"
-                "이미 열린 창을 사용하거나, 그 창을 닫은 뒤 다시 실행해 주세요."
+                "이미 열린 창을 사용하거나, 그 창을 닫은 뒤 다시 실행해 주세요.\n"
+                "열린 창이 없는데도 이 안내가 나오면 작업 관리자에서 남아 있는 AVAT.exe를 종료해 주세요."
             )
         # 권한 문제 등으로 잠금 파일을 만들 수 없으면 사용을 막지 않는다.
 

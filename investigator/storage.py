@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator
@@ -436,6 +437,19 @@ class CaseRepository:
                 logger.warning("임시 저장 파일을 정리하지 못했습니다: %s", path, exc_info=True)
 
     @staticmethod
+    def _auxiliary_paths(path: Path) -> list[Path]:
+        """SQLite가 DB 파일 옆에 만드는 보조 파일 경로(-wal·-shm·-journal)."""
+        return [Path(str(path) + suffix) for suffix in ("-wal", "-shm", "-journal")]
+
+    @classmethod
+    def _remove_temporary_database(cls, path: Path | None) -> None:
+        """임시 DB 사본과 그 옆의 보조 파일을 함께 지운다."""
+        if path is not None:
+            for auxiliary in cls._auxiliary_paths(path):
+                cls._remove_temporary(auxiliary)
+            cls._remove_temporary(path)
+
+    @staticmethod
     def _identity(case: InvestigationCase) -> tuple[str, str]:
         return (
             str(case.values.get("institution", "")).strip().casefold(),
@@ -850,7 +864,27 @@ class CaseRepository:
             )
             if not pending and target.stat().st_mtime_ns >= self.database_path.stat().st_mtime_ns:
                 return None
+        self._discard_latest_backup_auxiliary(target)
         return self.backup(target)
+
+    def _discard_latest_backup_auxiliary(self, target: Path) -> None:
+        """최신 백업 파일 옆에 남은 SQLite 보조 파일을 지운다.
+
+        최신 백업은 앱이 통째로 바꾸는 파일이라, 옆의 보조 파일은 곧 교체될 이전 내용의
+        것이다(예: 다른 프로그램이나 이전 빌드가 백업 파일을 직접 열어 남긴 -wal·-shm).
+        남겨 두면 백업 갱신이 계속 거절되거나, 새 백업 파일에 엉뚱한 WAL이 적용된다.
+        """
+        for auxiliary in self._auxiliary_paths(target):
+            try:
+                auxiliary.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"최신 백업 파일 옆의 보조 파일을 정리할 수 없습니다: {auxiliary}\n"
+                    "백업 파일을 연 다른 프로그램을 닫은 뒤 다시 시도해 주세요."
+                ) from exc
+            logger.warning("latest_backup_auxiliary_removed suffix=%s", auxiliary.name.rsplit("-", 1)[-1])
 
     def _quiesce_database(self) -> None:
         """교체 전에 WAL을 본 파일에 반영하고 SQLite 보조 파일이 남지 않았는지 확인한다."""
@@ -870,6 +904,10 @@ class CaseRepository:
 
         선택한 파일이 최신 백업 파일 자체여도, 이후 현재 데이터를 최신 백업으로
         저장하기 전에 별도 복사본을 확보해 두므로 안전하다.
+
+        선택한 파일은 SQLite로 직접 열지 않는다. 다른 PC에서 가져온 작업관리.db 같은
+        WAL 형식 파일은 읽기 전용으로 열어도 원본 옆에 -wal·-shm이 생겨 남고, 쓰기 금지
+        위치에서는 열지 못한다. 원본과 커밋된 보조 파일(-wal·-journal)을 복사한 사본만 연다.
         """
         source_path = Path(source).expanduser().resolve()
         if source_path == self.database_path.resolve():
@@ -883,31 +921,30 @@ class CaseRepository:
                 dir=self.database_path.parent, prefix=".avat-restore.", suffix=".db", delete=False,
             ) as handle:
                 temporary_path = Path(handle.name)
-            # 읽기 전용으로 열어 원본 백업 파일은 바꾸지 않고 일관된 복사본을 만든다.
-            source_connection = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True, timeout=5)
-            try:
-                target = sqlite3.connect(temporary_path)
-                try:
-                    source_connection.backup(target)
-                    target.execute("PRAGMA journal_mode=DELETE")
-                finally:
-                    target.close()
-            finally:
-                source_connection.close()
+            shutil.copyfile(source_path, temporary_path)
+            for suffix in ("-wal", "-journal"):
+                auxiliary = Path(str(source_path) + suffix)
+                if auxiliary.is_file():
+                    shutil.copyfile(auxiliary, Path(str(temporary_path) + suffix))
             # AVAT 형식·무결성·조사 데이터 구조를 모두 검증한다. 실패하면 현재 DB를 유지한다.
-            with self._connection(temporary_path, wal=False) as connection, connection:
-                connection.execute("BEGIN")
-                if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise WorkspaceError("백업 파일의 무결성 검사에 실패했습니다.")
-                payload = self._read_payload(connection)
+            with self._connection(temporary_path, wal=False) as connection:
+                # 사본에 WAL·롤백 저널 내용을 반영하고 보조 파일 없는 단일 파일로 만든다.
+                mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+                if str(mode).lower() != "delete":
+                    raise WorkspaceError("백업 파일 사본을 단일 파일로 정리하지 못했습니다.")
+                with connection:
+                    connection.execute("BEGIN")
+                    if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise WorkspaceError("백업 파일의 무결성 검사에 실패했습니다.")
+                    payload = self._read_payload(connection)
             self._decode_payload(payload, workspace=self.workspace)
             with temporary_path.open("r+b") as handle:
                 os.fsync(handle.fileno())
         except WorkspaceError:
-            self._remove_temporary(temporary_path)
+            self._remove_temporary_database(temporary_path)
             raise
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
-            self._remove_temporary(temporary_path)
+            self._remove_temporary_database(temporary_path)
             raise WorkspaceError(
                 f"AVAT 조사 데이터 백업 파일이 아니거나 읽을 수 없습니다: {source_path}\n{exc}"
             ) from exc
