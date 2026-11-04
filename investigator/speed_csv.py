@@ -248,14 +248,21 @@ def write_speed_csv(
     cases: Iterable[InvestigationCase],
     *,
     report_numbers: Mapping[str, str] | None = None,
+    fps_cache: dict[str, tuple[int, int, float]] | None = None,
 ) -> None:
-    """Write to a caller-owned staged file; only metadata is read from videos."""
+    """Write to a caller-owned staged file; only metadata is read from videos.
+
+    ``fps_cache``를 주면 크기·수정시각이 같은 영상은 다시 열지 않고, 새로 확인한
+    결과를 그 사전에 채워 돌려준다(호출자가 DB에 저장해 다음에도 재사용).
+    """
     cases = list(cases)
     paths = list(dict.fromkeys(
         video for case in cases for video in case.videos
         if _has_markers(case.markers_by_video.get(video))
     ))
-    metadata = probe_video_fps(paths, {})
+    metadata = probe_video_fps(paths, fps_cache or {})
+    if fps_cache is not None:
+        fps_cache.update(metadata)
     fps_by_video = {path: entry[2] for path, entry in metadata.items()}
     writer = csv.DictWriter(handle, fieldnames=SPEED_CSV_HEADERS)
     writer.writeheader()

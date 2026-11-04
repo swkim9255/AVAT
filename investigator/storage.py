@@ -31,6 +31,9 @@ DATABASE_VERSION = 1
 RELATIVE_WORKSPACE_SCHEMA_VERSION = 4
 PATH_STORAGE = "workspace-relative-v1"
 DATABASE_APPLICATION_ID = 0x41564154  # AVAT, not an arbitrary SQLite database.
+# 영상 FPS 확인 결과 캐시. 기존 표는 바꾸지 않고 필요할 때 추가하는 표라
+# 이전 DB·백업과 호환된다(이전 버전은 이 표를 읽지 않을 뿐이다).
+VIDEO_METADATA_TABLE = "video_metadata"
 _UNSET = object()
 _REQUIRED_METADATA = {
     "schema_version", "path_storage", "form_definition", "initial_form_definition", "active_case_uid",
@@ -685,6 +688,69 @@ class CaseRepository:
             self._remove_temporary(temporary_path)
         return destination
 
+    def load_video_metadata(self) -> dict[str, tuple[int, int, float]]:
+        """저장된 영상 FPS 확인 결과(경로 → 크기, 수정시각, FPS)를 읽는다.
+
+        통계·속도 CSV가 실행할 때마다 모든 영상을 다시 열지 않도록 별도 표에 둔다.
+        표가 없는 이전 DB도 그대로 읽는다(빈 결과).
+        """
+        if not self.database_path.exists():
+            return {}
+        try:
+            with self._connection() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (VIDEO_METADATA_TABLE,),
+                ).fetchone() is None:
+                    return {}
+                rows = connection.execute(
+                    f"SELECT path, size, mtime_ns, fps FROM {VIDEO_METADATA_TABLE}"
+                ).fetchall()
+        except (OSError, sqlite3.Error) as exc:
+            raise WorkspaceError(f"영상 정보 캐시를 읽을 수 없습니다: {self.database_path}") from exc
+        result: dict[str, tuple[int, int, float]] = {}
+        for row in rows:
+            try:
+                path = self._convert_path(row["path"], self.workspace, storing=False)
+                result[path] = (int(row["size"]), int(row["mtime_ns"]), float(row["fps"]))
+            except (WorkspaceError, TypeError, ValueError):
+                continue
+        return result
+
+    def save_video_metadata(self, entries: dict[str, tuple[int, int, float]]) -> None:
+        """영상 FPS 확인 결과를 저장한다(확인 실패도 파일이 바뀔 때까지 다시 열지 않도록 저장)."""
+        if not entries or not self.database_path.exists():
+            return
+        rows = []
+        for path, (size, mtime_ns, fps) in entries.items():
+            try:
+                rows.append((
+                    self._convert_path(path, self.workspace, storing=True),
+                    int(size), int(mtime_ns), float(fps),
+                ))
+            except (WorkspaceError, TypeError, ValueError):
+                continue
+        if not rows:
+            return
+        try:
+            with self._connection() as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {VIDEO_METADATA_TABLE} (
+                        path TEXT PRIMARY KEY, size INTEGER NOT NULL,
+                        mtime_ns INTEGER NOT NULL, fps REAL NOT NULL
+                    )"""
+                )
+                connection.executemany(
+                    f"""INSERT INTO {VIDEO_METADATA_TABLE}(path, size, mtime_ns, fps)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                        size=excluded.size, mtime_ns=excluded.mtime_ns, fps=excluded.fps""",
+                    rows,
+                )
+        except (OSError, sqlite3.Error) as exc:
+            raise WorkspaceError(f"영상 정보 캐시를 저장할 수 없습니다: {self.database_path}") from exc
+
     def backup_latest(self, *, only_if_changed: bool = False) -> Path | None:
         """작업 폴더당 하나만 유지하는 최신 백업 파일을 현재 데이터로 갱신한다.
 
@@ -816,6 +882,7 @@ class CaseRepository:
         cases: list[InvestigationCase],
         *,
         include_specification: bool = False,
+        video_metadata: dict[str, tuple[int, int, float]] | None = None,
     ) -> Path:
         destination = Path(path).expanduser().resolve()
         headers = csv_export_headers(self.form_definition)
@@ -905,7 +972,9 @@ class CaseRepository:
                 delete=False,
             ) as speed_handle:
                 speed_temporary_path = Path(speed_handle.name)
-                write_speed_csv(speed_handle, cases, report_numbers=report_numbers)
+                write_speed_csv(
+                    speed_handle, cases, report_numbers=report_numbers, fps_cache=video_metadata,
+                )
                 speed_handle.flush()
                 os.fsync(speed_handle.fileno())
             os.replace(temporary_path, destination)

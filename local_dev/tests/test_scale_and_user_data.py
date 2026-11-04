@@ -294,3 +294,71 @@ def test_quarantine_lives_in_user_data_folder(tmp_path):
     assert len(batch.operation_directory.name) == len("20260101-000000-") + 8
     batch.rollback()
     assert source.is_file()
+
+
+# -- 영상 FPS 확인 결과 캐시 ------------------------------------------------------------
+
+
+def test_video_metadata_round_trips_with_relative_paths(tmp_path):
+    workspace = tmp_path / "project"
+    repository = CaseRepository(workspace)
+    assert repository.load_video_metadata() == {}  # DB가 없을 때
+    repository.save([_case("2021010100001")])
+    assert repository.load_video_metadata() == {}  # 표가 없는 이전 DB
+    inside = str((workspace / MANAGED_VIDEO_DIRECTORY / "a" / "1.mp4").resolve())
+    outside = str((tmp_path / "external" / "2.mp4").resolve())
+    repository.save_video_metadata({inside: (10, 20, 29.97), outside: (1, 2, 0.0)})
+    repository.save_video_metadata({inside: (11, 21, 30.0)})
+    assert repository.load_video_metadata() == {inside: (11, 21, 30.0), outside: (1, 2, 0.0)}
+    with repository._connection() as connection:
+        stored = {row[0] for row in connection.execute("SELECT path FROM video_metadata")}
+    assert "01_사고동영상/a/1.mp4" in stored
+    # 기존 조사 데이터 구조와 검증은 그대로다.
+    assert len(repository.load()) == 1
+
+
+def test_speed_csv_reuses_cached_fps_and_fills_new_entries(tmp_path, monkeypatch):
+    import io
+
+    from investigator import speed_csv, statistics_media
+
+    videos = [_video(tmp_path / f"{index}.mp4") for index in range(2)]
+    cases = []
+    for index, path in enumerate(videos):
+        case = _case(f"202101010000{index + 1}", path)
+        case.markers_by_video = {path: {"trigger_frame": 1, "collision_frames": [5]}}
+        cases.append(case)
+    opened = []
+
+    class FakeCapture:
+        def __init__(self, path):
+            opened.append(path)
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 25.0
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(statistics_media, "open_video_capture", FakeCapture)
+    first_stat = Path(videos[0]).stat()
+    cache = {str(Path(videos[0]).resolve()): (first_stat.st_size, first_stat.st_mtime_ns, 30.0)}
+    speed_csv.write_speed_csv(io.StringIO(), cases, fps_cache=cache)
+    # 크기·수정시각이 같은 영상은 다시 열지 않고, 처음 보는 영상만 열어 캐시에 채운다.
+    assert opened == [str(Path(videos[1]).resolve())]
+    assert cache[str(Path(videos[1]).resolve())][2] == 25.0
+    assert cache[str(Path(videos[0]).resolve())][2] == 30.0
+
+
+def test_statistics_probe_is_limited_to_videos_where_fps_matters(window_factory, tmp_path):
+    workspace = tmp_path / "project"
+    plain = _video(workspace / MANAGED_VIDEO_DIRECTORY / "a" / "2021010100001.mp4")
+    marked = _video(workspace / MANAGED_VIDEO_DIRECTORY / "a" / "2021010100002.mp4")
+    window = window_factory(workspace)
+    case = next(case for case in window.cases if case.active_video == marked)
+    case.markers_by_video[marked] = {"trigger_frame": 2, "collision_frames": [9]}
+    assert window._fps_needed_paths() == [marked]
+    assert plain not in window._fps_needed_paths()

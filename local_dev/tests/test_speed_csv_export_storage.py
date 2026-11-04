@@ -37,7 +37,8 @@ def test_speed_companion_always_staged_with_project_report_numbers(
     expected_numbers = build_case_number_map(cases)
     observed = []
 
-    def write_speed(handle, project_cases, *, report_numbers=None):
+    def write_speed(handle, project_cases, *, report_numbers=None, fps_cache=None):
+        del fps_cache  # FPS 캐시 재사용은 별도 테스트에서 검증한다.
         observed.append((project_cases, report_numbers))
         writer = csv.writer(handle)
         writer.writerow(["case_id", "report_accident_number"])

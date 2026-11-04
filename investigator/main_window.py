@@ -196,6 +196,9 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._statistics_media_worker = StorageWorker(self)
         self._statistics_media_cache: dict[str, tuple[int, int, float]] = {}
         self._statistics_media_attempted: set[str] = set()
+        # 영상 FPS 확인 결과는 작업 폴더 DB에 저장해 다음 실행·CSV 내보내기에서 재사용한다.
+        self._fps_cache_workspace: Path | None = None
+        self._fps_pending: dict[str, tuple[int, int, float]] = {}
         self._statistics_media_future = None
         self._statistics_media_cancel = Event()
         self._statistics_media_origin: Path | None = None
@@ -962,6 +965,7 @@ class MainWindow(DetectionMixin, QMainWindow):
             return False
         if not self._workspace_load_failed and not self._save(show_message=False):
             return False
+        self._flush_video_metadata()
         self._refresh_latest_backup_quietly()
         self._capture_project()
         self.video_controller.close_video()
@@ -1260,6 +1264,7 @@ class MainWindow(DetectionMixin, QMainWindow):
             self._object_edit_history.clear(context)
         self._statistics_media_cache.clear()
         self._statistics_media_attempted.clear()
+        self._fps_cache_workspace = None
         self._mark_saved(self.current_uid)
         list_state = self.case_list.capture_view_state()
         self.case_list.set_cases(self.cases, self.current_uid)
@@ -1972,6 +1977,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._mark_saved(active_uid)
         self._statistics_media_cache.clear()
         self._statistics_media_attempted.clear()
+        self._fps_cache_workspace = None
         project = self._session
         project.pending_video_paths.difference_update(
             path for path in tuple(project.pending_video_paths) if key(path) in removed_links
@@ -2505,12 +2511,24 @@ class MainWindow(DetectionMixin, QMainWindow):
             return
         include_specification = options.include_specification.isChecked()
         try:
+            # 속도 CSV는 저장된 FPS 확인 결과를 재사용하고 새로 확인한 것만 다시 저장한다.
+            self._ensure_fps_cache_loaded()
+            fps_snapshot = dict(self._statistics_media_cache)
             destination = self._disk_operation(self.repository.export_csv,
-                path, self.cases, include_specification=include_specification
+                path, self.cases, include_specification=include_specification,
+                video_metadata=fps_snapshot,
             )
         except WorkspaceError as exc:
             QMessageBox.critical(self, "CSV 내보내기 오류", str(exc))
             return
+        changed = {
+            key: entry for key, entry in fps_snapshot.items()
+            if self._statistics_media_cache.get(key) != entry
+        }
+        if changed:
+            self._statistics_media_cache.update(changed)
+            self._fps_pending.update(changed)
+            self._flush_video_metadata()
         message = f"CSV를 저장했습니다: {destination}"
         message += f" · 속도 분석: {speed_csv_path(destination).name}"
         if include_specification:
@@ -2665,6 +2683,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._deferred_reorders.clear()
         self._statistics_media_cache.clear()
         self._statistics_media_attempted.clear()
+        self._fps_cache_workspace = None
         self.current_uid = None
         self.cases = []
         project = self._session
@@ -2680,7 +2699,10 @@ class MainWindow(DetectionMixin, QMainWindow):
     def _video_opened(self, metadata: VideoMetadata) -> None:
         try:
             stat = metadata.path.stat()
-            self._statistics_media_cache[str(metadata.path)] = (stat.st_size, stat.st_mtime_ns, metadata.reported_fps)
+            entry = (stat.st_size, stat.st_mtime_ns, metadata.reported_fps)
+            if self._statistics_media_cache.get(str(metadata.path)) != entry:
+                self._statistics_media_cache[str(metadata.path)] = entry
+                self._fps_pending[str(metadata.path)] = entry  # 다음 저장 시점에 DB에 기록
             self._invalidate_statistics()
         except OSError:
             pass
@@ -2777,8 +2799,56 @@ class MainWindow(DetectionMixin, QMainWindow):
                 self.repository.workspace,
             )
         self._statistics_dirty = False
-        if any(case.active_video and case.active_video not in self._statistics_media_attempted for case in self.cases):
+        if any(path not in self._statistics_media_attempted for path in self._fps_needed_paths()):
             self._request_statistics_media()
+
+    def _fps_needed_paths(self) -> list[str]:
+        """FPS가 통계에 실제로 쓰이는 영상만 고른다.
+
+        FPS는 트리거→충돌 시간과 트리거 시점 속도 계산에만 쓰인다. 트리거와 충돌
+        (또는 속도 지점)이 지정된 현재 영상만 확인하면 수만 개 영상을 모두 열 필요가 없다.
+        """
+        paths: dict[str, None] = {}
+        for case in self.cases:
+            path = case.active_video
+            if not path:
+                continue
+            marker = case.markers_by_video.get(path) or {}
+            if marker.get("trigger_frame") is None:
+                continue
+            if marker.get("collision_frames") or marker.get("speed_points"):
+                paths[path] = None
+        return list(paths)
+
+    def _ensure_fps_cache_loaded(self) -> None:
+        """작업 폴더별로 DB에 저장된 FPS 확인 결과를 한 번 읽어 온다."""
+        workspace = self.repository.workspace
+        if self._fps_cache_workspace == workspace or self._workspace_load_failed:
+            return
+        self._fps_cache_workspace = workspace
+        try:
+            stored = self._disk_operation(self.repository.load_video_metadata)
+        except WorkspaceError:
+            logging.getLogger(__name__).warning("video_metadata_load_failed", exc_info=True)
+            return
+        for path, entry in stored.items():
+            # 이번 실행에서 영상을 열어 얻은 값이 있으면 그것이 더 최신이다.
+            self._statistics_media_cache.setdefault(path, entry)
+
+    def _flush_video_metadata(self, *, closing: bool = False) -> None:
+        """새로 확인한 FPS 정보를 작업 폴더 DB에 저장한다(실패해도 작업은 계속)."""
+        if not self._fps_pending or self._workspace_load_failed or self._storage_worker.closed:
+            return
+        if self._commit_in_progress and not closing:
+            return  # 진행 중인 저장이 끝난 뒤 다음 기회에 기록한다.
+        pending, self._fps_pending = self._fps_pending, {}
+        try:
+            if closing:
+                self.repository.save_video_metadata(pending)
+            else:
+                self._disk_operation(self.repository.save_video_metadata, pending)
+        except WorkspaceError:
+            logging.getLogger(__name__).warning("video_metadata_save_failed", exc_info=True)
 
     def _open_statistics_case(self, uid: str, key: str = "") -> None:
         if self._commit_in_progress or not any(case.uid == uid for case in self.cases):
@@ -2798,9 +2868,13 @@ class MainWindow(DetectionMixin, QMainWindow):
                 self.investigation.focus_field(key)
 
     def _request_statistics_media(self) -> None:
-        if self._statistics_media_future is not None or self._workspace_load_failed:
+        if (self._statistics_media_future is not None or self._workspace_load_failed
+                or self._commit_in_progress):
             return
-        paths = list(dict.fromkeys(case.active_video for case in self.cases if case.active_video))
+        self._ensure_fps_cache_loaded()
+        # FPS가 필요한 영상 중 이번 실행에서 아직 확인하지 않은 것만 백그라운드로 확인한다.
+        # 저장된 결과와 크기·수정시각이 같으면 probe_video_fps가 영상을 열지 않는다.
+        paths = [path for path in self._fps_needed_paths() if path not in self._statistics_media_attempted]
         if not paths:
             return
         self._statistics_media_attempted.update(paths)
@@ -2819,11 +2893,18 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._statistics_media_timer.stop()
         self._statistics_media_future = None
         try:
-            self._statistics_media_cache.update(future.result())
+            result = future.result()
         except Exception:
             self.statusBar().showMessage("일부 영상 정보를 확인하지 못했습니다. 파일 상태를 확인해 주세요.", 5000)
         else:
+            changed = {
+                path: entry for path, entry in result.items()
+                if self._statistics_media_cache.get(path) != entry
+            }
+            self._statistics_media_cache.update(result)
             if self.repository.workspace == self._statistics_media_origin:
+                self._fps_pending.update(changed)
+                self._flush_video_metadata()
                 self._invalidate_statistics()
                 self.statusBar().showMessage("영상 통계 정보를 갱신했습니다.", 3000)
         if (self.repository.workspace != self._statistics_media_origin
@@ -2875,6 +2956,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         if not self._workspace_load_failed and not self._save(show_message=False):
             event.ignore()
             return
+        self._flush_video_metadata(closing=True)
         self._refresh_latest_backup_quietly(closing=True)
         self._project_tabs_timer.stop()
         self._save_project_tabs()
