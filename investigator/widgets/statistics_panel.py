@@ -201,11 +201,13 @@ class StatisticsToggle(QFrame):
             "QFrame#statisticsToggle QPushButton:hover:!checked { background:#EEF2F8; }"
         )
 
-    def addItem(self, text: str, value: Any) -> None:
+    def addItem(self, text: str, value: Any, tooltip: str = "") -> None:
         index = len(self._values)
         self._values.append(value)
         button = QPushButton(text, self)
         button.setCheckable(True)
+        if tooltip:
+            button.setToolTip(tooltip)
         self._buttons.addButton(button, index)
         self._layout.addWidget(button)
         if self._index < 0:
@@ -461,7 +463,6 @@ class StatisticsPanel(QWidget):
                 "orientation": getattr(self, "_item_orientation", "auto"),
                 "cross_view": getattr(self, "_cross_view", "heat"),
                 "cross_mode": getattr(self, "_cross_mode", "row"),
-                "butterfly_mode": getattr(self, "_butterfly_mode", "two"),
                 "butterfly_unit": getattr(self, "_butterfly_unit", "percent"),
                 "butterfly_group_key": getattr(self, "_butterfly_group_key", None),
                 "butterfly_left": getattr(self, "_butterfly_left", None),
@@ -489,7 +490,7 @@ class StatisticsPanel(QWidget):
             self._item_mode, self._cross_mode = state.get("mode", "count"), state.get("cross_mode", "row")
             self._item_orientation = state.get("orientation", "auto")
             self._cross_view = state.get("cross_view", "heat")
-            self._butterfly_mode = state.get("butterfly_mode", "two")
+            # 이전 버전의 butterfly_mode('한 그룹 vs 나머지')는 없앴으므로 읽지 않는다.
             self._butterfly_unit = state.get("butterfly_unit", "percent")
             self._butterfly_group_key = state.get("butterfly_group_key")
             self._butterfly_left = state.get("butterfly_left")
@@ -1049,11 +1050,11 @@ class StatisticsPanel(QWidget):
         toolbar = QGridLayout()
         self.cross_row = self._field_picker(getattr(self, "_row_key", "weather"))
         self.cross_column = self._field_picker(getattr(self, "_column_key", SEVERITY_KEY))
-        row_label = label("행 · 가로축 항목")
+        row_label = label("행 항목")
         toolbar.addWidget(row_label, 0, 0)
         toolbar.addWidget(self.cross_row, 1, 0)
         toolbar.addWidget(label("×"), 1, 1)
-        column_label = label("열 · 세로축 항목")
+        column_label = label("열 항목")
         toolbar.addWidget(column_label, 0, 2)
         toolbar.addWidget(self.cross_column, 1, 2)
         swap = QPushButton("행·열 바꾸기", self)
@@ -1073,17 +1074,36 @@ class StatisticsPanel(QWidget):
         controls.addStretch(1)
         self.cross_view = StatisticsToggle(self)
         if self._cross_kind == "cn":
-            self.cross_view.addItem("상자수염", "box")
+            self.cross_view.addItem("상자수염", "box", "범주별로 수치의 중앙값·사분위·범위를 비교합니다.")
         else:
-            self.cross_view.addItem("히트맵", "heat")
-            self.cross_view.addItem("100% 막대", "stack")
-        self.cross_view.addItem("나비형 비교", "butterfly")
+            self.cross_view.addItem("히트맵", "heat", "행과 열이 만나는 칸의 비율을 색의 진하기로 보여 줍니다.")
+            self.cross_view.addItem(
+                "100% 누적 막대", "stack",
+                "행마다 전체를 100%로 놓고 열 값의 구성비를 한 막대에 쌓아 보여 줍니다.",
+            )
+        self.cross_view.addItem(
+            "양방향 막대", "butterfly",
+            "두 그룹의 분포를 가운데 항목을 기준으로 왼쪽·오른쪽에 나란히 비교합니다(버터플라이 차트).",
+        )
         self.cross_view.setCurrentIndex(max(0, self.cross_view.findData(getattr(self, "_cross_view", "heat"))))
         self._cross_view = self.cross_view.currentData()
         self.cross_view.setVisible(self._cross_kind in {"cc", "cn"})
+        # 보기마다 두 항목이 화면에서 하는 역할이 달라 이름도 그에 맞춘다.
         if self._cross_view == "butterfly" and self._cross_kind in {"cc", "cn"}:
-            row_label.setText("가운데 축 · 수치 구간" if row_numeric else "가운데 축" if not column_numeric else "좌우 그룹")
-            column_label.setText("좌우 그룹" if row_numeric or not column_numeric else "가운데 축 · 수치 구간")
+            # 수치 항목은 항상 가운데(구간), 범주 항목이 좌우 그룹이 된다.
+            row_is_axis = row_numeric or not column_numeric
+            axis_text = "가운데 항목 · 구간별" if row_numeric or column_numeric else "가운데 항목"
+            row_label.setText(axis_text if row_is_axis else "좌우 그룹 항목")
+            column_label.setText("좌우 그룹 항목" if row_is_axis else axis_text)
+            swap.setText("가운데·그룹 바꾸기")
+        elif self._cross_kind == "cn":
+            row_label.setText("수치 항목" if row_numeric else "범주 항목")
+            column_label.setText("수치 항목" if column_numeric else "범주 항목")
+            swap.setText("항목 바꾸기")
+        elif self._cross_kind == "nn":
+            row_label.setText("가로축(X) 항목")
+            column_label.setText("세로축(Y) 항목")
+            swap.setText("X·Y 바꾸기")
         controls.addWidget(self.cross_view)
         self.cross_mode = StatisticsToggle(self)
         self.cross_mode.addItem("행 기준 %", "row")
@@ -1126,7 +1146,7 @@ class StatisticsPanel(QWidget):
             inner.addWidget(label(str(exc), "warningNote"))
             return
         if len(groups) < 2:
-            inner.addWidget(label("좌우를 비교할 수 있는 그룹이 2개 이상인 항목을 선택해 주세요.", "warningNote"))
+            inner.addWidget(label("값이 2개 이상인 항목을 좌우 그룹 항목으로 선택해 주세요.", "warningNote"))
             return
         values = tuple(group.value for group in groups)
         available = {group_value_key(value) for value in values}
@@ -1139,24 +1159,22 @@ class StatisticsPanel(QWidget):
         right = tuple(value for value in getattr(self, "_butterfly_right_values", ())
                       if group_value_key(value) in available and group_value_key(value) not in left_keys)
         if not right:
+            if left_keys >= available:
+                # 왼쪽이 모든 값을 차지하면(이전 '한 그룹 vs 나머지' 상태 등) 첫 값만 남겨 오른쪽 자리를 만든다.
+                left = left[:1]
+                left_keys = {group_value_key(value) for value in left}
             right = tuple(value for value in values if group_value_key(value) not in left_keys)[:1]
         self._butterfly_left_values, self._butterfly_right_values = left, right
         self._butterfly_left = left[0] if left else None
         self._butterfly_right = right[0] if right else None
-        self.butterfly_mode = StatisticsToggle(self)
-        self.butterfly_mode.addItem("두 그룹", "two")
-        self.butterfly_mode.addItem("한 그룹 vs 나머지", "rest")
-        self.butterfly_mode.setCurrentIndex(max(0, self.butterfly_mode.findData(getattr(self, "_butterfly_mode", "two"))))
-        self._butterfly_mode = self.butterfly_mode.currentData()
         self.butterfly_unit = StatisticsToggle(self)
-        self.butterfly_unit.addItem("그룹 내 %", "percent")
-        self.butterfly_unit.addItem("건수", "count")
+        self.butterfly_unit.addItem("그룹 내 비율", "percent", "각 그룹의 사고 수를 100%로 놓은 비율입니다.")
+        self.butterfly_unit.addItem("건수", "count", "사고 건수입니다. 좌우 그룹의 크기가 다르면 비율로 비교해 주세요.")
         self.butterfly_unit.setCurrentIndex(max(0, self.butterfly_unit.findData(getattr(self, "_butterfly_unit", "percent"))))
         self._butterfly_unit = self.butterfly_unit.currentData()
         controls = QHBoxLayout()
-        controls.addWidget(self.butterfly_mode)
-        controls.addStretch(1)
-        controls.addWidget(self.butterfly_unit)
+        controls.addWidget(label("왼쪽·오른쪽 그룹에 넣을 값을 각각 고르세요. 여러 값을 고르면 하나라도 해당하는 사고를 합칩니다."), 1)
+        controls.addWidget(self.butterfly_unit, 0, Qt.AlignmentFlag.AlignVCenter)
         inner.addLayout(controls)
         selectors = QGridLayout()
         self.butterfly_left = QPushButton(self)
@@ -1172,9 +1190,6 @@ class StatisticsPanel(QWidget):
             button.setToolTip(text + "\n클릭하여 여러 값을 선택합니다.")
             button.setAccessibleName(("왼쪽" if side == "left" else "오른쪽") + " 그룹 값 선택: " + text)
             button.clicked.connect(lambda checked=False, s=side, k=group_key, g=groups: self._open_butterfly_group(s, k, g))
-        if self._butterfly_mode == "rest":
-            self.butterfly_right.setText("나머지 전체")
-            self.butterfly_right.setEnabled(False)
         left_label, right_label = label("■ 왼쪽 그룹"), label("■ 오른쪽 그룹")
         left_label.setStyleSheet(f"color:{StatisticsButterflyChart.LEFT_COLOR};")
         right_label.setStyleSheet(f"color:{StatisticsButterflyChart.RIGHT_COLOR};")
@@ -1185,19 +1200,19 @@ class StatisticsPanel(QWidget):
         selectors.setColumnStretch(0, 1)
         selectors.setColumnStretch(1, 1)
         inner.addLayout(selectors)
-        for combo in (self.butterfly_mode, self.butterfly_unit):
-            combo.currentIndexChanged.connect(self._change_butterfly)
+        self.butterfly_unit.currentIndexChanged.connect(self._change_butterfly)
         try:
             report = build_butterfly(
                 self.engine, axis_key, group_key, self.filters(), left_values=self._butterfly_left_values,
-                right_values=self._butterfly_right_values, mode=self._butterfly_mode,
+                right_values=self._butterfly_right_values,
             )
         except (ValueError, CrossTableLimitError) as exc:
             inner.addWidget(label(str(exc), "warningNote"))
             return
-        inner.addWidget(label(
-            f"{report.axis_label} · {report.group_label} 비교 · 대상 {report.total:,}건 · 비교에서 제외 {report.excluded:,}건"
-        ))
+        summary = f"{report.axis_label} 분포를 {report.group_label} 그룹으로 나눠 비교 · 대상 {report.total:,}건"
+        if report.excluded:
+            summary += f" · 두 그룹 어디에도 속하지 않는 {report.excluded:,}건 제외"
+        inner.addWidget(label(summary))
         chart = StatisticsButterflyChart(self)
         chart.set_data(
             [dict(label=row.label, left_count=row.left_count, right_count=row.right_count, missing=row.missing) for row in report.rows],
@@ -1208,7 +1223,7 @@ class StatisticsPanel(QWidget):
         inner.addWidget(chart)
         readouts = QHBoxLayout()
         selected_frame, selected_content = card("선택한 구간")
-        self.butterfly_readout = label("막대나 가운데 구간을 눌러 보세요.")
+        self.butterfly_readout = label("막대나 가운데 구간을 누르면 두 그룹의 건수와 비율이 표시됩니다.")
         self.butterfly_readout.setObjectName("butterflyReadout")
         selected_content.addWidget(self.butterfly_readout)
         gap_frame, gap_content = card("차이가 가장 큰 구간")
@@ -1233,12 +1248,8 @@ class StatisticsPanel(QWidget):
             group_label = (report.left_label, report.right_label, "좌우 전체")[side]
             if side == 0:
                 group_condition = StatsCondition(group_key, values=self._butterfly_left_values)
-            elif side == 1 and self._butterfly_mode == "rest":
-                group_condition = StatsCondition(group_key, values=(None, *self._butterfly_left_values), exclude=True)
             elif side == 1:
                 group_condition = StatsCondition(group_key, values=self._butterfly_right_values)
-            elif self._butterfly_mode == "rest":
-                group_condition = StatsCondition(group_key, values=(None,), exclude=True)
             else:
                 group_condition = StatsCondition(group_key, values=normalize_group_values(
                     (*self._butterfly_left_values, *self._butterfly_right_values)))
@@ -1252,10 +1263,10 @@ class StatisticsPanel(QWidget):
                     conditions = ()
             self.select_cases(uids, conditions, f"{report.axis_label} · {row.label} · {group_label}")
             left, right = percentages(row)
-            difference = f" · 비율 차이 {left - right:+.1f}%p" if report.left_total and report.right_total else ""
+            difference = f" · 차이 {left - right:+.1f}%p" if report.left_total and report.right_total else ""
             self.butterfly_readout.setText(
-                f"{row.label} · {report.left_label} {row.left_count:,}건 ({left:.1f}%) / "
-                f"{report.right_label} {row.right_count:,}건 ({right:.1f}%)" + difference
+                f"{row.label} · {report.left_label} {row.left_count:,}건({left:.1f}%) / "
+                f"{report.right_label} {row.right_count:,}건({right:.1f}%)" + difference
             )
 
         chart.bucket_clicked.connect(choose_bucket)
@@ -1267,15 +1278,21 @@ class StatisticsPanel(QWidget):
                 f"{report.right_label} {right:.1f}% · 차이 {left - right:+.1f}%p", "statReadingMain"
             ))
         elif not report.left_total or not report.right_total:
-            gap_content.addWidget(label("한쪽 그룹의 사고가 0건이어서 비율 차이를 비교할 수 없습니다.", "warningNote"))
-        inner.addWidget(label("막대에 마우스를 올리면 건수·비율·분모가 표시됩니다. 막대를 누르면 해당 사고가 오른쪽 목록에 표시됩니다."))
-        inner.addWidget(label("비율의 분모는 각 그룹의 전체 사고 수입니다. 좌우는 같은 눈금을 사용합니다. 그룹 미입력·형식 오류·비해당은 비교에서 제외합니다."))
+            gap_content.addWidget(label("한쪽 그룹의 사고가 0건이라 비율 차이를 비교할 수 없습니다.", "warningNote"))
+        inner.addWidget(label(
+            "막대에 마우스를 올리면 건수·비율·분모가, 막대를 누르면 해당 사고가 오른쪽 목록에 표시됩니다."
+        ))
+        inner.addWidget(label(
+            "비율은 각 그룹의 사고 수를 분모로 하며, 좌우 막대는 같은 눈금입니다. "
+            "차이는 왼쪽 비율에서 오른쪽 비율을 뺀 값(%p)입니다. "
+            "좌우 그룹 항목이 미입력·형식 오류·해당 없음인 사고는 제외합니다."
+        ))
         for warning in report.warnings:
             inner.addWidget(label(warning, "warningNote"))
         self._export_headers = [
-            "가운데 축", "구간", "그룹 항목", "왼쪽 그룹", "왼쪽 건수", "왼쪽 분모", "왼쪽 비율(%)",
-            "오른쪽 그룹", "오른쪽 건수", "오른쪽 분모", "오른쪽 비율(%)", "비율 차이(%p)",
-            "비교 방식", "표시 단위", "대상 사고 수", "제외 사고 수", "좌우 중복 사고 수",
+            "가운데 항목", "구간", "좌우 그룹 항목", "왼쪽 그룹", "왼쪽 건수", "왼쪽 분모", "왼쪽 비율(%)",
+            "오른쪽 그룹", "오른쪽 건수", "오른쪽 분모", "오른쪽 비율(%)", "비율 차이(왼쪽-오른쪽, %p)",
+            "표시 단위", "대상 사고 수", "제외 사고 수", "좌우 중복 사고 수",
         ]
         self._export_rows = []
         for row in report.rows:
@@ -1284,13 +1301,12 @@ class StatisticsPanel(QWidget):
                 report.axis_label, row.label, report.group_label, report.left_label, row.left_count,
                 report.left_total, round(left, 2), report.right_label, row.right_count, report.right_total,
                 round(right, 2), round(left - right, 2) if report.left_total and report.right_total else None,
-                "두 그룹" if self._butterfly_mode == "two" else "한 그룹 vs 나머지",
-                "그룹 내 %" if self._butterfly_unit == "percent" else "건수", report.total, report.excluded, report.overlap,
+                "그룹 내 비율" if self._butterfly_unit == "percent" else "건수",
+                report.total, report.excluded, report.overlap,
             ])
 
     def _change_butterfly(self) -> None:
         self._close_condition_popup()
-        self._butterfly_mode = self.butterfly_mode.currentData()
         self._butterfly_unit = self.butterfly_unit.currentData()
         self.clear_selection()
         self.refresh()
@@ -1298,7 +1314,7 @@ class StatisticsPanel(QWidget):
     def _open_butterfly_group(self, side: str, key: str, groups: tuple[Category, ...]) -> None:
         self._close_condition_popup()
         other = "right" if side == "left" else "left"
-        blocked = getattr(self, f"_butterfly_{other}_values", ()) if self._butterfly_mode == "two" else ()
+        blocked = getattr(self, f"_butterfly_{other}_values", ())
         popup = StatisticsGroupPopup(
             groups, getattr(self, f"_butterfly_{side}_values", ()),
             title=("왼쪽" if side == "left" else "오른쪽") + " 그룹 · " + clean_field_label(self.engine.field(key).label),
@@ -1366,7 +1382,10 @@ class StatisticsPanel(QWidget):
         if cross.column_multi:
             stack_button = self.cross_view._buttons.button(1)
             stack_button.setEnabled(False)
-            stack_button.setToolTip("열에 다중 선택 항목이 있어 사고 비율 합계가 100%를 넘을 수 있습니다. 히트맵으로 확인해 주세요.")
+            stack_button.setToolTip(
+                "열 항목이 다중 선택이라 한 사고가 여러 값에 들어가 구성비 합계가 100%를 넘을 수 있어 "
+                "100% 누적 막대로 볼 수 없습니다. 히트맵으로 확인해 주세요."
+            )
             self._cross_view = "heat"
             self.cross_view.blockSignals(True)
             self.cross_view.setCurrentIndex(0)
@@ -1382,10 +1401,12 @@ class StatisticsPanel(QWidget):
             )
             chart.cell_clicked.connect(choose_cell)
             inner.addWidget(chart)
-            inner.addWidget(label("각 행을 100%로 맞춰 비교합니다. 막대를 누르면 해당 사고를 확인할 수 있습니다."))
+            inner.addWidget(label(
+                "행마다 전체를 100%로 놓고 열 값의 구성비를 쌓았습니다. 막대 조각을 누르면 해당 사고가 오른쪽 목록에 표시됩니다."
+            ))
         else:
             inner.addWidget(widget)
-        inner.addWidget(label(f"대상 {cross.denominator:,}건 · {small}칸이 5건 미만입니다. 비율과 실제 건수를 함께 확인하세요.", "warningNote"))
+        inner.addWidget(label(f"대상 {cross.denominator:,}건 · {small}칸이 5건 미만입니다. 비율과 실제 건수를 함께 확인해 주세요.", "warningNote"))
         if cross.column_multi or cross.row_multi:
             inner.addWidget(label("다중 선택 항목을 포함합니다. 한 사고가 여러 칸에 집계될 수 있어 합계·행 비율의 합이 100%를 넘을 수 있습니다."))
         best = None

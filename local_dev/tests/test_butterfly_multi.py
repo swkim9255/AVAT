@@ -4,7 +4,7 @@ import csv
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from investigator.butterfly import build_butterfly, butterfly_groups, normalize_group_values
 from investigator.form_definition import FormDefinition
@@ -34,12 +34,19 @@ def report(stats=None, **kwargs):
     return build_butterfly(stats or engine(), "driver_sex", "weather", StatsFilter(), **kwargs)
 
 
-def test_selected_values_are_union_and_rest_is_accident_complement():
+def test_selected_values_are_accident_unions_and_others_are_excluded():
     result = report(left_values=("맑음", "강수"), right_values=("강설", "안개"))
     assert (result.left_total, result.right_total, result.excluded) == (2, 2, 1)
     assert result.left_label == "맑음, 강수" and result.right_label == "강설, 안개"
-    rest = report(left_values=("맑음", "강수"), mode="rest")
-    assert (rest.left_total, rest.right_total, rest.overlap, rest.excluded) == (2, 2, 0, 1)
+    # 어느 쪽에도 고르지 않은 값의 사고는 오른쪽에 자동으로 들어가지 않고 제외된다.
+    partial = report(left_values=("맑음",), right_values=("강수",))
+    assert (partial.left_total, partial.right_total, partial.excluded) == (1, 1, 3)
+    assert any("20건 미만인 그룹" in warning and "맑음(n=1)" in warning for warning in partial.warnings)
+
+
+def test_comparison_mode_argument_was_removed():
+    with pytest.raises(TypeError):
+        report(left_values=("맑음",), mode="rest")
 
 
 def test_multiselect_groups_deduplicate_accidents_but_allow_cohort_overlap():
@@ -50,11 +57,7 @@ def test_multiselect_groups_deduplicate_accidents_but_allow_cohort_overlap():
                              left_values=("vehicle.passenger", "vehicle.truck", "vehicle.passenger"),
                              right_values=("pedestrian.adult",))
     assert (result.left_total, result.right_total, result.overlap) == (2, 2, 1)
-    assert any("좌우 두 그룹" in warning for warning in result.warnings)
-    rest = build_butterfly(stats, "weather", "collision_targets", StatsFilter(),
-                           left_values=("vehicle.passenger", "vehicle.truck"), mode="rest")
-    assert (rest.right_total, rest.overlap) == (1, 0)
-    assert {uid for row in rest.rows for uid in row.right_uids} == {"right"}
+    assert any("좌우 두 그룹에 모두" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -205,19 +208,49 @@ def test_multi_side_drill_pin_and_export_reproduce_or_selection(qtbot, tmp_path)
     assert any(condition.values == ("맑음", "강수") for condition in widget.conditions)
 
 
-def test_rest_mode_all_left_values_is_valid_and_two_mode_recovers_via_selection(qtbot):
+def toggle_texts(toggle):
+    return [toggle._buttons.button(i).text() for i in range(len(toggle._values))]
+
+
+def test_view_names_and_no_comparison_mode_toggle(qtbot):
     widget = panel(qtbot)
-    widget.butterfly_mode.setCurrentIndex(widget.butterfly_mode.findData("rest"))
-    widget.butterfly_left.click()
-    widget._group_popup.select_all_button.click()
-    widget._group_popup.apply_button.click()
-    assert visible_chart(widget)._totals == (4, 0)
-    assert not widget.butterfly_right.isEnabled()
-    widget.butterfly_mode.setCurrentIndex(widget.butterfly_mode.findData("two"))
-    assert widget.butterfly_right.isEnabled()
-    widget.butterfly_left.click()
-    widget._group_popup.clear_selection_button.click()
-    item(widget._group_popup, "맑음").setCheckState(Qt.CheckState.Checked)
-    widget._group_popup.apply_button.click()
-    assert visible_chart(widget)._totals == (1, 1)
-    assert not set(widget._butterfly_left_values) & set(widget._butterfly_right_values)
+    assert toggle_texts(widget.cross_view) == ["히트맵", "100% 누적 막대", "양방향 막대"]
+    assert all(widget.cross_view._buttons.button(i).toolTip() for i in range(3))
+    assert toggle_texts(widget.butterfly_unit) == ["그룹 내 비율", "건수"]
+    assert not hasattr(widget, "butterfly_mode")
+    page_text = " ".join(child.text() for child in widget.pages.currentWidget().findChildren(QLabel))
+    assert "가운데 항목" in page_text and "좌우 그룹 항목" in page_text
+    assert "나머지" not in page_text and "나비형" not in page_text
+    assert "butterfly_mode" not in widget.capture_state()
+    # 오른쪽 그룹은 늘 직접 고르므로, 왼쪽에서 고른 값은 오른쪽 목록에서 막힌다.
+    widget.butterfly_right.click()
+    assert not item(widget._group_popup, "맑음").flags() & Qt.ItemFlag.ItemIsEnabled
+    widget._group_popup.close()
+
+
+def test_legacy_rest_state_reopens_as_two_selected_groups(qtbot):
+    widget = panel(qtbot)
+    groups = butterfly_groups(widget.engine, "weather", widget.filters())
+    saved = widget.capture_state()
+    # 이전 버전이 저장한 '한 그룹 vs 나머지' 상태: 왼쪽이 모든 값, 오른쪽은 비어 있음.
+    saved.update(butterfly_mode="rest", butterfly_group_key="weather",
+                 butterfly_left_values=tuple(group.value for group in groups), butterfly_right_values=())
+    widget.restore_state(saved)
+    widget.refresh()
+    assert widget._butterfly_left_values == (groups[0].value,)
+    assert widget._butterfly_right_values == (groups[1].value,)
+    assert visible_chart(widget)._totals == (groups[0].count, groups[1].count)
+
+
+def test_cross_item_labels_follow_view(qtbot):
+    widget = panel(qtbot)
+
+    def labels():
+        return {child.text() for child in widget.pages.currentWidget().findChildren(QLabel)}
+
+    widget.cross_view.setCurrentIndex(widget.cross_view.findData("heat"))
+    QApplication.processEvents()
+    assert {"행 항목", "열 항목"} <= labels()
+    widget._row_key, widget._column_key = "driver_exp", "weather"
+    widget.refresh()
+    assert {"수치 항목", "범주 항목"} <= labels()

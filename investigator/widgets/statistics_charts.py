@@ -238,14 +238,14 @@ class StatisticsButterflyChart(_InteractiveStatisticsChart):
         self._labels = ("왼쪽", "오른쪽")
         self._unit = "percent"
         self._axis_label = ""
-        self.setAccessibleName("나비형 비교 차트")
+        self.setAccessibleName("두 그룹 비교 양방향 막대 그래프")
 
     def set_data(
         self, rows: list[dict[str, Any]], *, left_label: str, right_label: str,
         left_total: int, right_total: int, unit: str = "percent", axis_label: str = "",
     ) -> None:
         if unit not in {"percent", "count"}:
-            raise ValueError("나비형 비교 단위는 percent 또는 count여야 합니다.")
+            raise ValueError("양방향 막대 단위는 percent 또는 count여야 합니다.")
         totals = (int(left_total), int(right_total))
         if min(totals) < 0:
             raise ValueError("그룹의 사고 수는 0 이상이어야 합니다.")
