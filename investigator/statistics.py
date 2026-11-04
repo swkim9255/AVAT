@@ -68,13 +68,119 @@ class CrossTableLimitError(ValueError):
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class StatsCondition:
     field_key: str
     value: Any = None
     operator: str = "eq"
     lower: float | None = None
     upper: float | None = None
+    values: tuple[Any, ...] = ()
+    exclude: bool = False
+
+    def __init__(
+        self, field_key: str, value: Any = None, operator: str = "eq",
+        lower: float | None = None, upper: float | None = None, *,
+        values: tuple[Any, ...] | list[Any] | None = None, exclude: bool = False,
+    ) -> None:
+        """A value set or half-open numeric range, with legacy call support.
+
+        ``None`` inside ``values`` represents an unanswered field. Explicit
+        value sets use their own operation so old ``ne`` filters keep excluding
+        blanks, while new exclusion sets mean *none* of the selected responses.
+        The original five positional arguments remain valid for chart/report
+        callers and previously captured filter states.
+        """
+        explicit_values = values is not None
+        if explicit_values:
+            if not isinstance(values, (tuple, list)):
+                raise ValueError("통계 조건의 선택값 형식이 잘못되었습니다.")
+            selected = tuple(values)
+            if operator == "eq":
+                operator = ("range" if not selected and (lower is not None or upper is not None)
+                            else "values")
+        elif operator in {"missing", "not_missing"}:
+            selected = (None,)
+        elif operator in {"range", "between", "invalid", "not_applicable"}:
+            selected = ()
+        elif operator == "eq" and (lower is not None or upper is not None):
+            selected, operator = (), "range"
+        else:
+            selected = (value,)
+        for name, item in (
+            ("field_key", field_key), ("value", None if operator == "values" else value),
+            ("operator", operator),
+            ("lower", lower), ("upper", upper), ("values", selected),
+            ("exclude", bool(exclude) or operator == "not_missing"),
+        ):
+            object.__setattr__(self, name, item)
+
+
+@dataclass(frozen=True, slots=True)
+class AnyOf:
+    """One non-nested OR group inside the outer AND filter list."""
+
+    conditions: tuple[StatsCondition, ...]
+
+    def __post_init__(self) -> None:
+        conditions = tuple(self.conditions)
+        if not conditions or any(not isinstance(item, StatsCondition) for item in conditions):
+            raise ValueError("또는 묶음에는 하나 이상의 개별 조건만 넣을 수 있습니다.")
+        object.__setattr__(self, "conditions", conditions)
+
+
+FilterItem = StatsCondition | AnyOf
+
+
+def normalize_condition(value: StatsCondition | dict[str, Any]) -> StatsCondition:
+    """Read old saved conditions without losing legacy comparison semantics."""
+    if isinstance(value, dict):
+        if "field_key" not in value:
+            raise ValueError("통계 조건의 항목이 없습니다.")
+        kwargs = {key: value[key] for key in ("value", "operator", "lower", "upper", "exclude")
+                  if key in value}
+        if "values" in value:
+            selected = value["values"]
+            if not isinstance(selected, (list, tuple)):
+                raise ValueError("통계 조건의 선택값 형식이 잘못되었습니다.")
+            kwargs["values"] = tuple(selected)
+        value = StatsCondition(value["field_key"], **kwargs)
+    if not isinstance(value, StatsCondition):
+        raise ValueError("통계 조건 형식이 잘못되었습니다.")
+    if value.operator == "eq" and value.value is not None:
+        return StatsCondition(value.field_key, values=(value.value,), exclude=value.exclude)
+    if value.operator in {"missing", "not_missing"}:
+        return StatsCondition(value.field_key, values=(None,),
+                              exclude=value.operator == "not_missing")
+    return value
+
+
+def normalize_filter_items(
+    conditions, condition_mode: str = "all", required_conditions=(),
+) -> tuple[FilterItem, ...]:
+    """Migrate old global OR / graph constraints into a flat outer AND list."""
+    if condition_mode not in {"all", "any"}:
+        raise ValueError("지원하지 않는 조건 결합 방식입니다.")
+
+    def item(raw) -> FilterItem:
+        if isinstance(raw, AnyOf):
+            return AnyOf(tuple(normalize_condition(child) for child in raw.conditions))
+        if isinstance(raw, dict) and "conditions" in raw and "field_key" not in raw:
+            members = raw["conditions"]
+            if not isinstance(members, (tuple, list)) or any(
+                isinstance(child, AnyOf) or isinstance(child, dict) and "conditions" in child
+                for child in members
+            ):
+                raise ValueError("또는 묶음은 중첩할 수 없습니다.")
+            return AnyOf(tuple(normalize_condition(child) for child in members))
+        return normalize_condition(raw)
+
+    result = tuple(item(raw) for raw in conditions)
+    if condition_mode == "any" and len(result) > 1:
+        leaves = tuple(child for entry in result
+                       for child in (entry.conditions if isinstance(entry, AnyOf) else (entry,)))
+        result = (AnyOf(leaves),)
+    return (*result, *(item(raw) for raw in required_conditions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +188,12 @@ class StatsFilter:
     status: str = "completed"
     date_from: str = ""
     date_to: str = ""
-    conditions: tuple[StatsCondition, ...] = ()
+    conditions: tuple[FilterItem, ...] = ()
+    # Only the condition group is combined with OR; status/date remain AND.
+    # Keep new options after the original fields for positional compatibility.
+    condition_mode: str = "all"
+    # Graph drill-down selections always narrow the manual condition group.
+    required_conditions: tuple[StatsCondition, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +355,8 @@ def _number(value: Any) -> float | None:
 
 
 def _blank(value: Any) -> bool:
-    return is_blank(value) or isinstance(value, str) and not value.strip()
+    return (is_blank(value) or isinstance(value, str) and not value.strip()
+            or isinstance(value, list) and all(_blank(item) for item in value))
 
 
 def _date(value: Any) -> str | None:
@@ -312,14 +424,24 @@ class StatisticsEngine:
         self._groups_cache: dict[tuple, NumericGroups] = {}
         self._scatter_cache: dict[tuple, ScatterReport] = {}
         self._association_cache: dict[tuple, StatisticalTest] = {}
+        self._condition_choices_cache: dict[str, tuple[Choice, ...]] = {}
+        self._condition_values_cache: dict[tuple[Any, ...], frozenset[Any]] = {}
 
     @staticmethod
     def _filter_key(filters: StatsFilter | None, *, ignore_status: bool = False) -> tuple:
         filters = filters or StatsFilter()
+
+        def item_key(condition: FilterItem) -> tuple:
+            if isinstance(condition, AnyOf):
+                return ("any", tuple(item_key(child) for child in condition.conditions))
+            return ("condition", condition.field_key, condition.operator, repr(condition.value),
+                    repr(condition.values), condition.exclude, condition.lower, condition.upper)
+
         return (
             "all" if ignore_status else filters.status, filters.date_from, filters.date_to,
-            tuple((condition.field_key, condition.operator, repr(condition.value),
-                   condition.lower, condition.upper) for condition in filters.conditions),
+            tuple(item_key(condition) for condition in filters.conditions),
+            filters.condition_mode,
+            tuple(item_key(condition) for condition in filters.required_conditions),
         )
 
     def field(self, key: str) -> FieldSpec:
@@ -331,6 +453,41 @@ class StatisticsEngine:
 
     def is_ordered(self, key: str) -> bool:
         return key in _ORDERED_FIELDS
+
+    def condition_choices(self, field_key: str) -> tuple[Choice, ...]:
+        """Return configured labels plus distinct currently stored responses.
+
+        The form's order and unused options are retained. Legacy/custom text
+        responses follow in first-seen order; values are never replaced by CSV
+        ordinal codes or display labels, so choosing one remains an exact match.
+        """
+        spec = self.field(field_key)
+        if self.is_numeric(field_key):
+            return ()
+        if field_key not in self._condition_choices_cache:
+            result = list(spec.choices)
+            # Allowed observed values are hashable JSON scalars. Keep membership
+            # linear overall even for thousands of distinct free-text answers.
+            seen = {choice.value for choice in result}
+            for case in self.cases:
+                if not self.is_applicable(case, field_key):
+                    continue
+                raw = self.case_value(case, field_key)
+                values = raw if isinstance(raw, list) else [raw]
+                for value in values:
+                    if (
+                        _blank(value)
+                        or not isinstance(value, (str, int, float, bool))
+                        or isinstance(value, float) and not math.isfinite(value)
+                        or value in seen
+                    ):
+                        continue
+                    # JSON legacy values can be non-string scalars. Preserve
+                    # their type as item data while showing a readable label.
+                    result.append(Choice(str(value), value))
+                    seen.add(value)
+            self._condition_choices_cache[field_key] = tuple(result)
+        return self._condition_choices_cache[field_key]
 
     def is_applicable(self, case: InvestigationCase, field_key: str) -> bool:
         spec = self.field(field_key)
@@ -421,6 +578,14 @@ class StatisticsEngine:
         filters = filters or StatsFilter()
         if filters.status not in {"all", "completed", "draft"}:
             raise ValueError("지원하지 않는 사고 상태입니다.")
+        # Legacy global OR and graph constraints are accepted at this boundary;
+        # evaluation itself has only outer AND and explicit one-level AnyOf.
+        items = normalize_filter_items(
+            filters.conditions, filters.condition_mode, filters.required_conditions,
+        )
+        # Validate even with no cases or when an earlier OR condition matches.
+        for condition in items:
+            self.validate_condition(condition)
         date_from = _date(filters.date_from) if filters.date_from else None
         date_to = _date(filters.date_to) if filters.date_to else None
         if filters.date_from and date_from is None or filters.date_to and date_to is None:
@@ -440,13 +605,58 @@ class StatisticsEngine:
                     continue
                 if date_from and incident_date < date_from or date_to and incident_date > date_to:
                     continue
-            if all(self.matches(case, condition) for condition in filters.conditions):
+            if all(self._matches_validated(case, condition) for condition in items):
                 result.append(case)
         self._filter_cache[cache_key] = tuple(result)
         return self._filter_cache[cache_key]
 
-    def matches(self, case: InvestigationCase, condition: StatsCondition) -> bool:
+    def validate_condition(self, condition: FilterItem) -> None:
+        """Reject malformed conditions before any rows are examined."""
+        if isinstance(condition, AnyOf):
+            for child in condition.conditions:
+                self.validate_condition(child)
+            return
+        if not isinstance(condition, StatsCondition):
+            raise ValueError("통계 조건 형식이 잘못되었습니다.")
         self.field(condition.field_key)  # Fail early for deleted or mistyped fields.
+        operator = condition.operator
+        if operator in {"missing", "not_missing", "not_applicable", "invalid"}:
+            return
+        if operator == "values":
+            numeric = self.is_numeric(condition.field_key)
+            for value in condition.values:
+                if value is None:
+                    continue
+                if (not isinstance(value, (str, int, float, bool))
+                    or isinstance(value, float) and not math.isfinite(value)
+                    or numeric and _number(value) is None):
+                    raise ValueError("유효한 선택값을 입력해 주세요.")
+            return
+        if operator not in {"eq", "ne", "gt", "ge", "lt", "le", "between", "range"}:
+            raise ValueError("지원하지 않는 통계 필터입니다.")
+        numeric = self.is_numeric(condition.field_key)
+        if not numeric:
+            if operator not in {"eq", "ne"}:
+                raise ValueError("수치형 항목에서만 숫자 비교를 사용할 수 있습니다.")
+            return
+        if operator in {"between", "range"}:
+            lower, upper = condition.lower, condition.upper
+            if operator == "between" and (lower is None or upper is None):
+                raise ValueError("범위의 최솟값과 최댓값을 입력해 주세요.")
+            if any(bound is not None and _number(bound) is None for bound in (lower, upper)):
+                raise ValueError("유효한 숫자를 입력해 주세요.")
+            if lower is not None and upper is not None and float(lower) > float(upper):
+                raise ValueError("최솟값이 최댓값보다 큽니다.")
+        elif _number(condition.value) is None:
+            raise ValueError("유효한 숫자를 입력해 주세요.")
+
+    def matches(self, case: InvestigationCase, condition: FilterItem) -> bool:
+        self.validate_condition(condition)
+        return self._matches_validated(case, condition)
+
+    def _matches_validated(self, case: InvestigationCase, condition: FilterItem) -> bool:
+        if isinstance(condition, AnyOf):
+            return any(self._matches_validated(case, child) for child in condition.conditions)
         applicable = self.is_applicable(case, condition.field_key)
         if condition.operator == "not_applicable":
             return not applicable
@@ -455,19 +665,59 @@ class StatisticsEngine:
         value = self.case_value(case, condition.field_key)
         if condition.operator == "missing":
             return _blank(value)
+        if condition.operator == "not_missing":
+            return not _blank(value)
         if condition.operator == "invalid":
             return not _blank(value) and self.is_numeric(condition.field_key) and _number(value) is None
-        if condition.operator == "range":
+        if condition.operator == "values":
+            selected = self._condition_values_cache.get(condition.values)
+            if selected is None:
+                selected = frozenset(condition.values)
+                self._condition_values_cache[condition.values] = selected
+            if _blank(value):
+                matched = None in selected
+            elif self.is_numeric(condition.field_key):
+                number = _number(value)
+                matched = number is not None and any(
+                    item is not None and number == _number(item) for item in selected
+                )
+            else:
+                responses = value if isinstance(value, list) else (value,)
+                matched = any(item in selected for item in responses
+                              if isinstance(item, (str, int, float, bool)) and not _blank(item))
+            return not matched if condition.exclude else matched
+        if condition.operator in {"range", "between"}:
             number = _number(value)
-            return number is not None and (
-                condition.lower is None or number >= condition.lower
-            ) and (condition.upper is None or number < condition.upper)
-        if condition.operator != "eq":
-            raise ValueError("지원하지 않는 통계 필터입니다.")
+            if number is None:
+                return condition.exclude
+            within_lower = condition.lower is None or number >= float(condition.lower)
+            within_upper = condition.upper is None or (
+                number <= float(condition.upper) if condition.operator == "between"
+                else number < float(condition.upper)
+            )
+            matched = within_lower and within_upper
+            return not matched if condition.exclude else matched
         if self.is_numeric(condition.field_key):
             number, comparison = _number(value), _number(condition.value)
-            return number is not None and comparison is not None and number == comparison
-        return condition.value in value if isinstance(value, list) else value == condition.value
+            if number is None or comparison is None:
+                return False
+            return {
+                "eq": number == comparison,
+                "ne": number != comparison,
+                "gt": number > comparison,
+                "ge": number >= comparison,
+                "lt": number < comparison,
+                "le": number <= comparison,
+            }[condition.operator]
+        if _blank(value):
+            return False
+        if isinstance(value, list):
+            selected = [item for item in value if not _blank(item)]
+            return (
+                condition.value in selected if condition.operator == "eq"
+                else bool(selected) and condition.value not in selected
+            )
+        return value == condition.value if condition.operator == "eq" else value != condition.value
 
     def distribution(self, field_key: str, filters: StatsFilter | None = None) -> Distribution:
         return self._distribution(field_key, self.filtered_cases(filters))

@@ -5,6 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget
 
+from investigator.video_import import MANAGED_VIDEO_DIRECTORY
+
 
 class VideoImportDialog(QDialog):
     def __init__(self, workspace: Path, parent: QWidget | None = None) -> None:
@@ -16,13 +18,13 @@ class VideoImportDialog(QDialog):
         self.copy_to_workspace.setObjectName("copyVideosToWorkspace")
         layout.addWidget(self.copy_to_workspace)
         detail = QLabel(
-            "선택하면 원본 영상을 현재 프로젝트 폴더에 복사합니다.\n"
+            "선택하면 원본 영상을 작업 폴더 안의 영상폴더에 복사합니다.\n"
             "선택하지 않으면 원래 위치의 영상을 연결합니다.\n"
-            "같은 이름의 다른 영상은 순번을 붙여 보관합니다.", self,
+            "폴더를 가져오면 하위 폴더 구조를 유지합니다. 같은 위치의 다른 영상은 덮어쓰지 않습니다.", self,
         )
         detail.setWordWrap(True)
         layout.addWidget(detail)
-        destination = QLabel(f"작업 폴더: {workspace}", self)
+        destination = QLabel(f"복사 위치: {workspace / MANAGED_VIDEO_DIRECTORY}", self)
         destination.setTextFormat(Qt.TextFormat.PlainText)
         destination.setWordWrap(True)
         layout.addWidget(destination)

@@ -2,12 +2,59 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv", ".webm"})
 ACCIDENT_VIDEO_STEM = re.compile(r"^(?P<number>\d{13})(?:_(?P<sequence>[1-9]\d*))?$")
+MANAGED_VIDEO_DIRECTORY = "01_사고동영상"
+# These directories contain application data, not newly imported videos. In
+# particular, scanning a backup must not resurrect deleted accident entries.
+IGNORED_VIDEO_DIRECTORIES = frozenset(
+    name.casefold() for name in (
+        "작업관리", "작업관리DB", "systems", "작업 폴더 관리 DB", "csv내보내기", "02_csv내보내기",
+        "03_Report내보내기", "삭제사고", ".backups", ".git", "runtime", "models", "_internal", "licenses",
+    )
+)
+
+
+def scan_video_tree(folder: str | Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Return videos and directories recursively, without following links.
+
+    Directory paths are also returned so a QFileSystemWatcher can subscribe to
+    every nested folder (a watch on a parent alone is not recursive on Windows).
+    """
+
+    source = Path(folder).expanduser().resolve()
+    if not source.is_dir():
+        raise NotADirectoryError(source)
+    videos: list[Path] = []
+    directories: list[Path] = []
+    pending = [source]
+    while pending:
+        directory = pending.pop()
+        directories.append(directory)
+        with os.scandir(directory) as entries:
+            children = sorted(entries, key=lambda entry: (entry.name.casefold(), entry.name))
+        nested: list[Path] = []
+        for entry in children:
+            # Windows junctions are reparse points rather than ordinary Python
+            # symlinks. Avoid both kinds to stay inside the selected video tree.
+            if entry.is_symlink():
+                continue
+            stat = entry.stat(follow_symlinks=False)
+            if getattr(stat, "st_file_attributes", 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+                continue
+            path = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False):
+                if not entry.name.startswith(".") and entry.name.casefold() not in IGNORED_VIDEO_DIRECTORIES:
+                    nested.append(path)
+            elif entry.is_file(follow_symlinks=False) and path.suffix.casefold() in VIDEO_EXTENSIONS:
+                videos.append(path)
+        pending.extend(reversed(nested))
+    return tuple(videos), tuple(directories)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,18 +81,18 @@ def parse_accident_video_name(path: str | Path) -> tuple[str, int] | None:
 
 
 def scan_video_folder(folder: str | Path) -> VideoFolderScan:
-    """Scan direct child files and return deterministic accident groups."""
+    """Scan the nested video tree and return deterministic accident groups.
 
-    source = Path(folder).expanduser().resolve()
-    if not source.is_dir():
-        raise NotADirectoryError(source)
+    Only filenames carrying the existing 13-digit accident identifier are
+    automatically grouped; generic camera names must still be attached to a
+    user-selected accident, not guessed from an arbitrary folder name.
+    """
 
     grouped: dict[str, list[tuple[int, str, str]]] = {}
     ignored: list[str] = []
     seen_paths: set[str] = set()
-    for entry in source.iterdir():
-        if not entry.is_file() or entry.suffix.casefold() not in VIDEO_EXTENSIONS:
-            continue
+    videos, _ = scan_video_tree(folder)
+    for entry in videos:
         resolved = str(entry.resolve())
         path_key = resolved.casefold()
         if path_key in seen_paths:
@@ -71,7 +118,10 @@ def scan_video_folder(folder: str | Path) -> VideoFolderScan:
 __all__ = [
     "ACCIDENT_VIDEO_STEM",
     "VIDEO_EXTENSIONS",
+    "MANAGED_VIDEO_DIRECTORY",
+    "IGNORED_VIDEO_DIRECTORIES",
     "VideoFolderScan",
     "parse_accident_video_name",
     "scan_video_folder",
+    "scan_video_tree",
 ]

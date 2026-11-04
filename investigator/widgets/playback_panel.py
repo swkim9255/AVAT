@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPolygon
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -25,6 +25,7 @@ from investigator.theme import DANGER, MUTED, PRIMARY, PRIMARY_HOVER, material_i
 
 MarkerKind = Literal["trigger", "collision", "speed"]
 COLLISION_HOVER = "#EA580C"
+SELECTION_RANGE = "#1F5FBF"
 SPEED_POINT = "#0F766E"
 SPEED_POINT_HOVER = "#14958A"
 MARKER_INTERACTION_SIZE = 25
@@ -44,6 +45,8 @@ def format_timestamp(seconds: float) -> str:
 
 class MarkerSlider(QSlider):
     seek_requested = Signal(int)
+    # Inclusive zero-based frame range chosen with Shift+drag for object detection.
+    range_selected = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -59,7 +62,28 @@ class MarkerSlider(QSlider):
         self._painted_speed_index: int | None = None
         self._last_seek_requested: int | None = None
         self._groove_dragging = False
+        self.selection_range: tuple[int, int] | None = None
+        self._range_anchor: int | None = None
         self.sliderMoved.connect(self._emit_seek_requested)
+
+    def set_selection_range(self, start: int | None, end: int | None = None) -> None:
+        """Show (or clear) the detection range without emitting a signal."""
+
+        if start is None:
+            self.selection_range = None
+            self._range_anchor = None
+        else:
+            end = start if end is None else end
+            low, high = sorted((int(start), int(end)))
+            self.selection_range = (
+                max(self.minimum(), min(self.maximum(), low)),
+                max(self.minimum(), min(self.maximum(), high)),
+            )
+        self.update()
+
+    @property
+    def selecting_range(self) -> bool:
+        return self._range_anchor is not None
 
     def _emit_seek_requested(self, frame: int) -> None:
         self._last_seek_requested = int(frame)
@@ -245,6 +269,17 @@ class MarkerSlider(QSlider):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.selection_range is not None:
+            painter.save()
+            start, end = self.selection_range
+            left, right = sorted((self._x_for_value(start), self._x_for_value(end)))
+            band = QRect(left - 2, self.height() // 2 - 9, max(4, right - left + 4), 18)
+            fill = QColor(SELECTION_RANGE)
+            fill.setAlpha(46)
+            painter.setBrush(fill)
+            painter.setPen(QPen(QColor(SELECTION_RANGE), 1.2))
+            painter.drawRoundedRect(band, 4, 4)
+            painter.restore()
         for index, frame in enumerate(self.speed_frames):
             painter.save()
             x = self._x_for_value(frame)
@@ -323,6 +358,13 @@ class MarkerSlider(QSlider):
             painter.restore()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._range_anchor is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                value = self._value_at_position(event.position().toPoint())
+                self.set_selection_range(self._range_anchor, value)
+                event.accept()
+                return
+            self._range_anchor = None
         if self._groove_dragging:
             # A press away from the handle uses absolute track coordinates;
             # native handle drags below still retain their original grab offset.
@@ -348,6 +390,13 @@ class MarkerSlider(QSlider):
             return
         position = event.position().toPoint()
         self._groove_dragging = False
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            # Shift+drag chooses a detection range instead of seeking.
+            self._range_anchor = self._value_at_position(position)
+            self._set_hovered_marker(None)
+            self.set_selection_range(self._range_anchor, self._range_anchor)
+            event.accept()
+            return
         marker = self._marker_at(position)
         if marker is not None:
             self._set_hovered_marker(marker[0])
@@ -379,6 +428,14 @@ class MarkerSlider(QSlider):
         )
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._range_anchor is not None and event.button() == Qt.MouseButton.LeftButton:
+            value = self._value_at_position(event.position().toPoint())
+            start, end = sorted((self._range_anchor, value))
+            self._range_anchor = None
+            self.set_selection_range(start, end)
+            self.range_selected.emit(start, end)
+            event.accept()
+            return
         was_dragging = self.isSliderDown()
         if self._groove_dragging and event.button() == Qt.MouseButton.LeftButton:
             # Include the final pointer location even if its last move event
@@ -404,6 +461,8 @@ class PlaybackPanel(QWidget):
     collision_requested = Signal()
     speed_point_requested = Signal()
     speed_panel_toggled = Signal(bool)
+    detection_panel_toggled = Signal(bool)
+    range_selected = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -412,6 +471,9 @@ class PlaybackPanel(QWidget):
         self._total_frames = 0
         self._frame = 0
         self._requested_frame: int | None = None
+        self._height_timer = QTimer(self)
+        self._height_timer.setSingleShot(True)
+        self._height_timer.timeout.connect(self._update_minimum_height)
         self.setMinimumHeight(196)
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 10, 18, 12)
@@ -423,12 +485,12 @@ class PlaybackPanel(QWidget):
         self.time_label.setStyleSheet("font-size: 14px; font-weight: 650;")
         timeline_header.addWidget(self.time_label)
         timeline_header.addStretch(1)
-        legend = QLabel("◆ T 트리거    ▼ C 충돌    1 2 3 속도 지점", self)
-        legend.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
-        legend.setMinimumWidth(0)
-        legend.setWordWrap(True)
-        legend.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        timeline_header.addWidget(legend)
+        self.timeline_legend = QLabel("◆ T 트리거 ▲ C 충돌  | 속도 지점", self)
+        self.timeline_legend.setObjectName("timelineLegend")
+        self.timeline_legend.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self.timeline_legend.setWordWrap(False)
+        self.timeline_legend.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        timeline_header.addWidget(self.timeline_legend)
         root.addLayout(timeline_header)
 
         self.timeline = MarkerSlider(self)
@@ -436,6 +498,7 @@ class PlaybackPanel(QWidget):
         self.timeline.setRange(0, 0)
         self.timeline.setEnabled(False)
         self.timeline.seek_requested.connect(self.seek_requested)
+        self.timeline.range_selected.connect(self.range_selected)
         root.addWidget(self.timeline)
 
         controls = QHBoxLayout()
@@ -502,7 +565,21 @@ class PlaybackPanel(QWidget):
         self.speed_panel_button.setAccessibleName("속도 추정 패널")
         self.speed_panel_button.setFixedSize(36, 34)
         self.speed_panel_button.setStyleSheet("padding:0; min-height:0;")
-        for button in (self.trigger_button, self.collision_button, self.speed_point_button, self.speed_panel_button):
+        self.detection_panel_button = QToolButton(self)
+        self.detection_panel_button.setObjectName("detectionPanelButton")
+        self.detection_panel_button.setIcon(material_icon("frame_inspect", PRIMARY))
+        self.detection_panel_button.setCheckable(True)
+        self.detection_panel_button.setToolTip("객체 검출·라벨링 패널 열기/닫기")
+        self.detection_panel_button.setAccessibleName("객체 검출 패널")
+        self.detection_panel_button.setFixedSize(36, 34)
+        self.detection_panel_button.setStyleSheet("padding:0; min-height:0;")
+        for button in (
+            self.trigger_button,
+            self.collision_button,
+            self.speed_point_button,
+            self.speed_panel_button,
+            self.detection_panel_button,
+        ):
             marker_row.addWidget(button)
         self.input_rows = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.input_rows.setSpacing(10)
@@ -525,6 +602,7 @@ class PlaybackPanel(QWidget):
         self.collision_button.clicked.connect(self.collision_requested)
         self.speed_point_button.clicked.connect(self.speed_point_requested)
         self.speed_panel_button.toggled.connect(self.speed_panel_toggled)
+        self.detection_panel_button.toggled.connect(self.detection_panel_toggled)
         self.go_button.clicked.connect(
             lambda: self.seek_requested.emit(self.frame_input.value() - 1)
         )
@@ -548,8 +626,20 @@ class PlaybackPanel(QWidget):
         self.input_rows.setDirection(
             QBoxLayout.Direction.TopToBottom if self.width() < 680 else QBoxLayout.Direction.LeftToRight
         )
+        # Stacking the frame inputs and marker buttons adds a real second row.
+        # Reserve its height so the video/speed area cannot squeeze the bottom
+        # controls outside this panel in a narrow application window.
+        self._height_timer.start(0)
+
+    def _update_minimum_height(self) -> None:
+        # Child QWidget size hints are recalculated after the direction change
+        # reaches Qt's layout pass, rather than inside the parent's resize.
+        self.layout().activate()
+        self.setMinimumHeight(max(196, self.layout().minimumSize().height()))
 
     def set_video(self, total_frames: int, fps: float) -> None:
+        self.timeline.set_selection_range(None)
+        self.timeline.setSliderDown(False)
         self._requested_frame = None
         self._total_frames = max(0, int(total_frames))
         self._fps = max(0.0, float(fps))
@@ -561,6 +651,7 @@ class PlaybackPanel(QWidget):
         self.set_position(0)
 
     def clear_video(self) -> None:
+        self.timeline.setSliderDown(False)
         self._fps = 0.0
         self._total_frames = 0
         self._frame = 0
@@ -572,6 +663,7 @@ class PlaybackPanel(QWidget):
         self.frame_total.setText("/ 0")
         self.time_label.setText("00:00.00 / 00:00.00")
         self.timeline.set_markers(None, None, [])
+        self.timeline.set_selection_range(None)
         self.set_video_enabled(False)
 
     def update_total_frames(self, total_frames: int) -> None:
@@ -658,6 +750,13 @@ class PlaybackPanel(QWidget):
         speed_frames: list[int] | None = None,
     ) -> None:
         self.timeline.set_markers(trigger, collision, speed_frames)
+
+    def set_selection_range(self, start: int | None, end: int | None = None) -> None:
+        self.timeline.set_selection_range(start, end)
+
+    @property
+    def total_frames(self) -> int:
+        return self._total_frames
 
 
 __all__ = ["MarkerSlider", "PlaybackPanel", "format_timestamp"]

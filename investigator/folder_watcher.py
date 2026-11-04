@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
-from investigator.video_import import VIDEO_EXTENSIONS
+from investigator.video_import import scan_video_tree
 
 
 @dataclass
 class _Directory:
     seen: set[str] = field(default_factory=set)
     pending: dict[str, tuple[tuple[int, int], float]] = field(default_factory=dict)
+    watched_directories: set[str] = field(default_factory=set)
 
 
 class ProjectFolderWatcher(QObject):
@@ -40,25 +40,40 @@ class ProjectFolderWatcher(QObject):
     def add_directory(self, folder: str | Path, *, known_paths: set[str] | None = None) -> None:
         root = str(Path(folder).resolve())
         if root not in self._directories:
-            known = self._video_paths(root) if known_paths is None else known_paths
-            self._directories[root] = _Directory(seen={str(Path(p).resolve()).casefold() for p in known})
-        if root not in self._native.directories() and not self._native.addPath(root):
-            self.watch_error.emit("프로젝트 폴더 감시를 시작할 수 없습니다.")
+            try:
+                videos, directories = scan_video_tree(root)
+            except OSError:
+                self.watch_error.emit("프로젝트 폴더 감시를 시작할 수 없습니다.")
+                return
+            known = videos if known_paths is None else known_paths
+            self._directories[root] = _Directory(
+                seen={str(Path(p).resolve()).casefold() for p in known},
+                watched_directories={str(path) for path in directories},
+            )
+        self._sync_native_directories()
         self._rescan.start()
 
     def remove_directory(self, folder: str | Path) -> None:
         root = str(Path(folder).resolve())
         self._directories.pop(root, None)
-        if root in self._native.directories():
-            self._native.removePath(root)
+        self._sync_native_directories()
         if not any(state.pending for state in self._directories.values()):
             self._poll.stop()
 
     @staticmethod
     def _video_paths(root: str) -> set[str]:
-        with os.scandir(root) as entries:
-            return {entry.path for entry in entries
-                    if Path(entry.name).suffix.casefold() in VIDEO_EXTENSIONS and entry.is_file()}
+        videos, _ = scan_video_tree(root)
+        return {str(path) for path in videos}
+
+    def _sync_native_directories(self) -> None:
+        desired = set().union(*(state.watched_directories for state in self._directories.values()))
+        current = set(self._native.directories())
+        removed = sorted(current - desired)
+        if removed:
+            self._native.removePaths(removed)
+        added = sorted(desired - current)
+        if added and self._native.addPaths(added):
+            self.watch_error.emit("일부 하위 영상 폴더 감시를 시작할 수 없습니다.")
 
     def _changed(self, folder: str) -> None:
         del folder
@@ -67,7 +82,9 @@ class ProjectFolderWatcher(QObject):
     def rescan(self) -> None:
         for root, state in list(self._directories.items()):
             try:
-                paths = self._video_paths(root)
+                videos, directories = scan_video_tree(root)
+                paths = {str(path) for path in videos}
+                state.watched_directories = {str(path) for path in directories}
             except OSError:
                 self.watch_error.emit("프로젝트 폴더를 읽을 수 없어 자동 검색을 보류했습니다.")
                 continue
@@ -86,6 +103,7 @@ class ProjectFolderWatcher(QObject):
                     state.seen.discard(key)
                     continue
                 state.pending[path] = ((stat.st_size, stat.st_mtime_ns), time.monotonic())
+        self._sync_native_directories()
         if any(state.pending for state in self._directories.values()):
             self._poll.start()
 

@@ -73,7 +73,7 @@ IDENTITY_FIELDS = (
         required=True,
         editable=True,
         placeholder="기관코드",
-        helper="공백 없이 입력 · 예: katri, ajou, nfs, samsung",
+        helper="공백 없이 입력 · 예: samsung",
     ),
     FieldSpec(
         "accident_classification",

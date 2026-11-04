@@ -1,0 +1,326 @@
+{
+  "cross_class_iou": 0.6,
+  "same_class_iou": 0.7,
+  "max_detections_per_prompt": 30,
+  "classes": [
+    {
+      "key": "passenger",
+      "label": "??",
+      "prompts": [
+        "car"
+      ],
+      "object_prefix": "V",
+      "threshold": 0.4,
+      "suppression_group": "vehicle",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "van",
+      "label": "??",
+      "prompts": [
+        "van",
+        "bus"
+      ],
+      "object_prefix": "V",
+      "threshold": 0.4,
+      "suppression_group": "vehicle",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "truck",
+      "label": "??",
+      "prompts": [
+        "truck"
+      ],
+      "object_prefix": "V",
+      "threshold": 0.4,
+      "suppression_group": "vehicle",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "special",
+      "label": "??",
+      "prompts": [
+        "excavator",
+        "tow truck",
+        "fire truck",
+        "ambulance"
+      ],
+      "object_prefix": "V",
+      "threshold": 0.4,
+      "suppression_group": "vehicle",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "motorcycle",
+      "label": "??",
+      "prompts": [
+        "motorcycle",
+        "scooter"
+      ],
+      "object_prefix": "M",
+      "threshold": 0.4,
+      "suppression_group": "two_wheeler",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "bicycle",
+      "label": "???",
+      "prompts": [
+        "bicycle"
+      ],
+      "object_prefix": "B",
+      "threshold": 0.4,
+      "suppression_group": "two_wheeler",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "pm",
+      "label": "PM",
+      "prompts": [
+        "electric kick scooter"
+      ],
+      "object_prefix": "K",
+      "threshold": 0.4,
+      "suppression_group": "two_wheeler",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "child",
+      "label": "???",
+      "prompts": [
+        "child"
+      ],
+      "object_prefix": "P",
+      "threshold": 0.4,
+      "suppression_group": "person",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "adult",
+      "label": "??",
+      "prompts": [
+        "adult person"
+      ],
+      "object_prefix": "P",
+      "threshold": 0.4,
+      "suppression_group": "person",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "barrier",
+      "label": "???",
+      "prompts": [
+        "boom barrier"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "guardrail",
+      "label": "????",
+      "prompts": [
+        "guardrail"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "median",
+      "label": "?????",
+      "prompts": [
+        "median barrier"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "curb",
+      "label": "??",
+      "prompts": [
+        "curb"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "traffic_sign",
+      "label": "???",
+      "prompts": [
+        "traffic sign"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "pole_streetlight",
+      "label": "???????????",
+      "prompts": [
+        "utility pole",
+        "street lamp"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.35,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "bollard_delineator",
+      "label": "?????????",
+      "prompts": [
+        "bollard",
+        "delineator post"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.35,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "crash_cushion",
+      "label": "??????",
+      "prompts": [
+        "crash cushion"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "speed_bump",
+      "label": "?????",
+      "prompts": [
+        "speed bump"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "pillar",
+      "label": "?? ??",
+      "prompts": [
+        "pillar"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": "wall_like",
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "building_wall",
+      "label": "?? ?",
+      "prompts": [
+        "building wall"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": "wall_like",
+      "min_area_ratio": 0.005,
+      "enabled": true
+    },
+    {
+      "key": "boundary_wall",
+      "label": "???",
+      "prompts": [
+        "wall"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": "wall_like",
+      "min_area_ratio": 0.002,
+      "enabled": true
+    },
+    {
+      "key": "flowerbed",
+      "label": "??",
+      "prompts": [
+        "flower bed"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.35,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "dirtpile",
+      "label": "???",
+      "prompts": [
+        "dirt pile"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.35,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "streettree",
+      "label": "???(??)",
+      "prompts": [
+        "tree"
+      ],
+      "object_prefix": "R",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "animal",
+      "label": "??",
+      "prompts": [
+        "animal"
+      ],
+      "object_prefix": "A",
+      "threshold": 0.4,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    },
+    {
+      "key": "road_debris",
+      "label": "?????",
+      "prompts": [
+        "debris on road"
+      ],
+      "object_prefix": "D",
+      "threshold": 0.35,
+      "suppression_group": null,
+      "min_area_ratio": 0.0005,
+      "enabled": true
+    }
+  ]
+}

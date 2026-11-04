@@ -8,7 +8,7 @@ No Word installation or third-party document package is needed for export.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from importlib.resources import files
 from io import BytesIO
@@ -18,6 +18,7 @@ from xml.dom import Node, minidom
 from xml.parsers.expat import ExpatError
 from zipfile import BadZipFile, ZipFile
 
+from investigator.case_numbering import REPORT_ACCIDENT_NUMBER_COLUMN, build_case_number_map
 from investigator.form_definition import FormDefinition
 from investigator.models import InvestigationCase
 from investigator.schema import (
@@ -51,7 +52,10 @@ def _display(value: Any) -> str:
 
 
 def _context(
-    case: InvestigationCase, definition: FormDefinition
+    case: InvestigationCase,
+    definition: FormDefinition,
+    *,
+    report_number: str | None = None,
 ) -> tuple[dict[str, str], dict[str, bool]]:
     """Resolve both stable model keys and old/current CSV aliases.
 
@@ -129,7 +133,9 @@ def _context(
                         original_option_checks[f"{alias}|{name}"] = checked
         display_value = [labels.get(item, item) for item in selected] if isinstance(value, list) else labels.get(value, value)
         text = _display(display_value)
-        if key == "institution" and not is_blank(value):
+        if key == "accident_classification" and report_number is not None:
+            text = report_number
+        elif key == "institution" and not is_blank(value):
             text = str(value).lower()
         elif key == "incident_date" and incident_day_for_date(value):
             text = datetime.strptime(str(value), "%Y%m%d").strftime("%Y-%m-%d")
@@ -147,7 +153,8 @@ def _context(
     checks.update(stable_checks)
     checks.update(original_option_checks)
     texts["incident_hour"] = texts["incident_time"]
-    texts["case_id"] = case.display_id
+    texts["case_id"] = _report_display_id(case, report_number)
+    texts[REPORT_ACCIDENT_NUMBER_COLUMN] = _display(report_number)
     return texts, checks
 
 
@@ -303,8 +310,14 @@ def _template_bytes(template_path: str | Path | None) -> bytes:
         raise ReportExportError(f"보고서 양식을 읽을 수 없습니다: {template_path or REPORT_TEMPLATE_FILENAME}") from exc
 
 
-def _render_case(template: bytes, case: InvestigationCase, definition: FormDefinition) -> bytes:
-    context, states = _context(case, definition)
+def _render_case(
+    template: bytes,
+    case: InvestigationCase,
+    definition: FormDefinition,
+    *,
+    report_number: str | None = None,
+) -> bytes:
+    context, states = _context(case, definition, report_number=report_number)
     output = BytesIO()
     try:
         with ZipFile(BytesIO(template)) as source, ZipFile(output, "w") as destination:
@@ -328,8 +341,16 @@ def _render_case(template: bytes, case: InvestigationCase, definition: FormDefin
     return output.getvalue()
 
 
-def _safe_name(case: InvestigationCase) -> str:
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", case.display_id).strip(" .")
+def _report_display_id(case: InvestigationCase, report_number: str | None) -> str:
+    if report_number is None:
+        return case.display_id
+    institution = str(case.values.get("institution", "")).strip().upper()
+    return f"{institution}-{report_number}" if institution else report_number
+
+
+def _safe_name(case: InvestigationCase, report_number: str | None = None) -> str:
+    display_id = _report_display_id(case, report_number)
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", display_id).strip(" .")
     return f"{name[:100] or case.uid[:12]}_사고분석보고서"
 
 
@@ -339,15 +360,23 @@ def export_case_reports(
     *,
     form_definition: FormDefinition | None = None,
     template_path: str | Path | None = None,
+    report_number_by_uid: Mapping[str, str] | None = None,
 ) -> list[Path]:
     """Export one DOCX per selected case, without overwriting existing files.
 
     Report snapshots do not save or complete an investigation. A failed batch
     removes only its own newly created files, leaving previous exports intact.
+    Pass the whole project's number map when exporting a subset so the report
+    identifier agrees with CSV exports and is not renumbered by the selection.
     """
     selected = list(dict((case.uid, case) for case in cases).values())
     if not selected:
         raise ReportExportError("보고서로 내보낼 사고를 선택해 주세요.")
+    numbers = (
+        build_case_number_map(selected)
+        if report_number_by_uid is None
+        else report_number_by_uid
+    )
     template = _template_bytes(template_path)
     destination = Path(destination_directory).expanduser().resolve()
     created: list[Path] = []
@@ -355,8 +384,9 @@ def export_case_reports(
         destination.mkdir(parents=True, exist_ok=True)
         for case in selected:
             definition = form_definition or case.form_definition or FormDefinition.default()
-            data = _render_case(template, case, definition)
-            stem = _safe_name(case)
+            report_number = numbers.get(case.uid)
+            data = _render_case(template, case, definition, report_number=report_number)
+            stem = _safe_name(case, report_number)
             suffix = 1
             while True:
                 path = destination / f"{stem}{'' if suffix == 1 else f'_{suffix}'}.docx"

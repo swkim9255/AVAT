@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "python": "",
+  "backend": "grounding_dino",
+  "model": "models/grounding-dino-base",
+  "device": "auto",
+  "offline": true,
+  "dino_chunk_size": 8,
+  "dino_box_threshold": 0.3,
+  "dino_text_threshold": 0.25,
+  "dino_fp16": true
+}

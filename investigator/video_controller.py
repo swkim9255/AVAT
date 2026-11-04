@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections import OrderedDict
@@ -18,10 +19,28 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
 from investigator.audio_playback import AudioPlayback
+from investigator.diagnostics import process_memory_bytes
 from investigator.video_capture import open_video_capture
 from investigator.video_decoder import ProcessDecoder
 
+LOGGER = logging.getLogger(__name__)
 DEFAULT_FPS = 30.0
+DECODER_THREADS_VARIABLE = "AVAT_DECODER_THREADS"
+
+
+def configured_decoder_threads() -> int:
+    """Return the FFmpeg decoder thread setting; 0 keeps OpenCV's automatic choice.
+
+    Automatic mode uses one decoder thread per logical core (at most 16), so
+    scrubbing can briefly load every core. AVAT_DECODER_THREADS (for example 2)
+    caps that on a slow or overheating PC for diagnosis; invalid values are ignored.
+    """
+    raw = os.environ.get(DECODER_THREADS_VARIABLE, "").strip()
+    try:
+        threads = int(raw) if raw else 0
+    except ValueError:
+        return 0
+    return min(max(threads, 0), 16)
 
 
 class PlaybackState(StrEnum):
@@ -83,6 +102,7 @@ class VideoController(QObject):
         self._capture: CaptureProtocol | None = None
         self._decoder: ProcessDecoder | None = None
         self._decoder_threads: int | None = None
+        self._decoder_thread_setting = configured_decoder_threads()
         self._generation = 0
         self._request_id = 0
         self._revision = 0
@@ -372,14 +392,14 @@ class VideoController(QObject):
             self.error_occurred.emit(f"{next_frame + 1:,}번 프레임을 읽을 수 없습니다.")
 
     def _open_process_video(self, resolved: Path) -> bool:
-        threads = 1 if resolved in self._safe_files else 0
+        threads = 1 if resolved in self._safe_files else self._decoder_thread_setting
         candidate = ProcessDecoder(self)
         opened = candidate.open(resolved, threads)
         if opened is None:
             candidate.deleteLater()
             # Startup aborts are isolated too. One file-specific safe retry,
             # never silently force every healthy video back to one thread.
-            if threads == 0:
+            if threads != 1:
                 candidate = ProcessDecoder(self)
                 opened = candidate.open(resolved, 1)
                 if opened is not None:
@@ -405,6 +425,14 @@ class VideoController(QObject):
         if self._audio is not None:
             self._audio.open(resolved)
         self._timer.setInterval(max(1, round(1000 / fps)))
+        # Activity breadcrumbs to line up with Windows crash times; no names/paths.
+        LOGGER.info(
+            "video_opened width=%s height=%s fps=%.3f frames=%s codec=%s decoder_threads=%s "
+            "safe_mode=%s audio=%s memory_bytes=%s",
+            image.width(), image.height(), fps, count, information.get("codec") or "-",
+            self._decoder_threads, resolved in self._safe_files, self._audio is not None,
+            process_memory_bytes() or "-",
+        )
         self._set_state(PlaybackState.STOPPED)
         self.video_opened.emit(self._metadata)
         self.frame_ready.emit(QImage(image), 0, 0.0)
@@ -570,6 +598,10 @@ class VideoController(QObject):
         self._crash_counts[path] = failures
         if failures >= 2:
             self._safe_files.add(path)
+        LOGGER.warning(
+            "decoder_recovery failures=%s safe_mode=%s frame=%s", failures, path in self._safe_files,
+            target,
+        )
         if failures > 2:
             self._seek_target = None
             self.seek_cancelled.emit()
@@ -583,7 +615,9 @@ class VideoController(QObject):
         if generation != self._generation or self._metadata is None or self._metadata.path != path:
             return
         candidate = ProcessDecoder(self)
-        information = candidate.open(path, 1 if path in self._safe_files else 0)
+        information = candidate.open(
+            path, 1 if path in self._safe_files else self._decoder_thread_setting
+        )
         if information is None:
             candidate.deleteLater()
             self._seek_target = None
@@ -630,6 +664,7 @@ class VideoController(QObject):
         if state is self._state:
             return
         self._state = state
+        LOGGER.info("playback_state state=%s frame=%s", state.value, self._current_frame)
         self.state_changed.emit(state)
 
     @staticmethod

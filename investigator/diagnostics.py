@@ -17,6 +17,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import BinaryIO
 
+from investigator.runtime_paths import is_frozen, runtime_data_root
+
 LOGGER = logging.getLogger("investigator")
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
@@ -30,6 +32,8 @@ _hooks_installed = False
 
 def default_log_directory() -> Path:
     """Keep logs outside a selected workspace, including read-only workspaces."""
+    if is_frozen():
+        return runtime_data_root() / "logs"
     base = os.environ.get("LOCALAPPDATA")
     if base:
         return Path(base) / "AVAT" / "logs"
@@ -134,6 +138,32 @@ def shutdown_diagnostics() -> None:
         _handler.close()
         _handler = None
     _log_directory = None
+
+
+def log_runtime_environment() -> None:
+    """Record the Windows build, library versions and decoder settings of this PC.
+
+    Comparing this line between a working and a failing PC separates
+    environment differences from application behaviour. No case data.
+    """
+    import platform
+
+    fields = {
+        "windows": platform.platform(),
+        "cpus": os.cpu_count(),
+        "python": sys.version.split()[0],
+    }
+    for label, module_name, attribute in (
+        ("pyside6", "PySide6", "__version__"),
+        ("qt", "PySide6.QtCore", "qVersion"),
+        ("opencv", "cv2", "__version__"),
+        ("numpy", "numpy", "__version__"),
+    ):
+        value = getattr(sys.modules.get(module_name), attribute, None)
+        fields[label] = value() if callable(value) else value or "-"
+    fields["qt_hw_decoding"] = os.environ.get("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "default")
+    fields["decoder_threads"] = os.environ.get("AVAT_DECODER_THREADS", "auto")
+    LOGGER.info("runtime %s", " ".join(f"{key}={value}" for key, value in fields.items()))
 
 
 def process_memory_bytes() -> int | None:

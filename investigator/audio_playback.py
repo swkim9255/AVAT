@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,6 +10,21 @@ from PySide6.QtCore import QElapsedTimer, QLoggingCategory, QObject, QUrl, Signa
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from investigator.ffmpeg_logging import configure_qt_ffmpeg_log_level
+
+QT_HW_DECODING_VARIABLE = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
+
+
+def disable_qt_hardware_decoding() -> None:
+    """Keep Qt's FFmpeg backend off the GPU video decoder (D3D11VA/DXVA).
+
+    Qt decodes only the soundtrack here; OpenCV supplies every displayed frame.
+    Whenever Qt still selects the video track, it otherwise opens a hardware
+    decoder and loads the graphics driver into this process. Qt reads the
+    variable once, before its first codec, so call this before any player.
+    "," is a defined but empty device list (an empty string would unset the
+    variable on Windows). A value set before launch is kept for diagnosis.
+    """
+    os.environ.setdefault(QT_HW_DECODING_VARIABLE, ",")
 
 
 @lru_cache(maxsize=1)
@@ -27,6 +43,7 @@ class AudioPlayback(QObject):
     def __init__(self, parent: QObject) -> None:
         super().__init__(parent)
         configure_media_logging()
+        disable_qt_hardware_decoding()
         self._target_ms = 0
         self._playing = False
         self._player = QMediaPlayer(self)

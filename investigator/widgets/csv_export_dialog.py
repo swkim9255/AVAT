@@ -1,4 +1,4 @@
-"""Options for exporting an investigation CSV and its data specification."""
+"""Options for exporting investigation data and companion analysis files."""
 
 from pathlib import Path
 
@@ -11,11 +11,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from investigator.csv_specification import csv_export_headers
+from investigator.form_definition import FormDefinition
+from investigator.speed_csv import speed_csv_path
 from investigator.storage import data_specification_path
 
 
 class CsvExportDialog(QDialog):
-    def __init__(self, destination: Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        destination: Path,
+        parent: QWidget | None = None,
+        *,
+        definition: FormDefinition | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("CSV 내보내기 옵션")
         self.setMinimumWidth(440)
@@ -23,12 +32,39 @@ class CsvExportDialog(QDialog):
         description = QLabel(f"CSV 파일: {destination.name}", self)
         description.setWordWrap(True)
         layout.addWidget(description)
-        self.include_specification = QCheckBox("데이터 명세서(94개 항목)도 함께 내보내기", self)
+        speed_companion = speed_csv_path(destination)
+        speed_detail = QLabel(
+            f"속도 분석 CSV도 같은 폴더에 자동 저장합니다: {speed_companion.name}\n"
+            "영상별 트리거·충돌·속도 지점의 시점과 계산된 속도를 포함하며, "
+            "기존 조사 CSV의 칼럼은 유지합니다.",
+            self,
+        )
+        speed_detail.setObjectName("speedCsvExportDetail")
+        speed_detail.setWordWrap(True)
+        layout.addWidget(speed_detail)
+        if speed_companion.exists():
+            speed_warning = QLabel(
+                "같은 이름의 속도 분석 CSV가 있습니다. 내보내면 기존 파일을 덮어씁니다.",
+                self,
+            )
+            speed_warning.setObjectName("speedCsvOverwriteWarning")
+            speed_warning.setWordWrap(True)
+            layout.addWidget(speed_warning)
+        definition = definition if definition is not None else FormDefinition.default()
+        column_count = len(csv_export_headers(definition))
+        self.include_specification = QCheckBox(
+            f"데이터 명세서({column_count}개 항목)도 함께 내보내기", self
+        )
         self.include_specification.setObjectName("includeDataSpecification")
         self.include_specification.setChecked(True)
         layout.addWidget(self.include_specification)
         companion = data_specification_path(destination)
-        detail = QLabel(f"같은 폴더에 {companion.name} 파일을 저장합니다.", self)
+        detail = QLabel(
+            f"같은 폴더에 {companion.name} 파일을 저장합니다.\n"
+            "현재 CSV의 칼럼 순서와 이름, 새로 추가한 항목을 명세서에도 반영합니다.",
+            self,
+        )
+        detail.setObjectName("dataSpecificationExportDetail")
         detail.setWordWrap(True)
         layout.addWidget(detail)
         if companion.exists():

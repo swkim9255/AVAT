@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDrag, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -26,11 +29,13 @@ from investigator.theme import DANGER, MUTED, PRIMARY, SUCCESS, material_icon
 
 UID_ROLE = Qt.ItemDataRole.UserRole
 VIDEO_INDEX_ROLE = Qt.ItemDataRole.UserRole + 1
+KIND_ROLE = Qt.ItemDataRole.UserRole + 2
+FOLDER_KEY_ROLE = Qt.ItemDataRole.UserRole + 3
 _SELECTION_UNSET = object()
 
 
 class CaseTreeWidget(QTreeWidget):
-    """Tree that only reorders top-level accident items."""
+    """Folder navigation that reorders accidents without moving their files."""
 
     case_dropped = Signal(str, int)
     cases_dropped = Signal(list, int)
@@ -38,24 +43,51 @@ class CaseTreeWidget(QTreeWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._drop_generation = 0
+        self._case_order: list[str] = []
+
+    def set_case_order(self, uids: list[str]) -> None:
+        self._case_order = list(uids)
+
+    def case_items(self) -> list[QTreeWidgetItem]:
+        """Return case rows in display order, independent of folder depth."""
+        result = []
+
+        def visit(item: QTreeWidgetItem) -> None:
+            if item.data(0, KIND_ROLE) == "case":
+                result.append(item)
+            elif item.data(0, KIND_ROLE) == "folder":
+                for index in range(item.childCount()):
+                    visit(item.child(index))
+
+        for index in range(self.topLevelItemCount()):
+            visit(self.topLevelItem(index))
+        return result
+
+    @staticmethod
+    def item_is_visible(item: QTreeWidgetItem) -> bool:
+        while item is not None:
+            if item.isHidden():
+                return False
+            item = item.parent()
+        return True
 
     def cancel_pending_drops(self) -> None:
         self._drop_generation += 1
 
     def selected_cases(self) -> list[QTreeWidgetItem]:
-        return [
-            self.topLevelItem(index)
-            for index in range(self.topLevelItemCount())
-            if self.topLevelItem(index).isSelected()
-            and not self.topLevelItem(index).isHidden()
-        ]
+        selected = {
+            str(item.data(0, UID_ROLE)): item
+            for item in self.case_items()
+            if item.isSelected() and self.item_is_visible(item)
+        }
+        return [selected[uid] for uid in self._case_order if uid in selected]
 
     def startDrag(self, supported_actions) -> None:  # type: ignore[no-untyped-def]
         """Start a custom move drag without Qt deleting the source row."""
 
         del supported_actions
         source = self.currentItem()
-        if source is None or source.parent() is not None:
+        if source is None or source.data(0, KIND_ROLE) != "case":
             return
         mime_data = self.mimeData(self.selected_cases())
         if mime_data is None:
@@ -70,14 +102,14 @@ class CaseTreeWidget(QTreeWidget):
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         source = self.currentItem()
-        if source is None or source.parent() is not None:
+        if source is None or source.data(0, KIND_ROLE) != "case":
             event.ignore()
             return
         super().dragMoveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
         source = self.currentItem()
-        if source is None or source.parent() is not None or self.topLevelItemCount() < 2:
+        if source is None or source.data(0, KIND_ROLE) != "case" or len(self._case_order) < 2:
             event.ignore()
             return
         sources = self.selected_cases()
@@ -90,17 +122,26 @@ class CaseTreeWidget(QTreeWidget):
         if hit is None:
             first = self.topLevelItem(0)
             raw_destination = (
-                0 if position.y() < self.visualItemRect(first).top() else self.topLevelItemCount()
+                0 if position.y() < self.visualItemRect(first).top() else len(self._case_order)
             )
         else:
-            hit_is_video = hit.parent() is not None
-            target = hit.parent() if hit_is_video else hit
-            target_index = self.indexOfTopLevelItem(target)
-            place_after = hit_is_video or position.y() >= self.visualItemRect(target).center().y()
-            raw_destination = target_index + int(place_after)
+            kind = hit.data(0, KIND_ROLE)
+            if kind == "folder":
+                children = [hit.child(index) for index in range(hit.childCount())]
+                indices = [self._case_order.index(str(item.data(0, UID_ROLE))) for item in children]
+                if not indices:
+                    event.ignore()
+                    return
+                after = position.y() >= self.visualItemRect(hit).center().y()
+                raw_destination = max(indices) + 1 if after else min(indices)
+            else:
+                target = hit.parent() if kind == "video" else hit
+                target_index = self._case_order.index(str(target.data(0, UID_ROLE)))
+                place_after = kind == "video" or position.y() >= self.visualItemRect(target).center().y()
+                raw_destination = target_index + int(place_after)
 
         destination = raw_destination - sum(
-            self.indexOfTopLevelItem(item) < raw_destination for item in sources
+            self._case_order.index(str(item.data(0, UID_ROLE))) < raw_destination for item in sources
         )
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
@@ -127,13 +168,14 @@ class CaseTreeWidget(QTreeWidget):
 class CaseListPanel(QWidget):
     case_selected = Signal(str)
     video_selected = Signal(str, int)
-    new_case_requested = Signal()
+    refresh_requested = Signal()
     # Kept for API compatibility with integrations that add individual files.
     add_video_requested = Signal()
     delete_case_requested = Signal(str)
     delete_video_requested = Signal(str, int)
     case_reordered = Signal(str, int)
     cases_reordered = Signal(list, int)
+    sort_ascending_requested = Signal()
     export_requested = Signal()
     report_export_requested = Signal()
 
@@ -143,6 +185,11 @@ class CaseListPanel(QWidget):
         self.setMinimumWidth(240)
         self.setMaximumWidth(390)
         self._cases: list[InvestigationCase] = []
+        self._workspace: Path | None = None
+        self._video_filter: Callable[[str], bool] | None = None
+        self._video_filter_key: object = None
+        self._show_empty_in_scope = False
+        self._folder_items_by_key: dict[str, QTreeWidgetItem] = {}
         self._cases_by_uid: dict[str, InvestigationCase] = {}
         self._items_by_uid: dict[str, QTreeWidgetItem] = {}
         self._videos_by_uid: dict[str, tuple[str, ...]] = {}
@@ -178,7 +225,21 @@ class CaseListPanel(QWidget):
             material_icon("search", MUTED), QLineEdit.ActionPosition.LeadingPosition
         )
         self.search.textChanged.connect(self._filter)
-        root.addWidget(self.search)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        search_row.addWidget(self.search, 1)
+        self.sort_button = QToolButton(self)
+        self.sort_button.setObjectName("sortCasesAscendingButton")
+        self.sort_button.setIcon(material_icon("format_list_numbered", PRIMARY))
+        self.sort_button.setIconSize(QSize(20, 20))
+        self.sort_button.setFixedSize(36, 36)
+        self.sort_button.setStyleSheet("QToolButton#sortCasesAscendingButton { padding: 0; }")
+        self.sort_button.setToolTip("사고번호 오름차순 정렬")
+        self.sort_button.setAccessibleName("사고번호 오름차순 정렬")
+        self.sort_button.setEnabled(False)
+        self.sort_button.clicked.connect(self.sort_ascending_requested)
+        search_row.addWidget(self.sort_button)
+        root.addLayout(search_row)
 
         self.tree = CaseTreeWidget(self)
         self.tree.setObjectName("caseTree")
@@ -205,10 +266,10 @@ class CaseListPanel(QWidget):
         root.addWidget(self.tree, 1)
 
         button_row = QHBoxLayout()
-        self.new_button = QPushButton(material_icon("add", PRIMARY), "새 사고", self)
-        self.new_button.setObjectName("newCaseButton")
-        self.new_button.clicked.connect(self.new_case_requested)
-        button_row.addWidget(self.new_button)
+        self.refresh_button = QPushButton(material_icon("refresh", PRIMARY), "목록 새로고침", self)
+        self.refresh_button.setObjectName("refreshCasesButton")
+        self.refresh_button.clicked.connect(self.refresh_requested)
+        button_row.addWidget(self.refresh_button)
         root.addLayout(button_row)
 
         self.delete_button = QPushButton(
@@ -216,7 +277,7 @@ class CaseListPanel(QWidget):
         )
         self.delete_button.setObjectName("deleteSelectionButton")
         self.delete_button.setToolTip(
-            "목록과 조사 데이터에서만 삭제하며 원본 영상 파일은 유지합니다."
+            "DB에서 삭제하고 영상 파일은 프로젝트의 삭제사고 폴더로 이동합니다. 다른 사고의 공유 파일은 유지합니다."
         )
         self.delete_button.clicked.connect(self._request_selected_delete)
         self.delete_button.setEnabled(False)
@@ -236,13 +297,140 @@ class CaseListPanel(QWidget):
         self.report_export_button.clicked.connect(self.report_export_requested)
         root.addWidget(self.report_export_button)
 
+    def set_workspace(self, workspace: Path) -> None:
+        """Set the root used by the next list refresh to label video folders."""
+        self._workspace = Path(workspace).resolve()
+
+    def set_video_filter(self, predicate: Callable[[str], bool] | None, *, show_empty: bool = False,
+                         scope_key: object = None) -> None:
+        """Filter display only; child indices still address original case videos."""
+        unchanged = predicate is not None and scope_key is not None and scope_key == self._video_filter_key
+        self._video_filter = predicate
+        self._video_filter_key = scope_key
+        self._show_empty_in_scope = show_empty
+        if unchanged:
+            self._filter(self.search.text())
+            self._update_count_label()
+            return
+        self.set_cases(self._cases, self._active_uid)
+
+    def _case_in_scope(self, case: InvestigationCase) -> bool:
+        return self._video_filter is None or (
+            self._show_empty_in_scope and not case.videos
+        ) or any(self._video_filter(path) for path in case.videos)
+
+    def case_item(self, uid: str) -> QTreeWidgetItem | None:
+        return self._items_by_uid.get(uid)
+
+    def _folder_details(self, case: InvestigationCase) -> tuple[str, str, str] | None:
+        if self._workspace is None or self._video_filter is not None:
+            return None
+        existing = [Path(path).resolve() for path in case.videos if Path(path).is_file()]
+        paths = existing or [Path(path).resolve() for path in case.videos]
+        if not paths:
+            return "__no_video__", "영상 없음", "연결된 영상이 없는 사고"
+        parents = [path.parent for path in paths]
+        try:
+            folder = Path(os.path.commonpath(parents))
+        except ValueError:  # Files on different drives still have one accident row.
+            return "__multiple_locations__", "여러 영상 폴더", "여러 드라이브에 연결된 영상"
+        try:
+            relative = folder.relative_to(self._workspace)
+            label = relative.as_posix() if relative.parts else self._workspace.name
+        except ValueError:
+            label = folder.name or str(folder)
+        return os.path.normcase(str(folder)), label, str(folder)
+
+    def _parent_for_case(self, case: InvestigationCase) -> QTreeWidgetItem | None:
+        details = self._folder_details(case)
+        if details is None:
+            return None
+        key, label, tooltip = details
+        item = self._folder_items_by_key.get(key)
+        if item is None:
+            item = QTreeWidgetItem(self.tree)
+            item.setData(0, KIND_ROLE, "folder")
+            item.setData(0, FOLDER_KEY_ROLE, key)
+            item.setText(0, label)
+            item.setToolTip(0, tooltip)
+            item.setIcon(0, material_icon("folder", MUTED))
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+            item.setExpanded(True)
+            self._folder_items_by_key[key] = item
+        return item
+
+    def _new_case_item(self, case: InvestigationCase) -> QTreeWidgetItem:
+        parent = self._parent_for_case(case)
+        item = QTreeWidgetItem(parent if parent is not None else self.tree)
+        item.setData(0, KIND_ROLE, "case")
+        item.setData(0, UID_ROLE, case.uid)
+        item.setData(0, VIDEO_INDEX_ROLE, -1)
+        item.setIcon(0, material_icon("description", PRIMARY))
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+        self._items_by_uid[case.uid] = item
+        return item
+
+    def _arrange_case_items(self) -> None:
+        """Retain case/video item identity while regrouping and applying order."""
+        current = self.tree.currentItem()
+        selected = [
+            item
+            for case_item in self._items_by_uid.values()
+            for item in [case_item, *(case_item.child(index) for index in range(case_item.childCount()))]
+            if item.isSelected()
+        ]
+        expanded = {uid: item.isExpanded() for uid, item in self._items_by_uid.items()}
+        expanded_folders = {key: item.isExpanded() for key, item in self._folder_items_by_key.items()}
+        for case in self._cases:
+            if case.uid not in self._items_by_uid:
+                continue
+            item = self._items_by_uid[case.uid]
+            old_parent = item.parent()
+            if old_parent is not None:
+                old_parent.takeChild(old_parent.indexOfChild(item))
+            else:
+                self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+            parent = self._parent_for_case(case)
+            if parent is not None:
+                parent.addChild(item)
+            else:
+                self.tree.addTopLevelItem(item)
+        for key, folder in list(self._folder_items_by_key.items()):
+            if folder.childCount() == 0:
+                self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(folder))
+                del self._folder_items_by_key[key]
+        # Folder order follows the first accident's global display order.
+        folder_order = []
+        for case in self._cases:
+            if case.uid not in self._items_by_uid:
+                continue
+            folder = self._items_by_uid[case.uid].parent()
+            if folder is not None and folder not in folder_order:
+                folder_order.append(folder)
+        for index, folder in enumerate(folder_order):
+            old_index = self.tree.indexOfTopLevelItem(folder)
+            if old_index != index:
+                self.tree.takeTopLevelItem(old_index)
+                self.tree.insertTopLevelItem(index, folder)
+        for uid, state in expanded.items():
+            self._items_by_uid[uid].setExpanded(state)
+        for key, state in expanded_folders.items():
+            if key in self._folder_items_by_key:
+                self._folder_items_by_key[key].setExpanded(state)
+        if current is not None:
+            self.tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+        for item in selected:
+            item.setSelected(True)
+        self.tree.set_case_order([case.uid for case in self._cases])
+        self._filter(self.search.text())
+
     def selected_case_uids(self) -> list[str]:
         """Map selected case/video rows to distinct accidents in project order."""
         selected = {
             str(item.data(0, UID_ROLE))
             for item in self.tree.selectedItems()
-            if not item.isHidden()
-            and (item.parent() is None or not item.parent().isHidden())
+            if item.data(0, KIND_ROLE) in {"case", "video"}
+            and self.tree.item_is_visible(item)
         }
         return [case.uid for case in self._cases if case.uid in selected]
 
@@ -250,9 +438,17 @@ class CaseListPanel(QWidget):
         return {
             "search": self.search.text(),
             "expanded": {uid: item.isExpanded() for uid, item in self._items_by_uid.items()},
+            "expanded_folders": {
+                key: item.isExpanded() for key, item in self._folder_items_by_key.items()
+            },
             "selected": [
                 (str(item.data(0, UID_ROLE)), int(item.data(0, VIDEO_INDEX_ROLE)))
-                for item in self.tree.selectedItems()
+                # Qt's selectedItems() excludes hidden rows even when their
+                # selected flag is retained. Preserve them through sorting a
+                # filtered project, so clearing the filter restores selection.
+                for parent in self._items_by_uid.values()
+                for item in [parent, *(parent.child(i) for i in range(parent.childCount()))]
+                if item.isSelected()
             ],
             "current": self._selected_target(),
             "scroll": self.tree.verticalScrollBar().value(),
@@ -266,11 +462,16 @@ class CaseListPanel(QWidget):
             for uid, expanded in state.get("expanded", {}).items():
                 if item := self._items_by_uid.get(uid):
                     item.setExpanded(expanded)
+            for key, expanded in state.get("expanded_folders", {}).items():
+                if item := self._folder_items_by_key.get(key):
+                    item.setExpanded(expanded)
 
             def find(target):  # type: ignore[no-untyped-def]
                 if not target or (item := self._items_by_uid.get(target[0])) is None:
                     return None
-                return item.child(target[1]) if target[1] >= 0 else item
+                if target[1] >= 0:
+                    return item.child(target[1]) if target[1] < item.childCount() else None
+                return item
 
             if current := find(state.get("current")):
                 self.tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
@@ -291,13 +492,14 @@ class CaseListPanel(QWidget):
         self.tree.cancel_pending_drops()
         previous = self._selected_target()
         selected_targets = {
-            (str(item.data(0, UID_ROLE)), item.toolTip(0) if item.parent() else None)
+            (str(item.data(0, UID_ROLE)), item.toolTip(0) if item.data(0, KIND_ROLE) == "video" else None)
             for item in self.tree.selectedItems()
         } if previous is not None and previous[0] == selected_uid else set()
         expanded = {
-            self.tree.topLevelItem(index).data(0, UID_ROLE):
-            self.tree.topLevelItem(index).isExpanded()
-            for index in range(self.tree.topLevelItemCount())
+            uid: item.isExpanded() for uid, item in self._items_by_uid.items()
+        }
+        expanded_folders = {
+            key: item.isExpanded() for key, item in self._folder_items_by_key.items()
         }
         if selected_video_index is _SELECTION_UNSET:
             selected_video_index = (
@@ -305,11 +507,12 @@ class CaseListPanel(QWidget):
                 if previous is not None and previous[0] == selected_uid and previous[1] >= 0
                 else None
             )
-        self._cases = cases
+        self._cases = list(cases)
         self._cases_by_uid = {case.uid: case for case in cases}
         self._active_video_item = None
         self._active_uid = None
         self._items_by_uid.clear()
+        self._folder_items_by_key.clear()
         self._videos_by_uid.clear()
         self._missing_counts.clear()
         self._completed_uids.clear()
@@ -318,14 +521,7 @@ class CaseListPanel(QWidget):
         selected_item: QTreeWidgetItem | None = None
         selected_case_item: QTreeWidgetItem | None = None
         for case in cases:
-            item = QTreeWidgetItem(self.tree)
-            self._items_by_uid[case.uid] = item
-            item.setData(0, UID_ROLE, case.uid)
-            item.setData(0, VIDEO_INDEX_ROLE, -1)
-            item.setIcon(0, material_icon("description", PRIMARY))
-            item.setFlags(
-                item.flags() | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled
-            )
+            item = self._new_case_item(case)
             if case.uid == selected_uid:
                 selected_case_item = item
                 if selected_video_index is None:
@@ -341,6 +537,9 @@ class CaseListPanel(QWidget):
             if (case.uid, None) in selected_targets:
                 item.setSelected(True)
             item.setExpanded(expanded.get(case.uid, True))
+        for key, item in self._folder_items_by_key.items():
+            item.setExpanded(expanded_folders.get(key, True))
+        self.tree.set_case_order([case.uid for case in cases])
         if selected_item is None:
             selected_item = selected_case_item
         if selected_item:
@@ -364,13 +563,27 @@ class CaseListPanel(QWidget):
         item = self._items_by_uid.get(case.uid)
         if item is None:
             return False
+        previous_case = self._cases_by_uid[case.uid]
         self._cases_by_uid[case.uid] = case
+        if previous_case is not case:
+            for index, previous in enumerate(self._cases):
+                if previous.uid == case.uid:
+                    self._cases[index] = case
+                    break
         blocked = self.tree.blockSignals(True)
         try:
             self._update_case_row(case, item)
             if self._videos_by_uid.get(case.uid) != tuple(case.videos):
                 self._sync_video_items(case, item)
-            self._filter_item(item, self.search.text().strip().casefold())
+                self._arrange_case_items()
+            else:
+                parent = item.parent()
+                needle = self.search.text().strip().casefold()
+                folder_matches = parent is not None and bool(needle) and needle in parent.text(0).casefold()
+                was_hidden = item.isHidden()
+                self._filter_item(item, "" if folder_matches else needle)
+                if parent is not None and was_hidden != item.isHidden():
+                    parent.setHidden(all(parent.child(index).isHidden() for index in range(parent.childCount())))
             self.set_active_video(self._active_uid if active_uid is _SELECTION_UNSET else active_uid)
             self._update_count_label()
         finally:
@@ -380,7 +593,7 @@ class CaseListPanel(QWidget):
 
     def merge_cases(self, cases: list[InvestigationCase], active_uid: str | None) -> None:
         """Append watched accidents and refresh changed rows without a tree reset."""
-        self._cases = cases
+        self._cases = list(cases)
         blocked = self.tree.blockSignals(True)
         try:
             remaining = {case.uid for case in cases}
@@ -388,28 +601,28 @@ class CaseListPanel(QWidget):
                 item = self._items_by_uid.pop(uid)
                 if self._active_video_item is not None and self._active_video_item.parent() is item:
                     self._active_video_item = None
-                self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+                parent = item.parent()
+                if parent is not None:
+                    parent.takeChild(parent.indexOfChild(item))
+                else:
+                    self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
                 self._cases_by_uid.pop(uid, None)
                 self._videos_by_uid.pop(uid, None)
                 self._missing_counts.pop(uid, None)
                 self._completed_uids.discard(uid)
             for case in cases:
-                if self._cases_by_uid.get(case.uid) is case:
+                if self._cases_by_uid.get(case.uid) is case and self._videos_by_uid.get(case.uid) == tuple(case.videos):
                     continue
                 if case.uid in self._items_by_uid:
                     self.update_case(case)
                     continue
-                item = QTreeWidgetItem(self.tree)
-                item.setData(0, UID_ROLE, case.uid)
-                item.setData(0, VIDEO_INDEX_ROLE, -1)
-                item.setIcon(0, material_icon("description", PRIMARY))
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-                self._items_by_uid[case.uid] = item
+                item = self._new_case_item(case)
                 self._cases_by_uid[case.uid] = case
                 self._update_case_row(case, item)
                 self._sync_video_items(case, item)
                 item.setExpanded(True)
                 self._filter_item(item, self.search.text().strip().casefold())
+            self._arrange_case_items()
             self.set_active_video(active_uid)
             self._update_count_label()
         finally:
@@ -433,7 +646,9 @@ class CaseListPanel(QWidget):
             item.setToolTip(1, f"미입력 {missing}개")
 
     def _update_count_label(self) -> None:
-        self.count_label.setText(f"{len(self._completed_uids)}/{len(self._items_by_uid)} 완료")
+        scoped = {case.uid for case in self._cases if self._case_in_scope(case)}
+        self.count_label.setText(f"{len(self._completed_uids & scoped)}/{len(scoped)} 완료")
+        self.sort_button.setEnabled(bool(scoped))
 
     def _sync_video_items(self, case: InvestigationCase, item: QTreeWidgetItem) -> None:
         """Reuse video rows by path, retaining selections through attachment edits."""
@@ -462,6 +677,7 @@ class CaseListPanel(QWidget):
                     child.flags() & ~Qt.ItemFlag.ItemIsDragEnabled & ~Qt.ItemFlag.ItemIsDropEnabled
                 )
                 child.setToolTip(0, path)
+            child.setData(0, KIND_ROLE, "video")
             child.setData(0, VIDEO_INDEX_ROLE, index)
             item.addChild(child)
             child.setSelected(path in selected_paths)
@@ -501,58 +717,29 @@ class CaseListPanel(QWidget):
             self.tree.scrollToItem(item)
 
     def move_case(self, uid: str, destination: int) -> bool:
-        """Move one existing top-level item without rebuilding the tree."""
-
-        source = next(
-            (
-                index
-                for index in range(self.tree.topLevelItemCount())
-                if self.tree.topLevelItem(index).data(0, UID_ROLE) == uid
-            ),
-            -1,
-        )
+        """Move one accident in global order, retaining its filesystem group."""
+        source = next((index for index, case in enumerate(self._cases) if case.uid == uid), -1)
         if source < 0:
             return False
-        target = max(0, min(int(destination), self.tree.topLevelItemCount() - 1))
+        target = max(0, min(int(destination), len(self._cases) - 1))
         if source == target:
             return False
-        selected_item = self.tree.currentItem()
-        signals_were_blocked = self.tree.blockSignals(True)
-        was_expanded = self.tree.topLevelItem(source).isExpanded()
-        item = self.tree.takeTopLevelItem(source)
-        if item is None:
-            self.tree.blockSignals(signals_were_blocked)
-            return False
-        self.tree.insertTopLevelItem(target, item)
-        item.setExpanded(was_expanded)
-        if selected_item is not None:
-            self.tree.setCurrentItem(selected_item)
-        self.tree.blockSignals(signals_were_blocked)
-        self.tree.viewport().update()
+        self.move_cases([uid], target)
         return True
 
     def move_cases(self, uids: list[str], destination: int) -> None:
-        """Move the selected block, preserving item identity and UI state."""
+        """Move the selected block without rebuilding accident/video objects."""
         tree = self.tree
-        items = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
-        moving = [item for item in items if item.data(0, UID_ROLE) in uids]
-        current = tree.currentItem()
-        selected = tree.selectedItems()
-        expanded = [(item, item.isExpanded()) for item in moving]
+        moving = [case for case in self._cases if case.uid in uids]
+        if not moving:
+            return
+        remaining = [case for case in self._cases if case.uid not in uids]
+        target = max(0, min(int(destination), len(remaining)))
+        self._cases = remaining[:target] + moving + remaining[target:]
         blocked = tree.blockSignals(True)
         tree.setUpdatesEnabled(False)
         try:
-            for item in moving:
-                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
-            target = max(0, min(destination, tree.topLevelItemCount()))
-            for offset, item in enumerate(moving):
-                tree.insertTopLevelItem(target + offset, item)
-            for item, state in expanded:
-                item.setExpanded(state)
-            if current is not None:
-                tree.setCurrentItem(current, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
-            for item in selected:
-                item.setSelected(True)
+            self._arrange_case_items()
         finally:
             tree.setUpdatesEnabled(True)
             tree.blockSignals(blocked)
@@ -561,7 +748,7 @@ class CaseListPanel(QWidget):
     def _selection_changed(self) -> None:
         item = self.tree.currentItem()
         self._update_delete_button()
-        if item is None:
+        if item is None or item.data(0, KIND_ROLE) == "folder":
             return
         if QApplication.keyboardModifiers() & (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
@@ -571,7 +758,7 @@ class CaseListPanel(QWidget):
         self._navigation_deferred = False
         uid = item.data(0, UID_ROLE)
         video_index = int(item.data(0, VIDEO_INDEX_ROLE) or 0)
-        if item.parent() is not None and video_index >= 0:
+        if item.data(0, KIND_ROLE) == "video" and video_index >= 0:
             self.video_selected.emit(str(uid), video_index)
         else:
             self.case_selected.emit(str(uid))
@@ -590,7 +777,7 @@ class CaseListPanel(QWidget):
         if not uid:
             return None
         video_index = int(item.data(0, VIDEO_INDEX_ROLE) or 0)
-        return str(uid), video_index if item.parent() is not None else -1
+        return str(uid), video_index if item.data(0, KIND_ROLE) == "video" else -1
 
     def _update_delete_button(self) -> None:
         target = self._selected_target()
@@ -625,7 +812,7 @@ class CaseListPanel(QWidget):
             return
         uid = str(raw_uid)
         video_index = int(item.data(0, VIDEO_INDEX_ROLE) or 0)
-        if item.parent() is None:
+        if item.data(0, KIND_ROLE) != "video":
             video_index = -1
         self.tree.setCurrentItem(item)
         menu = QMenu(self.tree)
@@ -642,17 +829,23 @@ class CaseListPanel(QWidget):
     def _filter(self, text: str) -> None:
         needle = text.strip().casefold()
         for item in self._items_by_uid.values():
-            self._filter_item(item, needle)
+            parent = item.parent()
+            folder_matches = parent is not None and bool(needle) and needle in parent.text(0).casefold()
+            self._filter_item(item, "" if folder_matches else needle)
+        for folder in self._folder_items_by_key.values():
+            folder.setHidden(all(folder.child(index).isHidden() for index in range(folder.childCount())))
 
-    @staticmethod
-    def _filter_item(item: QTreeWidgetItem, needle: str) -> None:
+    def _filter_item(self, item: QTreeWidgetItem, needle: str) -> None:
         matches = needle in item.text(0).casefold()
+        case = self._cases_by_uid.get(str(item.data(0, UID_ROLE)))
         for child_index in range(item.childCount()):
             child = item.child(child_index)
             child_match = needle in child.text(0).casefold()
-            child.setHidden(bool(needle) and not child_match)
-            matches = matches or child_match
-        item.setHidden(bool(needle) and not matches)
+            in_scope = self._video_filter is None or self._video_filter(child.toolTip(0))
+            child.setHidden(not in_scope or (bool(needle) and not child_match))
+            matches = matches or (in_scope and child_match)
+        in_scope = case is not None and self._case_in_scope(case)
+        item.setHidden(not in_scope or (bool(needle) and not matches))
 
 
-__all__ = ["CaseListPanel", "CaseTreeWidget"]
+__all__ = ["CaseListPanel", "CaseTreeWidget", "KIND_ROLE"]

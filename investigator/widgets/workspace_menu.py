@@ -1,6 +1,6 @@
 """Single-row menus, document tabs and investigation/statistics mode switch."""
 
-from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFontMetrics,
@@ -37,6 +37,56 @@ class ProjectTabBar(QTabBar):
         super().__init__(parent)
         self._reorder_press: QPointF | None = None
         self._painting_drag = False
+        self._aligning_close_buttons = False
+        self._close_layout_timer = QTimer(self)
+        self._close_layout_timer.setSingleShot(True)
+        self._close_layout_timer.timeout.connect(self._align_close_buttons)
+
+    def _align_close_buttons(self) -> None:
+        if (getattr(self, "_painting_drag", False)
+                or getattr(self, "_aligning_close_buttons", False)):
+            return
+        self._aligning_close_buttons = True
+        try:
+            for index in range(self.count()):
+                if not self.isTabVisible(index):
+                    continue
+                button = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+                if button is not None:
+                    if not button.property("avatCloseGeometryFilter"):
+                        button.setProperty("avatCloseGeometryFilter", True)
+                        button.installEventFilter(self)
+                    close_rect = self._item_rects(index)[2]
+                    if button.geometry() != close_rect:
+                        button.setGeometry(close_rect)
+        finally:
+            self._aligning_close_buttons = False
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        result = super().eventFilter(watched, event)
+        if (event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show)
+                and watched.property("avatCloseGeometryFilter")
+                and not getattr(self, "_painting_drag", False)
+                and not getattr(self, "_aligning_close_buttons", False)):
+            # Slide animations can move the native child button even after a
+            # release's queued alignment has run. Correct each late movement;
+            # the recursion guard keeps our own setGeometry out of this path.
+            self._align_close_buttons()
+            self._queue_close_layout()
+        return result
+
+    def _queue_close_layout(self) -> None:
+        # Native QTabBar layout/drag cleanup can move its child buttons after
+        # our last paint. Reapply the shared geometry after that event returns,
+        # not only when another paint happens to be requested.
+        timer = getattr(self, "_close_layout_timer", None)
+        if timer is not None:
+            timer.start(0)
+
+    def tabLayoutChange(self) -> None:
+        super().tabLayoutChange()
+        self._align_close_buttons()
+        self._queue_close_layout()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self._reorder_press = None
@@ -56,6 +106,8 @@ class ProjectTabBar(QTabBar):
         if event.button() == Qt.MouseButton.LeftButton:
             self._reorder_press = None
             self._painting_drag = False
+            self._align_close_buttons()
+            self._queue_close_layout()
             self.update()
 
     def hideEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -69,7 +121,8 @@ class ProjectTabBar(QTabBar):
         content = rect.adjusted(12, 0, -18, 0)
         icon = QRect(content.left(), rect.top() + (rect.height() - 18) // 2, 18, 18)
         close = QRect(content.right() - 19, rect.top() + (rect.height() - 20) // 2, 20, 20)
-        text = QRect(icon.right() + 11, rect.top(), max(0, close.left() - icon.right() - 19), rect.height())
+        right = close.left() - 9 if self.tabsClosable() else content.right()
+        text = QRect(icon.right() + 11, rect.top(), max(0, right - icon.right() - 10), rect.height())
         return icon, text, close
 
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -79,6 +132,7 @@ class ProjectTabBar(QTabBar):
             super().paintEvent(event)
             return
         del event
+        self._align_close_buttons()
         painter = QStylePainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         for index in range(self.count()):
@@ -87,9 +141,7 @@ class ProjectTabBar(QTabBar):
             option = QStyleOptionTab()
             self.initStyleOption(option, index)
             painter.drawControl(QStyle.ControlElement.CE_TabBarTabShape, option)
-            icon_rect, text_rect, close_rect = self._item_rects(index)
-            if button := self.tabButton(index, QTabBar.ButtonPosition.RightSide):
-                button.setGeometry(close_rect)
+            icon_rect, text_rect, _ = self._item_rects(index)
             enabled = self.isEnabled() and self.isTabEnabled(index)
             self.tabIcon(index).paint(painter, icon_rect, Qt.AlignmentFlag.AlignCenter,
                                      QIcon.Mode.Normal if enabled else QIcon.Mode.Disabled)

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from investigator.form_definition import FormDefinition, new_field, required_locked, type_locked
-from investigator.schema import FIELD_BY_KEY, FieldKind
+from investigator.schema import FIELD_BY_KEY, SECTIONS, FieldKind
 from investigator.widgets.scroll_safe_combo import ScrollSafeComboBox
 
 INPUT_TYPES = (
@@ -39,6 +39,8 @@ INPUT_TYPES = (
     ("텍스트 입력 (여러 줄)", FieldKind.LONG_TEXT),
     ("체크박스 / 다중 선택", FieldKind.MULTI),
 )
+
+BUILTIN_TAB_KEYS = {"identity", *(section.key for section in SECTIONS)}
 
 
 class FormDesigner(QDialog):
@@ -66,7 +68,8 @@ class FormDesigner(QDialog):
         help_text = QLabel(
             "현재 작업 폴더의 조사 양식을 편집합니다. 적용하면 설정과 조사 데이터가 함께 저장됩니다.\n"
             "선택지 이름·저장값·개별 CSV 칼럼을 수정할 수 있습니다. 저장값 변경 시 기존 선택도 함께 옮깁니다.\n"
-            "기본값은 이후 새로 생성·가져오는 사고에만 적용됩니다. 기존 입력값은 유지됩니다.",
+            "기본값은 이후 새로 생성·가져오는 사고에만 적용됩니다. 기존 입력값은 유지됩니다.\n"
+            "CSV 칼럼은 탭·항목·선택지의 현재 순서와 이름을 따릅니다. 이전 칼럼명은 데이터 호환용으로만 보관합니다.",
             self,
         )
         help_text.setWordWrap(True)
@@ -93,6 +96,11 @@ class FormDesigner(QDialog):
         move_buttons.addWidget(self.move_up_button)
         move_buttons.addWidget(self.move_down_button)
         left.addLayout(move_buttons)
+        self.remove_selected_button = QPushButton("선택한 항목 / 탭 삭제", self)
+        self.remove_selected_button.setToolTip(
+            "사용자가 추가한 항목과 탭만 삭제할 수 있습니다. 저장된 조사 값은 보존합니다."
+        )
+        left.addWidget(self.remove_selected_button)
         body.addLayout(left, 1)
         self.pages = QStackedWidget(self)
         tab_page = QWidget(self)
@@ -174,6 +182,7 @@ class FormDesigner(QDialog):
         self.add_field_button.clicked.connect(self.add_field)
         self.move_up_button.clicked.connect(lambda: self.move_selected(-1))
         self.move_down_button.clicked.connect(lambda: self.move_selected(1))
+        self.remove_selected_button.clicked.connect(self.remove_selected)
         self.add_choice_button.clicked.connect(self.add_choice)
         self.remove_choice_button.clicked.connect(self.remove_choice)
         self.kind.currentIndexChanged.connect(self._update_type_controls)
@@ -263,6 +272,10 @@ class FormDesigner(QDialog):
             tab = self.definition.tabs[ti]
             previous.setText(0, tab["title"] if fi is None else tab["fields"][fi]["label"])
         if current is None:
+            self._selected = None
+            self.add_field_button.setEnabled(False)
+            self._update_move_buttons()
+            self._update_delete_button()
             return
         self._selected = tuple(current.data(0, Qt.ItemDataRole.UserRole))
         ti, fi = self._selected
@@ -315,6 +328,55 @@ class FormDesigner(QDialog):
         self._loading = False
         self._update_type_controls()
         self._update_move_buttons()
+        self._update_delete_button()
+
+    def _can_delete_selected(self) -> bool:
+        if self._selected is None:
+            return False
+        ti, fi = self._selected
+        if not 0 <= ti < len(self.definition.tabs):
+            return False
+        tab = self.definition.tabs[ti]
+        if fi is None:
+            # Protect schema identities, not user-editable display names.
+            return tab["key"] not in BUILTIN_TAB_KEYS and not any(
+                field["key"] in FIELD_BY_KEY for field in tab["fields"]
+            )
+        return 0 <= fi < len(tab["fields"]) and tab["fields"][fi]["key"] not in FIELD_BY_KEY
+
+    def _update_delete_button(self) -> None:
+        self.remove_selected_button.setEnabled(self._can_delete_selected())
+
+    def remove_selected(self) -> None:
+        if not self._can_delete_selected():
+            return
+        ti, fi = self._selected
+        tab = self.definition.tabs[ti]
+        name = self.tab_title.text() if fi is None else self.field_label.text()
+        kind = "탭과 포함된 모든 항목" if fi is None else "항목"
+        answer = QMessageBox.question(
+            self,
+            "조사 항목 삭제 확인",
+            f"‘{name.strip()}’ {kind}을 삭제하시겠습니까?\n"
+            "조사 양식과 다음 CSV 출력에서 제외되며, 저장된 조사 값은 보존합니다.\n"
+            "‘양식 적용 및 저장’을 눌러야 반영됩니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._store_editor()
+        # Clearing the old selection before removing its indexes is essential:
+        # loading the neighboring editor must not write deleted controls to it.
+        self._selected = None
+        if fi is None:
+            self.definition.tabs.pop(ti)
+            target = (min(ti, len(self.definition.tabs) - 1), None)
+        else:
+            fields = tab["fields"]
+            fields.pop(fi)
+            target = (ti, min(fi, len(fields) - 1)) if fields else (ti, None)
+        self._refresh_tree(target)
 
     def _update_move_buttons(self) -> None:
         if self._selected is None:

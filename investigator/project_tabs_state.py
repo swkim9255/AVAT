@@ -9,8 +9,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile
 
+from investigator.runtime_paths import is_frozen, runtime_data_root
+
 
 def default_project_tabs_path() -> Path:
+    if is_frozen():
+        return runtime_data_root() / "workspace.json"
     base = os.environ.get("LOCALAPPDATA")
     return (Path(base) / "AVAT" if base else Path.home() / ".avat") / "project_tabs.json"
 
@@ -19,6 +23,8 @@ def default_project_tabs_path() -> Path:
 class ProjectTabsState:
     folders: tuple[Path, ...] = ()
     active_folder: Path | None = None
+    video_folder_order: tuple[str, ...] = ()
+    active_video_folder: str | None = None
 
     @classmethod
     def from_dict(cls, payload: object) -> ProjectTabsState:
@@ -42,7 +48,12 @@ class ProjectTabsState:
         active = Path(raw_active).resolve() if raw_active is not None else None
         if active not in folders:
             active = folders[0] if folders else None
-        return cls(tuple(folders), active)
+        order = payload.get("video_folder_order", [])
+        selected_video = payload.get("active_video_folder")
+        if (not isinstance(order, list) or any(not isinstance(key, str) for key in order)
+                or (selected_video is not None and not isinstance(selected_video, str))):
+            raise ValueError("영상 폴더 탭 설정이 올바르지 않습니다.")
+        return cls(tuple(folders), active, tuple(dict.fromkeys(order)), selected_video)
 
 
 class ProjectTabsStore:
@@ -61,6 +72,8 @@ class ProjectTabsStore:
             "version": 1,
             "folders": [str(folder) for folder in state.folders],
             "active_folder": str(state.active_folder) if state.active_folder is not None else None,
+            "video_folder_order": list(state.video_folder_order),
+            "active_video_folder": state.active_video_folder,
         }
         # Validate writes through the same schema as reads, including absolute paths.
         ProjectTabsState.from_dict(payload)

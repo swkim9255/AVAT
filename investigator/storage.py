@@ -1,4 +1,4 @@
-"""Transactional SQLite persistence, legacy JSON migration, and CSV export."""
+"""Transactional SQLite persistence at one canonical path, and CSV export."""
 
 from __future__ import annotations
 
@@ -14,16 +14,25 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from investigator.case_numbering import REPORT_ACCIDENT_NUMBER_COLUMN, build_case_number_map
+from investigator.csv_specification import build_specification, csv_export_headers
 from investigator.form_definition import FormDefinition
-from investigator.models import SCHEMA_VERSION, InvestigationCase
+from investigator.models import InvestigationCase
+from investigator.speed_csv import speed_csv_path, write_speed_csv
+from investigator.video_import import MANAGED_VIDEO_DIRECTORY
 
-DATABASE_FILENAME = "investigations.db"
-LEGACY_DATABASE_FILENAME = "investigations.json"
+DATABASE_DIRECTORY = f"{MANAGED_VIDEO_DIRECTORY}/작업관리"
+DATABASE_FILENAME = "작업관리.db"
+SYSTEMS_DIRECTORY = "systems"
+CSV_EXPORT_DIRECTORY = "02_csv내보내기"
+REPORT_EXPORT_DIRECTORY = "03_Report내보내기"
 DATABASE_VERSION = 1
+RELATIVE_WORKSPACE_SCHEMA_VERSION = 4
+PATH_STORAGE = "workspace-relative-v1"
 DATABASE_APPLICATION_ID = 0x41564154  # AVAT, not an arbitrary SQLite database.
 _UNSET = object()
 _REQUIRED_METADATA = {
-    "schema_version", "form_definition", "initial_form_definition", "active_case_uid",
+    "schema_version", "path_storage", "form_definition", "initial_form_definition", "active_case_uid",
     "auto_import_exclusions",
 }
 logger = logging.getLogger(__name__)
@@ -55,8 +64,8 @@ class CaseRepository:
 
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
-        self.database_path = self.workspace / DATABASE_FILENAME
-        self.legacy_database_path = self.workspace / LEGACY_DATABASE_FILENAME
+        self.database_path = self.workspace / DATABASE_DIRECTORY / DATABASE_FILENAME
+        self.backup_directory = self.workspace / SYSTEMS_DIRECTORY / "backups"
         self.auto_import_exclusions: set[str] = set()
         self.form_definition = FormDefinition.default()
         self.initial_form_definition = FormDefinition.default()
@@ -66,6 +75,7 @@ class CaseRepository:
     def ensure_workspace(self) -> None:
         try:
             self.workspace.mkdir(parents=True, exist_ok=True)
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise WorkspaceError(f"작업 폴더를 만들 수 없습니다: {self.workspace}") from exc
         if not self.workspace.is_dir():
@@ -81,38 +91,36 @@ class CaseRepository:
         else:
             self.ensure_workspace()
         if not self.database_path.exists():
-            if self.legacy_database_path.exists():
-                self._migrate_legacy()
-            else:
-                self._adopt_metadata([], FormDefinition.default(), FormDefinition.default(), set(), None)
-                return []
+            self._adopt_metadata([], FormDefinition.default(), FormDefinition.default(), set(), None)
+            return []
         try:
             with self._connection() as connection, connection:
                 connection.execute("BEGIN")
                 if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise WorkspaceError("조사 데이터베이스의 무결성 검사에 실패했습니다.")
                 payload = self._read_payload(connection)
-            result = self._decode_payload(payload)
+            result = self._decode_payload(payload, workspace=self.workspace)
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             raise WorkspaceError(
                 f"조사 데이터베이스를 읽을 수 없습니다: {self.database_path}\n"
-                "기존 JSON으로 자동 전환하지 않습니다. 백업을 확인해 주세요."
+                "다른 위치의 DB나 JSON은 읽지 않습니다. 백업을 확인해 주세요."
             ) from exc
         self._adopt_metadata(*result)
         return result[0]
 
     @staticmethod
-    def _decode_payload(data: Any) -> tuple[
+    def _decode_payload(data: Any, *, workspace: str | Path | None = None) -> tuple[
         list[InvestigationCase], FormDefinition, FormDefinition, set[str], str | None
     ]:
-        """Validate legacy and database data through exactly the same model path."""
-        if not isinstance(data, dict) or data.get("schema_version") not in {SCHEMA_VERSION, 2}:
-            raise WorkspaceError("지원하지 않는 조사 데이터 형식입니다.")
+        """Validate current workspace data and resolve its stored relative paths."""
+        if not isinstance(data, dict):
+            raise WorkspaceError("조사 데이터는 JSON 객체여야 합니다.")
+        if data.get("path_storage") != PATH_STORAGE or workspace is None:
+            raise WorkspaceError("상대경로 조사 데이터를 열려면 올바른 저장 형식과 작업 폴더가 필요합니다.")
+        data = CaseRepository._transform_payload_paths(data, Path(workspace), storing=False)
         raw_cases = data.get("cases")
         try:
-            if data.get("schema_version") == 2 and not isinstance(
-                data.get("form_definition"), dict
-            ):
+            if not isinstance(data.get("form_definition"), dict):
                 raise ValueError("사용자 정의 조사 양식이 누락되었습니다.")
             definition = FormDefinition.from_dict(data.get("form_definition"))
             initial_definition = FormDefinition.from_dict(data.get("initial_form_definition"))
@@ -146,19 +154,16 @@ class CaseRepository:
             except (TypeError, ValueError, OSError) as exc:
                 raise WorkspaceError(f"cases[{index}] 조사 데이터가 올바르지 않습니다.") from exc
             cases.append(case)
-        seen: set[tuple[str, str]] = set()
         seen_uids: set[str] = set()
+        seen_identities: set[tuple[str, str]] = set()
         for case in cases:
             if case.uid in seen_uids:
                 raise WorkspaceError(f"중복 사고 UID가 있습니다: {case.uid}")
             seen_uids.add(case.uid)
-            identity = (
-                str(case.values.get("institution", "")).strip().casefold(),
-                str(case.values.get("accident_classification", "")).strip(),
-            )
-            if all(identity) and identity in seen:
+            identity = CaseRepository._identity(case)
+            if all(identity) and identity in seen_identities:
                 raise WorkspaceError(f"중복 사고 식별자가 있습니다: {case.display_id}")
-            seen.add(identity)
+            seen_identities.add(identity)
             if case.status == "completed":
                 if case.missing or case.errors:
                     raise WorkspaceError(
@@ -192,13 +197,76 @@ class CaseRepository:
         self._active_case_uid = active
         self._metadata_loaded = True
 
+    @staticmethod
+    def _convert_path(path: str, workspace: Path, *, storing: bool) -> str:
+        """Convert only video identities; never interpret a relative path at CWD.
+
+        External videos on the same volume are represented with ``..``. Windows
+        cannot express another drive relative to this workspace, so those paths
+        remain absolute. No video is copied or moved by persistence.
+        """
+        if not isinstance(path, str) or not path.strip() or "\x00" in path:
+            raise WorkspaceError("영상 경로는 비어 있지 않은 올바른 문자열이어야 합니다.")
+        if path == "__case__":
+            return path
+        expanded = Path(path).expanduser()
+        absolute = Path(os.path.abspath(expanded if expanded.is_absolute() else workspace / expanded))
+        if not storing:
+            return str(absolute)
+        try:
+            return Path(os.path.relpath(absolute, workspace)).as_posix()
+        except ValueError:
+            # A different Windows drive / UNC volume has no relative spelling.
+            return str(absolute)
+
+    @staticmethod
+    def _transform_case_paths(data: dict[str, Any], workspace: Path, *, storing: bool) -> dict[str, Any]:
+        result = dict(data)
+        videos = data.get("videos", [])
+        if not isinstance(videos, list):
+            raise WorkspaceError("videos 항목은 문자열 배열이어야 합니다.")
+        result["videos"] = [CaseRepository._convert_path(path, workspace, storing=storing) for path in videos]
+        for key in ("markers_by_video", "rotation_by_video", "objects_by_video"):
+            if key not in data:
+                continue
+            records = data[key]
+            if not isinstance(records, dict):
+                raise WorkspaceError(f"{key} 항목은 JSON 객체여야 합니다.")
+            converted: dict[str, Any] = {}
+            seen: set[str] = set()
+            for path, value in records.items():
+                target = CaseRepository._convert_path(path, workspace, storing=storing)
+                identity = target.casefold()
+                if identity in seen:
+                    raise WorkspaceError(f"경로 변환 후 중복된 영상 주석이 있습니다: {target}")
+                seen.add(identity)
+                converted[target] = value
+            result[key] = converted
+        return result
+
+    @staticmethod
+    def _transform_payload_paths(data: dict[str, Any], workspace: Path, *, storing: bool) -> dict[str, Any]:
+        result = dict(data)
+        raw_cases = data.get("cases", [])
+        if not isinstance(raw_cases, list) or any(not isinstance(case, dict) for case in raw_cases):
+            raise WorkspaceError("조사 데이터의 cases 항목이 올바르지 않습니다.")
+        result["cases"] = [CaseRepository._transform_case_paths(case, workspace, storing=storing) for case in raw_cases]
+        exclusions = data.get(AUTO_IMPORT_EXCLUSIONS_KEY, [])
+        if not isinstance(exclusions, list):
+            raise WorkspaceError("자동 영상 검색 제외 경로가 올바르지 않습니다.")
+        result[AUTO_IMPORT_EXCLUSIONS_KEY] = [
+            CaseRepository._convert_path(path, workspace, storing=storing) for path in exclusions
+        ]
+        return result
+
     @contextmanager
     def _connection(
-        self, path: Path | None = None, *, initialize: bool = False, wal: bool = True
+        self, path: Path | None = None, *, initialize: bool = False, wal: bool = True,
+        read_only: bool = False,
     ) -> Iterator[sqlite3.Connection]:
         target = path or self.database_path
         # mode=rw refuses to create a blank DB if the workspace disappears.
-        uri = target.as_uri() + ("?mode=rwc" if initialize else "?mode=rw")
+        uri = target.as_uri() + ("?mode=ro" if read_only else "?mode=rwc" if initialize else "?mode=rw")
         connection = sqlite3.connect(uri, uri=True, timeout=5, isolation_level=None)
         connection.row_factory = sqlite3.Row
         try:
@@ -229,11 +297,12 @@ class CaseRepository:
                 or connection.execute("PRAGMA user_version").fetchone()[0] != DATABASE_VERSION
             ):
                 raise WorkspaceError("지원하지 않는 AVAT 데이터베이스 형식입니다.")
-            if wal:
+            if wal and not read_only:
                 mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
                 if mode.lower() != "wal":
                     raise WorkspaceError("데이터베이스의 안전한 저장 모드를 설정할 수 없습니다.")
-            connection.execute("PRAGMA synchronous=FULL")
+            if not read_only:
+                connection.execute("PRAGMA synchronous=FULL")
             yield connection
         finally:
             connection.close()
@@ -281,9 +350,9 @@ class CaseRepository:
             str(case.values.get("accident_classification", "")).strip(),
         )
 
-    @classmethod
-    def _write_case(cls, connection: sqlite3.Connection, case: InvestigationCase, position: int) -> None:
-        institution, number = cls._identity(case)
+    def _write_case(self, connection: sqlite3.Connection, case: InvestigationCase, position: int) -> None:
+        institution, number = self._identity(case)
+        payload = self._transform_case_paths(case.to_dict(), self.workspace, storing=True)
         connection.execute(
             """INSERT INTO cases(uid, position, institution, accident_number, status, payload)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -295,7 +364,7 @@ class CaseRepository:
                 OR cases.institution != excluded.institution
                 OR cases.accident_number != excluded.accident_number
                 OR cases.status != excluded.status""",
-            (case.uid, position, institution, number, case.status, cls._serialize(case.to_dict())),
+            (case.uid, position, institution, number, case.status, self._serialize(payload)),
         )
 
     @classmethod
@@ -317,16 +386,21 @@ class CaseRepository:
     ) -> None:
         """Build and verify one standalone file before atomically activating it."""
         metadata = {
-            "schema_version": SCHEMA_VERSION if definition == FormDefinition.default() else 2,
+            "schema_version": RELATIVE_WORKSPACE_SCHEMA_VERSION,
+            "path_storage": PATH_STORAGE,
             "form_definition": definition.to_dict(),
             "initial_form_definition": initial_definition.to_dict(),
             "active_case_uid": active,
-            AUTO_IMPORT_EXCLUSIONS_KEY: sorted(exclusions),
+            AUTO_IMPORT_EXCLUSIONS_KEY: sorted(
+                self._convert_path(path, self.workspace, storing=True) for path in exclusions
+            ),
         }
-        expected = {**metadata, "cases": [case.to_dict() for case in cases]}
+        expected = {**metadata, "cases": [self._transform_case_paths(case.to_dict(), self.workspace, storing=True) for case in cases]}
         temporary_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(dir=self.workspace, prefix=".investigations.", suffix=".migration.db", delete=False) as handle:
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+            self._check_backup_destination(self.database_path)
+            with tempfile.NamedTemporaryFile(dir=self.database_path.parent, prefix=".investigations.", suffix=".new.db", delete=False) as handle:
                 temporary_path = Path(handle.name)
             # DELETE journal keeps activation atomic; no WAL file is stranded at the old name.
             with self._connection(temporary_path, initialize=True, wal=False) as connection:
@@ -337,48 +411,32 @@ class CaseRepository:
                     for position, case in enumerate(cases):
                         self._write_case(connection, case, position)
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise WorkspaceError("이전된 데이터베이스의 무결성 검사에 실패했습니다.")
+                    raise WorkspaceError("생성한 데이터베이스의 무결성 검사에 실패했습니다.")
                 actual = self._read_payload(connection)
                 if actual != expected:
-                    raise WorkspaceError("이전된 조사 데이터 검증에 실패했습니다.")
-                self._decode_payload(actual)
+                    raise WorkspaceError("생성한 조사 데이터 검증에 실패했습니다.")
+                self._decode_payload(actual, workspace=self.workspace)
             with temporary_path.open("r+b") as handle:
                 os.fsync(handle.fileno())
             if self.database_path.exists():
                 raise WorkspaceError("다른 작업에서 데이터베이스를 생성했습니다. 작업 폴더를 다시 열어 주세요.")
+            self._check_backup_destination(self.database_path)
             # On Windows rename fails instead of replacing a concurrently created DB.
             os.rename(temporary_path, self.database_path)
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             raise WorkspaceError(
-                f"조사 데이터베이스를 만들 수 없습니다: {self.database_path}\n"
-                "기존 JSON 파일은 변경하지 않았습니다."
+                f"조사 데이터베이스를 만들 수 없습니다: {self.database_path}"
             ) from exc
         finally:
             self._remove_temporary(temporary_path)
 
-    def _migrate_legacy(self) -> None:
-        """Optional migration hook shared by load/save/backup."""
-        migrator = None
-        # 자동 이전 제거: 아래 import 한 줄을 주석 처리한 뒤
-        # investigator/legacy_migration.py 파일만 삭제하세요. 나머지는 유지합니다.
-        from investigator.legacy_migration import migrate_legacy as migrator  # noqa: F811
-
-        if migrator is None:
-            raise WorkspaceError(
-                "JSON에서 DB로 이전이 필요한 작업 폴더입니다. "
-                "이 배포본에서는 자동 이전 기능이 비활성화되어 있습니다. "
-                "이전 기능이 있는 버전으로 변환하거나 이전된 investigations.db를 사용해 주세요. "
-                "기존 JSON은 변경하지 않았습니다."
-            )
-        migrator(self)
-
     def _ensure_database(self) -> None:
-        self.ensure_workspace()
-        if not self.database_path.exists():
-            if self.legacy_database_path.exists():
-                self._migrate_legacy()
-            else:
+        try:
+            self.ensure_workspace()
+            if not self.database_path.exists():
                 self._create_database([], self.form_definition, self.initial_form_definition, self.auto_import_exclusions, self._active_case_uid)
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            raise WorkspaceError(f"조사 데이터베이스를 열 수 없습니다: {self.database_path}") from exc
 
     def save(
         self,
@@ -388,7 +446,7 @@ class CaseRepository:
         auto_import_exclusions: set[str] | None = None,
         form_definition: FormDefinition | None = None,
     ) -> None:
-        """Compatibility replacement save, without rewriting unchanged case rows."""
+        """Replace the case collection without rewriting unchanged case rows."""
         self._save_changes(
             cases, replace_all=True, order=[case.uid for case in cases],
             active_case_uid=active_case_uid,
@@ -493,7 +551,7 @@ class CaseRepository:
                     raise WorkspaceError("조사 데이터베이스의 작업공간 설정이 누락되었습니다.")
                 # Everything needed after COMMIT is parsed before making changes.
                 # A corrupt baseline must not turn a committed save into a reported failure.
-                _, previous_definition, initial_definition, stored_exclusions, stored_active = self._decode_payload({**metadata, "cases": []})
+                _, previous_definition, initial_definition, stored_exclusions, stored_active = self._decode_payload({**metadata, "cases": []}, workspace=self.workspace)
                 definition = form_definition or previous_definition
                 self._prepare_cases(upserts, definition)
                 changed_by_uid = {case.uid: case for case in upserts}
@@ -513,6 +571,7 @@ class CaseRepository:
                     for row in connection.execute("SELECT uid, payload FROM cases"):
                         if row["uid"] not in changed_by_uid:
                             raw = json.loads(row["payload"])
+                            raw = self._transform_case_paths(raw, self.workspace, storing=False)
                             raw["values"] = definition.migrate_values(raw.get("values", {}), previous_definition)
                             other_cases.append(InvestigationCase.from_dict(raw, form_definition=definition))
                     self._prepare_cases(other_cases, definition)
@@ -553,13 +612,15 @@ class CaseRepository:
                     stored_active = None
                     self._write_metadata(connection, "active_case_uid", None)
                 if normalized_exclusions is not None:
-                    metadata[AUTO_IMPORT_EXCLUSIONS_KEY] = sorted(normalized_exclusions)
-                    self._write_metadata(connection, AUTO_IMPORT_EXCLUSIONS_KEY, sorted(normalized_exclusions))
+                    metadata[AUTO_IMPORT_EXCLUSIONS_KEY] = sorted(
+                        self._convert_path(path, self.workspace, storing=True) for path in normalized_exclusions
+                    )
+                    self._write_metadata(connection, AUTO_IMPORT_EXCLUSIONS_KEY, metadata[AUTO_IMPORT_EXCLUSIONS_KEY])
                     stored_exclusions = normalized_exclusions
                 if definition_changed:
                     metadata["form_definition"] = definition.to_dict()
                     self._write_metadata(connection, "form_definition", definition.to_dict())
-                    self._write_metadata(connection, "schema_version", SCHEMA_VERSION if definition == FormDefinition.default() else 2)
+                self._write_metadata(connection, "schema_version", RELATIVE_WORKSPACE_SCHEMA_VERSION)
                 # Initial settings are immutable across ordinary form edits.
             self._adopt_metadata(
                 [], definition, initial_definition, stored_exclusions, stored_active,
@@ -568,7 +629,7 @@ class CaseRepository:
             raise WorkspaceError(f"조사 데이터를 저장할 수 없습니다: {self.database_path}\n{exc}") from exc
 
     def active_case_uid(self) -> str | None:
-        """Return cached selection; only old callers before load incur a lookup."""
+        """Return cached selection; callers before load incur one initial lookup."""
         if not self._metadata_loaded:
             self.load()
         return self._active_case_uid
@@ -577,9 +638,17 @@ class CaseRepository:
         """Create a consistent single-file backup, including committed WAL data."""
         self._ensure_database()
         destination = Path(path).expanduser().resolve()
-        if destination in {self.database_path, self.legacy_database_path} or str(destination).casefold() in {
-            (str(self.database_path) + "-wal").casefold(),
-            (str(self.database_path) + "-shm").casefold(),
+        # These are protected output names, not recognized import sources.
+        protected = {
+            self.database_path, self.workspace / "investigations.db",
+            self.workspace / "investigations.json",
+            self.workspace / DATABASE_DIRECTORY / "investigations.db",
+            self.workspace / SYSTEMS_DIRECTORY / DATABASE_FILENAME,
+            self.workspace / SYSTEMS_DIRECTORY / "investigations.db",
+        }
+        if destination in protected or str(destination).casefold() in {
+            (str(source) + suffix).casefold()
+            for source in protected for suffix in ("-wal", "-shm", "-journal")
         }:
             raise WorkspaceError("원본 데이터 파일을 백업 대상으로 지정할 수 없습니다.")
         self._check_backup_destination(destination)
@@ -623,28 +692,24 @@ class CaseRepository:
         include_specification: bool = False,
     ) -> Path:
         destination = Path(path).expanduser().resolve()
-        metadata_headers = [
-            "case_id",
-            "workflow_status",
-            "video_files",
-            "active_video_file",
-            "trigger_frame",
-            "collision_frames",
-            "video_markers",
-        ]
-        headers = metadata_headers + self.form_definition.csv_headers()
+        headers = csv_export_headers(self.form_definition)
+        report_numbers = build_case_number_map(cases)
         temporary_path: Path | None = None
+        speed_temporary_path: Path | None = None
         specification_temporary_path: Path | None = None
+        speed_destination = speed_csv_path(destination)
         specification_destination = data_specification_path(destination)
         csv_saved = False
+        speed_saved = False
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if include_specification:
-                # Package the original workbook so exports also work after installation,
-                # independently of the current directory or the source checkout.
-                content = files("investigator").joinpath(
+                # Derive the workbook from the same live headers as the CSV,
+                # retaining the packaged template's formatting after installation.
+                template = files("investigator").joinpath(
                     "assets", DATA_SPECIFICATION_FILENAME
                 ).read_bytes()
+                content = build_specification(template, self.form_definition, headers=headers)
                 with tempfile.NamedTemporaryFile(
                     "wb", dir=destination.parent, prefix=".specification.",
                     suffix=".tmp", delete=False,
@@ -672,6 +737,7 @@ class CaseRepository:
                 writer.writeheader()
                 for case in cases:
                     row = {
+                        REPORT_ACCIDENT_NUMBER_COLUMN: report_numbers.get(case.uid),
                         "case_id": case.display_id,
                         "workflow_status": case.status,
                         "video_files": "|".join(case.videos),
@@ -700,26 +766,60 @@ class CaseRepository:
                     writer.writerow({header: _safe_csv_text(row.get(header)) for header in headers})
                 handle.flush()
                 os.fsync(handle.fileno())
+            # Stage every output before replacing any existing export. In
+            # particular, an I/O failure while generating speed analysis must
+            # not discard the user's previous investigation CSV.
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8-sig",
+                newline="",
+                prefix=f".{speed_destination.name}.",
+                suffix=".tmp",
+                dir=destination.parent,
+                delete=False,
+            ) as speed_handle:
+                speed_temporary_path = Path(speed_handle.name)
+                write_speed_csv(speed_handle, cases, report_numbers=report_numbers)
+                speed_handle.flush()
+                os.fsync(speed_handle.fileno())
             os.replace(temporary_path, destination)
             csv_saved = True
+            os.replace(speed_temporary_path, speed_destination)
+            speed_saved = True
             if specification_temporary_path is not None:
                 os.replace(specification_temporary_path, specification_destination)
         except OSError as exc:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-            if specification_temporary_path is not None:
-                specification_temporary_path.unlink(missing_ok=True)
             if csv_saved:
+                if not speed_saved:
+                    pending_specification = (
+                        f"\n데이터 명세서도 저장하지 못했습니다: {specification_destination}"
+                        if include_specification else ""
+                    )
+                    raise WorkspaceError(
+                        f"CSV는 저장했습니다: {destination}\n"
+                        f"속도 분석 CSV는 저장하지 못했습니다: {speed_destination}"
+                        f"{pending_specification}\n"
+                        "내보낼 파일이 다른 프로그램에서 열려 있는지 확인해 주세요."
+                    ) from exc
                 raise WorkspaceError(
                     f"CSV는 저장했습니다: {destination}\n"
+                    f"속도 분석 CSV도 저장했습니다: {speed_destination}\n"
                     f"데이터 명세서는 저장하지 못했습니다: {specification_destination}\n"
                     "명세서가 다른 프로그램에서 열려 있는지 확인해 주세요."
                 ) from exc
             if include_specification:
                 raise WorkspaceError(
-                    f"CSV와 데이터 명세서를 내보내지 못했습니다: {destination}\n{exc}"
+                    f"CSV와 데이터 명세서를 내보내지 못했습니다: {destination}\n"
+                    f"속도 분석 CSV도 저장하지 못했습니다: {speed_destination}\n{exc}"
                 ) from exc
-            raise WorkspaceError(f"CSV 파일을 저장할 수 없습니다: {destination}") from exc
+            raise WorkspaceError(
+                f"CSV 파일을 저장할 수 없습니다: {destination}\n"
+                f"속도 분석 CSV도 저장하지 못했습니다: {speed_destination}\n{exc}"
+            ) from exc
+        finally:
+            self._remove_temporary(temporary_path)
+            self._remove_temporary(speed_temporary_path)
+            self._remove_temporary(specification_temporary_path)
         return destination
 
 
@@ -727,8 +827,11 @@ __all__ = [
     "AUTO_IMPORT_EXCLUSIONS_KEY",
     "CaseRepository",
     "DATA_SPECIFICATION_FILENAME",
+    "DATABASE_DIRECTORY",
     "DATABASE_FILENAME",
-    "LEGACY_DATABASE_FILENAME",
+    "PATH_STORAGE",
+    "RELATIVE_WORKSPACE_SCHEMA_VERSION",
+    "SYSTEMS_DIRECTORY",
     "WorkspaceError",
     "data_specification_path",
 ]
