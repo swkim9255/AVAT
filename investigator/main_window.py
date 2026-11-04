@@ -337,6 +337,8 @@ class MainWindow(DetectionMixin, QMainWindow):
         for index, case in enumerate(candidates):
             if case.uid in saved_by_uid:
                 candidates[index] = saved_by_uid[case.uid]
+        # 방금 저장한 사고의 검출 결과는 메모리에서 내리고 필요할 때 DB에서 다시 읽는다.
+        self.repository.release_case_objects(snapshots)
 
     def _build_layout(self) -> None:
         self.workspace_menu = WorkspaceMenuBar(self)
@@ -725,6 +727,8 @@ class MainWindow(DetectionMixin, QMainWindow):
         except (ValueError, TypeError, KeyError, WorkspaceError) as exc:
             QMessageBox.warning(self, "양식 적용 오류", str(exc))
             return False
+        # 양식 적용은 모든 사고를 복사·저장하므로, 저장 직후 검출 결과를 다시 지연 상태로 내린다.
+        self.repository.release_case_objects(candidates)
         self.cases = candidates
         self._mark_saved(self.current_uid)
         self._install_form(definition)

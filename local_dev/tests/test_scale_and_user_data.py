@@ -362,3 +362,106 @@ def test_statistics_probe_is_limited_to_videos_where_fps_matters(window_factory,
     case.markers_by_video[marked] = {"trigger_frame": 2, "collision_frames": [9]}
     assert window._fps_needed_paths() == [marked]
     assert plain not in window._fps_needed_paths()
+
+
+# -- 검출 결과 지연 로드 ------------------------------------------------------------------
+
+
+def _objects(object_id: str):
+    from investigator.object_detection import ROLE_BOTH, DetectedObject, ObjectBox, VideoObjects
+
+    return VideoObjects([DetectedObject(
+        f"uid-{object_id}", object_id, ROLE_BOTH, None, [ObjectBox(4, (1, 2, 30, 40), .9, "car")],
+        class_key="vehicle", subtype_key="passenger",
+    )])
+
+
+def _detected_workspace(tmp_path):
+    workspace = tmp_path / "project"
+    first = _video(workspace / MANAGED_VIDEO_DIRECTORY / "a" / "2021010100001.mp4")
+    second = _video(workspace / MANAGED_VIDEO_DIRECTORY / "a" / "2021010100001_1.mp4")
+    detected = _case("2021010100001", first, second)
+    detected.set_video_objects(_objects("V001"), video_path=first)
+    detected.set_video_objects(_objects("V002"), video_path=second)
+    plain = _case("2021010100002", _video(workspace / MANAGED_VIDEO_DIRECTORY / "a" / "2021010100002.mp4"))
+    repository = CaseRepository(workspace)
+    repository.save([detected, plain])
+    return workspace, first, second
+
+
+def _object_ids(case, path):
+    return [item.object_id for item in case.objects_for_video(path).objects]
+
+
+def test_load_defers_detection_objects_until_first_use(tmp_path):
+    from investigator.models import LazyVideoObjects
+
+    workspace, first, second = _detected_workspace(tmp_path)
+    detected, plain = CaseRepository(workspace).load()
+    assert isinstance(detected.objects_by_video, LazyVideoObjects)
+    assert not detected.objects_by_video.loaded
+    assert not isinstance(plain.objects_by_video, LazyVideoObjects) and plain.objects_by_video == {}
+    assert _object_ids(detected, first) == ["V001"]
+    assert detected.objects_by_video.loaded
+    assert _object_ids(detected, second) == ["V002"]
+
+
+def test_saving_unloaded_case_keeps_detection_objects(tmp_path):
+    workspace, first, second = _detected_workspace(tmp_path)
+    repository = CaseRepository(workspace)
+    detected, _ = repository.load()
+    detected.set_value("remarks", "검출은 건드리지 않은 수정")
+    repository.save_changes([InvestigationCase.from_dict(detected.to_dict(), form_definition=repository.form_definition)])
+    reloaded = CaseRepository(workspace).load()[0]
+    assert reloaded.values["remarks"] == "검출은 건드리지 않은 수정"
+    assert _object_ids(reloaded, first) == ["V001"] and _object_ids(reloaded, second) == ["V002"]
+    # 지연 상태 그대로 저장소에 넘겨도 저장 직전에 읽어 와 함께 저장한다.
+    again, _ = CaseRepository(workspace).load()
+    again.set_value("remarks", "두 번째 수정")
+    repository.save_changes([again])
+    final = CaseRepository(workspace).load()[0]
+    assert final.values["remarks"] == "두 번째 수정"
+    assert _object_ids(final, first) == ["V001"] and _object_ids(final, second) == ["V002"]
+
+
+def test_remove_video_on_unloaded_case_drops_only_that_videos_objects(tmp_path):
+    workspace, first, second = _detected_workspace(tmp_path)
+    repository = CaseRepository(workspace)
+    detected, _ = repository.load()
+    detected.remove_video(detected.videos.index(first))
+    repository.save_changes([detected])
+    reloaded = CaseRepository(workspace).load()[0]
+    assert reloaded.videos == [second]
+    assert _object_ids(reloaded, second) == ["V002"]
+    assert _object_ids(reloaded, first) == []
+
+
+def test_relink_rekeys_unloaded_detection_objects(tmp_path):
+    from investigator.video_relink import apply_workspace_video_path_mapping
+
+    workspace, first, second = _detected_workspace(tmp_path)
+    repository = CaseRepository(workspace)
+    cases = repository.load()
+    moved = _video(workspace / MANAGED_VIDEO_DIRECTORY / "b" / "2021010100001.mp4")
+    Path(first).unlink()
+    relinked = apply_workspace_video_path_mapping(cases, {first: moved}, workspace_root=workspace)
+    repository.save_changes([relinked[0]])
+    reloaded = CaseRepository(workspace).load()[0]
+    assert reloaded.videos == [moved, second]
+    assert _object_ids(reloaded, moved) == ["V001"] and _object_ids(reloaded, second) == ["V002"]
+
+
+def test_released_objects_reload_and_replaced_database_blocks_stale_reads(tmp_path):
+    workspace, first, _ = _detected_workspace(tmp_path)
+    repository = CaseRepository(workspace)
+    detected, _ = repository.load()
+    assert _object_ids(detected, first) == ["V001"]
+    repository.release_case_objects([detected])
+    assert not detected.objects_by_video.loaded
+    assert _object_ids(detected, first) == ["V001"]
+    stale, _ = repository.load()
+    other = CaseRepository(tmp_path / "other")
+    other.save([_case("2030010100001")])
+    repository.restore(other.backup(tmp_path / "other.db"))
+    with pytest.raises(WorkspaceError):
+        stale.video_objects()

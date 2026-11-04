@@ -45,6 +45,143 @@ def normalize_json_value(value: Any) -> Any:
     raise TypeError(f"JSON으로 저장할 수 없는 값입니다: {type(value).__name__}")
 
 
+class LazyVideoObjects(dict):
+    """처음 사용할 때 DB에서 읽어 오는 ``objects_by_video`` 사전.
+
+    검출 박스는 사고 하나에 수백~수천 개가 될 수 있어, 사고 수만 건의 결과를
+    시작할 때 모두 읽으면 시작 시간과 메모리가 크게 늘어난다. 이 사전은 어떤
+    사전 연산이든 먼저 실제 값을 읽어 채운 뒤 수행하므로 저장(to_dict)·복사·
+    경로 재연결 같은 기존 코드는 그대로 동작하고, 검출 결과가 빠진 채 저장되는
+    경로가 생기지 않는다. 읽기에 실패하면 예외가 그대로 전달된다(빈 값으로 대체 금지).
+    """
+
+    __slots__ = ("_loader",)
+
+    def __init__(self, loader: Any) -> None:
+        super().__init__()
+        self._loader = loader
+
+    @property
+    def loaded(self) -> bool:
+        return self._loader is None
+
+    def _materialize(self) -> None:
+        loader = self._loader
+        if loader is not None:
+            values = loader()
+            dict.update(self, values)
+            self._loader = None
+
+    def __getitem__(self, key: Any) -> Any:
+        self._materialize()
+        return dict.__getitem__(self, key)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._materialize()
+        dict.__setitem__(self, key, value)
+
+    def __delitem__(self, key: Any) -> None:
+        self._materialize()
+        dict.__delitem__(self, key)
+
+    def __contains__(self, key: object) -> bool:
+        self._materialize()
+        return dict.__contains__(self, key)
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        self._materialize()
+        return dict.__iter__(self)
+
+    def __reversed__(self):  # type: ignore[no-untyped-def]
+        self._materialize()
+        return dict.__reversed__(self)
+
+    def __len__(self) -> int:
+        self._materialize()
+        return dict.__len__(self)
+
+    def __eq__(self, other: object) -> bool:
+        self._materialize()
+        if isinstance(other, LazyVideoObjects):
+            other._materialize()
+        return dict.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        return result if result is NotImplemented else not result
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        if self._loader is not None:
+            return "LazyVideoObjects(<읽기 전>)"
+        return f"LazyVideoObjects({dict.__repr__(self)})"
+
+    def __or__(self, other: Any) -> Any:
+        self._materialize()
+        return dict.__or__(self, other)
+
+    def __ror__(self, other: Any) -> Any:
+        self._materialize()
+        return dict.__ror__(self, other)
+
+    def __ior__(self, other: Any) -> LazyVideoObjects:
+        self._materialize()
+        dict.update(self, other)
+        return self
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        self._materialize()
+        return dict.get(self, key, default)
+
+    def keys(self):  # type: ignore[no-untyped-def]
+        self._materialize()
+        return dict.keys(self)
+
+    def values(self):  # type: ignore[no-untyped-def]
+        self._materialize()
+        return dict.values(self)
+
+    def items(self):  # type: ignore[no-untyped-def]
+        self._materialize()
+        return dict.items(self)
+
+    def pop(self, key: Any, *default: Any) -> Any:
+        self._materialize()
+        return dict.pop(self, key, *default)
+
+    def popitem(self) -> tuple[Any, Any]:
+        self._materialize()
+        return dict.popitem(self)
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        self._materialize()
+        return dict.setdefault(self, key, default)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        self._materialize()
+        dict.update(self, *args, **kwargs)
+
+    def clear(self) -> None:
+        self._materialize()
+        dict.clear(self)
+
+    def copy(self) -> dict[str, Any]:
+        self._materialize()
+        return dict(dict.items(self))
+
+    def __copy__(self) -> dict[str, Any]:
+        return self.copy()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
+        import copy as copy_module
+
+        return copy_module.deepcopy(self.copy(), memo)
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (dict, (self.copy(),))
+
+
 @dataclass(slots=True)
 class InvestigationCase:
     """A case, its attached videos, investigation values, and timeline markers."""

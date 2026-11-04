@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,8 @@ from typing import Any
 from investigator.case_numbering import REPORT_ACCIDENT_NUMBER_COLUMN, build_case_number_map
 from investigator.csv_specification import build_specification, csv_export_headers
 from investigator.form_definition import FormDefinition
-from investigator.models import InvestigationCase
+from investigator.models import InvestigationCase, LazyVideoObjects
+from investigator.object_detection import normalize_objects_by_video
 from investigator.speed_csv import speed_csv_path, write_speed_csv
 from investigator.user_data import latest_backup_path, workspace_backup_directory
 from investigator.video_import import MANAGED_VIDEO_DIRECTORY
@@ -78,6 +80,9 @@ class CaseRepository:
         self.initial_form_definition = FormDefinition.default().seal()
         self._active_case_uid: str | None = None
         self._metadata_loaded = False
+        # load()·백업 복원마다 올린다. 이전 세대의 사고가 지연 검출 결과를 엉뚱한
+        # DB 내용으로 읽지 않도록 확인하는 데 쓴다.
+        self._generation = 0
 
     def ensure_workspace(self) -> None:
         try:
@@ -105,15 +110,78 @@ class CaseRepository:
                 connection.execute("BEGIN")
                 if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise WorkspaceError("조사 데이터베이스의 무결성 검사에 실패했습니다.")
-                payload = self._read_payload(connection)
+                # 검출 결과(박스)는 읽지 않고, 결과가 있는 사고만 표시해 둔다.
+                payload, with_objects = self._read_payload(connection, defer_objects=True)
             result = self._decode_payload(payload, workspace=self.workspace)
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             raise WorkspaceError(
                 f"조사 데이터베이스를 읽을 수 없습니다: {self.database_path}\n"
                 "다른 위치의 DB나 JSON은 읽지 않습니다. 백업을 확인해 주세요."
             ) from exc
+        self._generation += 1
+        for case in result[0]:
+            if case.uid in with_objects:
+                case.objects_by_video = self._lazy_objects(case)
         self._adopt_metadata(*result)
         return result[0]
+
+    def _lazy_objects(self, case: InvestigationCase) -> LazyVideoObjects:
+        return LazyVideoObjects(partial(
+            self._load_case_objects, case.uid, tuple(case.videos), self._generation,
+        ))
+
+    def _load_case_objects(
+        self, uid: str, videos: tuple[str, ...], generation: int,
+    ) -> dict[str, dict[str, Any]]:
+        """사고 하나의 검출 결과를 DB에서 읽어 저장 형식 검증·경로 변환까지 한다.
+
+        로드 시 ``__post_init__``이 하던 정규화(영상 경로 표기 맞춤, 없는 영상의 결과
+        제외)를 그대로 적용한다. 다시 열렸거나 교체된 DB에서는 읽지 않는다.
+        """
+        if generation != self._generation:
+            raise WorkspaceError(
+                "조사 데이터를 다시 열어 이전 화면의 검출 결과를 읽을 수 없습니다. "
+                "작업 폴더를 다시 열어 주세요."
+            )
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT json_extract(payload, '$.objects_by_video') FROM cases WHERE uid=?",
+                    (uid,),
+                ).fetchone()
+            raw = json.loads(row[0]) if row is not None and row[0] is not None else {}
+            if not isinstance(raw, dict):
+                raise ValueError("objects_by_video 항목은 JSON 객체여야 합니다.")
+            converted: dict[str, Any] = {}
+            seen: set[str] = set()
+            for path, value in raw.items():
+                target = self._convert_path(path, self.workspace, storing=False)
+                if target.casefold() in seen:
+                    raise ValueError(f"경로 변환 후 중복된 영상 주석이 있습니다: {target}")
+                seen.add(target.casefold())
+                converted[target] = value
+            video_paths = {str(Path(path)).casefold(): path for path in videos}
+            return {
+                video_paths[str(Path(path)).casefold()]: payload
+                for path, payload in normalize_objects_by_video(converted).items()
+                if str(Path(path)).casefold() in video_paths
+            }
+        except WorkspaceError:
+            raise
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            raise WorkspaceError(f"검출 결과를 읽을 수 없습니다: {self.database_path}\n{exc}") from exc
+
+    def release_case_objects(self, cases: list[InvestigationCase]) -> None:
+        """방금 저장한 사고의 검출 결과를 메모리에서 내리고 필요할 때 다시 읽게 한다.
+
+        반드시 이 사고들이 DB와 같은 상태(저장 직후)일 때만 호출한다.
+        """
+        for case in cases:
+            objects = case.objects_by_video
+            if isinstance(objects, LazyVideoObjects) and not objects.loaded:
+                continue
+            if objects:
+                case.objects_by_video = self._lazy_objects(case)
 
     @staticmethod
     def _decode_payload(data: Any, *, workspace: str | Path | None = None) -> tuple[
@@ -323,7 +391,12 @@ class CaseRepository:
             raise WorkspaceError("조사 데이터에 저장할 수 없는 값이 있습니다.") from exc
 
     @staticmethod
-    def _read_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+    def _read_payload(connection: sqlite3.Connection, *, defer_objects: bool = False) -> Any:
+        """저장된 작업공간 데이터를 읽는다.
+
+        ``defer_objects=True``이면 사고별 검출 결과(objects_by_video)는 SQLite에서
+        제외하고 읽어 ``(payload, 검출 결과가 있는 사고 UID 집합)``을 돌려준다.
+        """
         metadata = {
             row["key"]: json.loads(row["value"])
             for row in connection.execute("SELECT key, value FROM workspace_metadata")
@@ -332,15 +405,26 @@ class CaseRepository:
             raise WorkspaceError("조사 데이터베이스의 작업공간 설정이 누락되었습니다.")
         raw_cases = []
         positions: set[int] = set()
-        for row in connection.execute("SELECT uid, position, payload FROM cases ORDER BY position, uid"):
+        with_objects: set[str] = set()
+        query = (
+            "SELECT uid, position, json_remove(payload, '$.objects_by_video') AS payload, "
+            "json_type(payload, '$.objects_by_video') IS NOT NULL AS has_objects "
+            "FROM cases ORDER BY position, uid"
+            if defer_objects else
+            "SELECT uid, position, payload, 0 AS has_objects FROM cases ORDER BY position, uid"
+        )
+        for row in connection.execute(query):
             case = json.loads(row["payload"])
             if not isinstance(case, dict) or case.get("uid") != row["uid"]:
                 raise WorkspaceError("사고 UID와 저장 데이터가 일치하지 않습니다.")
             if row["position"] in positions:
                 raise WorkspaceError("저장된 사고 표시 순서가 올바르지 않습니다.")
             positions.add(row["position"])
+            if row["has_objects"]:
+                with_objects.add(row["uid"])
             raw_cases.append(case)
-        return {**metadata, "cases": raw_cases}
+        payload = {**metadata, "cases": raw_cases}
+        return (payload, with_objects) if defer_objects else payload
 
     @staticmethod
     def _remove_temporary(path: Path | None) -> None:
@@ -850,6 +934,8 @@ class CaseRepository:
         finally:
             self._remove_temporary(staged)
         self._metadata_loaded = False
+        # 교체 전 DB에서 읽은 사고들은 더 이상 검출 결과를 지연 로드하지 못하게 한다.
+        self._generation += 1
 
     def restore(self, source: str | Path) -> None:
         self.activate_restore(self.stage_restore(source))
