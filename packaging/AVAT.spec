@@ -44,6 +44,9 @@ for entry in list(bundle_root.iterdir()):
 for folder in ("01_사고동영상", "02_csv내보내기", "03_Report내보내기"):
     (bundle_root / folder).mkdir(exist_ok=True)
 # 최종 사용자용 안내서를 배포본 최상위에 둔다(업데이트·백업·복원 절차 포함).
+# 구형 Windows 메모장에서도 한글이 깨지지 않도록 UTF-8 BOM과 CRLF로 쓴다.
 guide = root / "packaging" / "사용안내.txt"
 if guide.is_file():
-    (bundle_root / guide.name).write_bytes(guide.read_bytes())
+    (bundle_root / guide.name).write_text(
+        guide.read_text(encoding="utf-8"), encoding="utf-8-sig", newline="\r\n",
+    )
