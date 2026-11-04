@@ -88,7 +88,7 @@ def _saved_cases(window):
 
 
 def _archived_videos(window):
-    return sorted((window.repository.workspace / "systems" / "삭제사고").rglob("*.mp4"))
+    return sorted((window.repository.workspace / "systems" / "사용자데이터" / "삭제사고").rglob("*.mp4"))
 
 
 def _raw_db(window):

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from investigator.runtime_paths import is_frozen, runtime_data_root
+from investigator.user_data import LOG_DIRECTORY, USER_DATA_DIRECTORY
 
 LOGGER = logging.getLogger("investigator")
 MAX_LOG_BYTES = 2 * 1024 * 1024
@@ -33,7 +34,8 @@ _hooks_installed = False
 def default_log_directory() -> Path:
     """Keep logs outside a selected workspace, including read-only workspaces."""
     if is_frozen():
-        return runtime_data_root() / "logs"
+        # EXE: 프로그램 파일과 분리된 systems/사용자데이터/logs에 기록한다.
+        return runtime_data_root() / USER_DATA_DIRECTORY / LOG_DIRECTORY
     base = os.environ.get("LOCALAPPDATA")
     if base:
         return Path(base) / "AVAT" / "logs"

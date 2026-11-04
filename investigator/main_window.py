@@ -11,7 +11,7 @@ from threading import Event
 from typing import Any
 from uuid import uuid4
 
-from PySide6.QtCore import QDir, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import QDir, QLockFile, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -51,11 +51,13 @@ from investigator.speed_estimation import SpeedEstimate, estimate_speed
 from investigator.statistics_media import probe_video_fps
 from investigator.storage import (
     CSV_EXPORT_DIRECTORY,
+    DATABASE_DIRECTORY,
     REPORT_EXPORT_DIRECTORY,
     CaseRepository,
     WorkspaceError,
     data_specification_path,
 )
+from investigator.user_data import migrate_workspace_user_data
 from investigator.storage_worker import StorageWorker
 from investigator.theme import PRIMARY, material_icon
 from investigator.video_controller import PlaybackState, VideoController, VideoMetadata
@@ -95,6 +97,13 @@ from investigator.widgets.video_import_dialog import VideoImportDialog
 from investigator.widgets.video_player import VideoPlayerPanel
 from investigator.widgets.video_tools_splitter import VideoToolsSplitter
 from investigator.widgets.workspace_menu import ProjectTabBar, ViewModeSwitch, WorkspaceMenuBar
+
+
+WORKSPACE_LOCK_FILENAME = "작업관리.lock"
+
+
+class WorkspaceLockedError(WorkspaceError):
+    """다른 AVAT 창이 같은 작업 폴더를 사용 중이다."""
 
 
 def default_workspace() -> Path:
@@ -151,6 +160,9 @@ class MainWindow(DetectionMixin, QMainWindow):
         # 마지막 전체 스캔에서 본 영상과 누락 영상(새로고침 안내·감시 시작에 재사용).
         self._last_scan_video_paths: set[str] = set()
         self._last_missing_paths: set[str] = set()
+        # 작업 폴더별 중복 실행 방지 잠금과, 자동 복원 실패 시 백업 덮어쓰기 보호.
+        self._workspace_locks: dict[Path, QLockFile] = {}
+        self._latest_backup_protected = False
         restore_video_state = selected == tabs_state.active_folder or (is_frozen() and workspace is None)
         self._active_video_folder: str | None = tabs_state.active_video_folder if restore_video_state else None
         self._video_folder_order = list(tabs_state.video_folder_order) if restore_video_state else []
@@ -436,6 +448,10 @@ class MainWindow(DetectionMixin, QMainWindow):
         backup_action = QAction("조사 데이터 백업…", self)
         backup_action.triggered.connect(self.backup_workspace)
         file_menu.addAction(backup_action)
+        # 앱 업데이트·재설치 후 백업 파일로 조사 데이터를 되살린다.
+        self.restore_action = QAction("조사 데이터 불러오기…", self)
+        self.restore_action.triggered.connect(self.restore_workspace)
+        file_menu.addAction(self.restore_action)
         file_menu.addSeparator()
         exit_action = QAction("종료", self)
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
@@ -519,8 +535,15 @@ class MainWindow(DetectionMixin, QMainWindow):
 
         self._workspace_load_failed = False
         self.case_list.set_workspace(self.repository.workspace)
+        restored_from_backup = False
         try:
             project = self._session
+            # 같은 작업 폴더를 두 AVAT 창이 동시에 편집하지 못하게 먼저 잠근다.
+            self._acquire_workspace_lock()
+            if self.repository.workspace.is_dir():
+                # 이전 배치(systems/backups, systems/삭제사고)를 사용자데이터 폴더로 옮긴다.
+                self._disk_operation(migrate_workspace_user_data, self.repository.workspace)
+                restored_from_backup = self._restore_latest_backup_if_missing()
             self.cases = (
                 self._disk_operation(self.repository.load, require_existing=True) if project.restored
                 else self._disk_operation(self.repository.load)
@@ -529,7 +552,9 @@ class MainWindow(DetectionMixin, QMainWindow):
             self._mark_saved(active_uid)
             self._install_form(self.repository.form_definition)
         except WorkspaceError as exc:
-            if not self._session.restored:
+            if isinstance(exc, WorkspaceLockedError):
+                QMessageBox.warning(self, "작업 폴더 사용 중", str(exc))
+            elif not self._session.restored:
                 QMessageBox.critical(self, "작업 폴더 오류", str(exc))
             self._workspace_load_failed = True
             self.cases = []
@@ -543,7 +568,8 @@ class MainWindow(DetectionMixin, QMainWindow):
             self.investigation.completion_badge.setText("읽기 오류")
             self._set_workflow_enabled(False)
             self.statusBar().showMessage(
-                f"{exc}\n원본 데이터는 변경하지 않았습니다. 작업 폴더를 다시 열어 주세요.", 0
+                f"{exc}\n원본 데이터는 변경하지 않았습니다. 작업 폴더를 다시 열거나 "
+                "파일 → 조사 데이터 불러오기…로 백업을 불러와 주세요.", 0
             )
             return False
         if active_uid not in {case.uid for case in self.cases}:
@@ -563,7 +589,63 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._apply_video_folder_scope()
         self._show_current_case(open_video=True)
         self._set_workflow_enabled(True)
+        if restored_from_backup:
+            self.statusBar().showMessage(
+                f"조사 데이터 DB가 없어 최신 백업 파일에서 사고 {len(self.cases):,}건을 복원했습니다: "
+                f"{self.repository.latest_backup_path.name}", 20000,
+            )
         return True
+
+    def _restore_latest_backup_if_missing(self) -> bool:
+        """재설치 후처럼 DB가 없고 최신 백업이 있으면 자동으로 복원한다.
+
+        백업을 읽지 못하면 백업 파일을 그대로 두고, 이번 실행 동안은 자동 백업이
+        그 파일을 빈 데이터로 덮어쓰지 않도록 보호한다.
+        """
+        try:
+            return bool(self._disk_operation(self.repository.restore_latest_if_missing))
+        except WorkspaceError as exc:
+            self._latest_backup_protected = True
+            QMessageBox.warning(
+                self, "백업 자동 복원 실패",
+                f"{exc}\n\n백업 파일은 그대로 두었습니다. "
+                "파일 → 조사 데이터 불러오기…로 다시 시도할 수 있습니다.",
+            )
+            return False
+
+    def _acquire_workspace_lock(self) -> None:
+        """같은 작업 폴더를 두 AVAT 창이 동시에 편집하지 못하게 한다."""
+        workspace = self.repository.workspace
+        if workspace in self._workspace_locks or not workspace.is_dir():
+            return
+        directory = workspace / DATABASE_DIRECTORY
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return  # 폴더를 만들 수 없으면 이어지는 로드가 원인을 안내한다.
+        lock = QLockFile(str(directory / WORKSPACE_LOCK_FILENAME))
+        # 오래 켜 둔 창의 잠금을 시간만으로 '버려진 잠금'으로 보지 않는다.
+        # (잠근 프로세스가 끝났는지로만 판단한다.)
+        lock.setStaleLockTime(0)
+        if lock.tryLock(0):
+            self._workspace_locks[workspace] = lock
+            return
+        if lock.error() == QLockFile.LockError.LockFailedError:
+            raise WorkspaceLockedError(
+                "다른 AVAT 창에서 이 작업 폴더를 사용 중입니다.\n"
+                "이미 열린 창을 사용하거나, 그 창을 닫은 뒤 다시 실행해 주세요."
+            )
+        # 권한 문제 등으로 잠금 파일을 만들 수 없으면 사용을 막지 않는다.
+
+    def _release_workspace_locks(self, *, keep: Path | None = None) -> None:
+        for workspace in [path for path in self._workspace_locks if path != keep]:
+            self._workspace_locks.pop(workspace).unlock()
+
+    def _backup_latest_before_change(self) -> Path | None:
+        """삭제·경로 복구처럼 되돌리기 어려운 작업 전에 최신 백업 1개를 갱신한다."""
+        if self._latest_backup_protected:
+            return None
+        return self._disk_operation(self.repository.backup_latest)
 
     def _install_form(self, definition: FormDefinition) -> None:
         old = self.investigation
@@ -880,9 +962,28 @@ class MainWindow(DetectionMixin, QMainWindow):
             return False
         if not self._workspace_load_failed and not self._save(show_message=False):
             return False
+        self._refresh_latest_backup_quietly()
         self._capture_project()
         self.video_controller.close_video()
         return True
+
+    def _refresh_latest_backup_quietly(self, *, closing: bool = False) -> None:
+        """작업 폴더를 떠나거나 종료할 때 바뀐 데이터가 있으면 최신 백업 1개를 갱신한다.
+
+        재설치·업데이트 후 이 파일로 복원할 수 있다. 실패해도 종료를 막지 않는다.
+        종료 중에는 중첩 이벤트 루프(타이머·신호 처리)를 돌리지 않도록 바로 실행한다.
+        이때는 디스크 작업 스레드에 진행 중인 작업이 없다(_commit_in_progress 확인 후).
+        """
+        if (self._workspace_load_failed or self._latest_backup_protected
+                or self._storage_worker.closed):
+            return  # 종료 처리가 다시 불린 경우 등에는 할 일이 없다.
+        try:
+            if closing:
+                self.repository.backup_latest(only_if_changed=True)
+            else:
+                self._disk_operation(self.repository.backup_latest, only_if_changed=True)
+        except WorkspaceError:
+            logging.getLogger(__name__).warning("latest_backup_refresh_failed", exc_info=True)
 
     def _activate_workspace(self, project: ProjectSession) -> bool:
         self._session = project
@@ -946,6 +1047,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._switching_project = True
         previous_project = self._session
         previous_folders = (self._active_video_folder, list(self._video_folder_order), dict(self._folder_view_states))
+        previous_protected = self._latest_backup_protected
         try:
             if not self._leave_project():
                 return False
@@ -953,13 +1055,18 @@ class MainWindow(DetectionMixin, QMainWindow):
             self._active_video_folder = None
             self._video_folder_order = []
             self._folder_view_states = {}
+            self._latest_backup_protected = False
             # 이전 프로젝트 사고로 목록을 다시 만들지 않고 범위만 초기화한다.
             self.case_list.set_video_filter(None, rebuild=False)
             self.folder_watcher.remove_directory(previous_project.repository.workspace)
             if self._activate_workspace(project):
+                # 새 작업 폴더를 연 뒤에만 이전 작업 폴더의 중복 실행 잠금을 푼다.
+                self._release_workspace_locks(keep=self.repository.workspace)
                 return True
             self._active_video_folder, self._video_folder_order, self._folder_view_states = previous_folders
+            self._latest_backup_protected = previous_protected
             self._activate_workspace(previous_project)
+            self._release_workspace_locks(keep=previous_project.repository.workspace)
             self.statusBar().showMessage("작업 폴더를 열지 못해 이전 작업 폴더를 유지했습니다.", 5000)
             return False
         finally:
@@ -1127,8 +1234,8 @@ class MainWindow(DetectionMixin, QMainWindow):
                 workspace_root=self.repository.workspace,
             ))
             # A recoverable, consistent backup includes committed WAL content.
-            backup = self.repository.backup_directory / f"영상경로변경전-{uuid4().hex}.db"
-            self._disk_operation(self.repository.backup, backup)
+            # 백업은 작업 폴더당 최신 1개만 유지한다(사용자데이터/백업/작업관리_백업.db).
+            backup = self._backup_latest_before_change()
             self._save_candidates(
                 candidates, self.current_uid, auto_import_exclusions=exclusions, prepare_off_thread=True,
             )
@@ -1168,7 +1275,7 @@ class MainWindow(DetectionMixin, QMainWindow):
             self._watch_active_project()
         self.statusBar().showMessage(
             f"영상 {len(mapping):,}개의 경로와 마커·속도 지점·회전·검출 결과를 함께 복구했습니다. "
-            f"변경 전 백업: {backup.name}", 10000,
+            + (f"변경 전 백업: {backup.name}" if backup is not None else ""), 10000,
         )
         return True
 
@@ -1816,8 +1923,8 @@ class MainWindow(DetectionMixin, QMainWindow):
             removed_links = {key(path) for path in plan.excluded_paths}
             exclusions.update(removed_links)
             close_player = playing_path is not None and key(playing_path) in {key(path) for path in movable}
-            backup = self.repository.backup_directory / f"삭제전-{uuid4().hex}.db"
-            self._disk_operation(self.repository.backup, backup)
+            # 삭제 전 상태를 최신 백업 1개로 남긴다(사용자데이터/백업/작업관리_백업.db).
+            self._backup_latest_before_change()
             # Release decoder/audio file handles before attempting Windows moves.
             if close_player:
                 self.video_controller.close_video()
@@ -2466,7 +2573,13 @@ class MainWindow(DetectionMixin, QMainWindow):
     def backup_workspace(self) -> None:
         if not self._save(show_message=False):
             return
-        suggested = self.repository.backup_directory.parent / f"investigations_backup_{datetime.now():%Y%m%d_%H%M%S}.db"
+        # 기본 위치는 작업 폴더당 하나만 유지하는 최신 백업 파일이다(덮어쓰기).
+        # 다른 위치(외장 저장장치 등)를 고르면 그곳에 별도 사본을 만든다.
+        suggested = self.repository.latest_backup_path
+        try:
+            suggested.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         path, _ = QFileDialog.getSaveFileName(
             self, "조사 데이터 백업", str(suggested), "SQLite 파일 (*.db)"
         )
@@ -2479,7 +2592,90 @@ class MainWindow(DetectionMixin, QMainWindow):
         except WorkspaceError as exc:
             QMessageBox.critical(self, "백업 오류", str(exc))
             return
+        if Path(destination) == self.repository.latest_backup_path:
+            self._latest_backup_protected = False
         self.statusBar().showMessage(f"조사 데이터를 백업했습니다: {destination}", 5000)
+
+    def restore_workspace(self) -> None:
+        """백업 파일(.db)로 현재 작업 폴더의 조사 데이터를 바꾼다."""
+        if self._commit_in_progress or self._switching_project or self._video_import_in_progress:
+            return
+        if not self._confirm_stop_detection():
+            return
+        latest = self.repository.latest_backup_path
+        start = latest if latest.is_file() else (
+            latest.parent if latest.parent.is_dir() else self.repository.workspace
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "조사 데이터 불러오기", str(start), "SQLite 파일 (*.db);;모든 파일 (*.*)"
+        )
+        if not path:
+            return
+        answer = QMessageBox.question(
+            self,
+            "조사 데이터 불러오기",
+            "현재 작업 폴더의 조사 데이터를 선택한 백업 파일의 내용으로 바꿉니다.\n"
+            "바꾸기 전 현재 데이터는 최신 백업 파일로 저장합니다"
+            "(읽을 수 없는 데이터는 다른 이름으로 보존합니다).\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self._workspace_load_failed and not self._save(show_message=False):
+            return
+        broken = self._workspace_load_failed and self.repository.database_path.exists()
+        keep_current_as = (
+            self.repository.database_path.with_name(
+                f"작업관리_읽기오류_{datetime.now():%Y%m%d_%H%M%S}.db"
+            ) if broken else None
+        )
+        staged: Path | None = None
+        try:
+            # 선택한 파일을 먼저 검증된 복사본으로 확보한 뒤 현재 데이터를 최신 백업으로 남긴다.
+            staged = self._disk_operation(self.repository.stage_restore, path)
+            if not broken and not self._latest_backup_protected:
+                self._disk_operation(self.repository.backup_latest)
+            self.video_controller.close_video()
+            self._disk_operation(
+                self.repository.activate_restore, staged, keep_current_as=keep_current_as,
+            )
+            staged = None
+        except WorkspaceError as exc:
+            if staged is not None:
+                staged.unlink(missing_ok=True)
+            QMessageBox.critical(
+                self, "조사 데이터 불러오기 실패", f"{exc}\n\n현재 조사 데이터는 바꾸지 않았습니다.",
+            )
+            if not self._workspace_load_failed:
+                self._show_current_case(open_video=True)
+            return
+        self._latest_backup_protected = False
+        self._reload_after_restore()
+        message = f"백업 파일에서 조사 데이터를 불러왔습니다(사고 {len(self.cases):,}건): {Path(path).name}"
+        if keep_current_as is not None:
+            message += f" · 읽을 수 없던 기존 데이터 보존: {keep_current_as.name}"
+        self.statusBar().showMessage(message, 15000)
+
+    def _reload_after_restore(self) -> None:
+        """교체된 DB로 현재 작업 폴더를 처음부터 다시 읽는다(편집 기록·화면 상태 초기화)."""
+        self._object_edit_history = type(self._object_edit_history)()
+        self._folder_view_states = {}
+        self._case_revisions.clear()
+        self._deferred_reorders.clear()
+        self._statistics_media_cache.clear()
+        self._statistics_media_attempted.clear()
+        self.current_uid = None
+        self.cases = []
+        project = self._session
+        project.cases = []
+        project.current_uid = None
+        project.restored = False
+        loaded = self._load_workspace()
+        project.initialized = loaded
+        project.load_failed = not loaded
+        self._watch_active_project()
+        self._invalidate_statistics()
 
     def _video_opened(self, metadata: VideoMetadata) -> None:
         try:
@@ -2679,6 +2875,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         if not self._workspace_load_failed and not self._save(show_message=False):
             event.ignore()
             return
+        self._refresh_latest_backup_quietly(closing=True)
         self._project_tabs_timer.stop()
         self._save_project_tabs()
         self.video_controller.close_video()
@@ -2697,6 +2894,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         self._watch_refresh_timer.stop()
         self.folder_watcher.shutdown()
         self._storage_worker.shutdown()
+        self._release_workspace_locks()
         event.accept()
 
 

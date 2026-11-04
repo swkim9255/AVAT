@@ -19,6 +19,7 @@ from investigator.csv_specification import build_specification, csv_export_heade
 from investigator.form_definition import FormDefinition
 from investigator.models import InvestigationCase
 from investigator.speed_csv import speed_csv_path, write_speed_csv
+from investigator.user_data import latest_backup_path, workspace_backup_directory
 from investigator.video_import import MANAGED_VIDEO_DIRECTORY
 
 DATABASE_DIRECTORY = f"{MANAGED_VIDEO_DIRECTORY}/작업관리"
@@ -65,7 +66,10 @@ class CaseRepository:
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.database_path = self.workspace / DATABASE_DIRECTORY / DATABASE_FILENAME
-        self.backup_directory = self.workspace / SYSTEMS_DIRECTORY / "backups"
+        # 사용자 데이터는 systems/사용자데이터 한 폴더에 둔다(앱 교체 시 이 폴더만 보존).
+        self.backup_directory = workspace_backup_directory(self.workspace)
+        # 작업 폴더마다 가장 최신 백업 1개만 유지한다.
+        self.latest_backup_path = latest_backup_path(self.workspace)
         self.auto_import_exclusions: set[str] = set()
         self.form_definition = FormDefinition.default().seal()
         self.initial_form_definition = FormDefinition.default().seal()
@@ -680,6 +684,123 @@ class CaseRepository:
         finally:
             self._remove_temporary(temporary_path)
         return destination
+
+    def backup_latest(self, *, only_if_changed: bool = False) -> Path | None:
+        """작업 폴더당 하나만 유지하는 최신 백업 파일을 현재 데이터로 갱신한다.
+
+        DB가 아직 없으면 빈 DB를 만들어 기존 백업을 덮어쓰지 않도록 건너뛴다.
+        ``only_if_changed``이면 마지막 백업 이후 DB가 바뀌지 않았을 때 건너뛴다.
+        """
+        if not self.database_path.exists():
+            return None
+        target = self.latest_backup_path
+        if only_if_changed and target.is_file():
+            pending = any(
+                Path(str(self.database_path) + suffix).exists() for suffix in ("-wal", "-journal")
+            )
+            if not pending and target.stat().st_mtime_ns >= self.database_path.stat().st_mtime_ns:
+                return None
+        return self.backup(target)
+
+    def _quiesce_database(self) -> None:
+        """교체 전에 WAL을 본 파일에 반영하고 SQLite 보조 파일이 남지 않았는지 확인한다."""
+        if self.database_path.exists():
+            with self._connection() as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if any(
+            Path(str(self.database_path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")
+        ):
+            raise WorkspaceError(
+                "조사 데이터가 다른 프로그램에서 사용 중이라 교체할 수 없습니다. "
+                "다른 AVAT 창을 닫은 뒤 다시 시도해 주세요."
+            )
+
+    def stage_restore(self, source: str | Path) -> Path:
+        """백업 파일을 검증한 임시 복사본으로 준비한다(현재 데이터는 아직 바꾸지 않음).
+
+        선택한 파일이 최신 백업 파일 자체여도, 이후 현재 데이터를 최신 백업으로
+        저장하기 전에 별도 복사본을 확보해 두므로 안전하다.
+        """
+        source_path = Path(source).expanduser().resolve()
+        if source_path == self.database_path.resolve():
+            raise WorkspaceError("현재 사용 중인 조사 데이터 파일은 불러올 수 없습니다.")
+        if not source_path.is_file():
+            raise WorkspaceError(f"백업 파일을 찾을 수 없습니다: {source_path}")
+        self.ensure_workspace()
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.database_path.parent, prefix=".avat-restore.", suffix=".db", delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+            # 읽기 전용으로 열어 원본 백업 파일은 바꾸지 않고 일관된 복사본을 만든다.
+            source_connection = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True, timeout=5)
+            try:
+                target = sqlite3.connect(temporary_path)
+                try:
+                    source_connection.backup(target)
+                    target.execute("PRAGMA journal_mode=DELETE")
+                finally:
+                    target.close()
+            finally:
+                source_connection.close()
+            # AVAT 형식·무결성·조사 데이터 구조를 모두 검증한다. 실패하면 현재 DB를 유지한다.
+            with self._connection(temporary_path, wal=False) as connection, connection:
+                connection.execute("BEGIN")
+                if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise WorkspaceError("백업 파일의 무결성 검사에 실패했습니다.")
+                payload = self._read_payload(connection)
+            self._decode_payload(payload, workspace=self.workspace)
+            with temporary_path.open("r+b") as handle:
+                os.fsync(handle.fileno())
+        except WorkspaceError:
+            self._remove_temporary(temporary_path)
+            raise
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            self._remove_temporary(temporary_path)
+            raise WorkspaceError(
+                f"AVAT 조사 데이터 백업 파일이 아니거나 읽을 수 없습니다: {source_path}\n{exc}"
+            ) from exc
+        return temporary_path
+
+    def activate_restore(self, staged: Path, *, keep_current_as: Path | None = None) -> None:
+        """준비한 복사본을 현재 조사 데이터로 원자적으로 교체한다.
+
+        ``keep_current_as``를 주면 기존 DB를 지우지 않고 그 이름으로 옮겨 보존한다
+        (읽을 수 없는 DB를 복구할 때 원본을 남기기 위함).
+        """
+        try:
+            if keep_current_as is not None and self.database_path.exists():
+                for suffix in ("-wal", "-shm", "-journal"):
+                    auxiliary = Path(str(self.database_path) + suffix)
+                    if auxiliary.exists():
+                        os.replace(auxiliary, Path(str(keep_current_as) + suffix))
+                os.replace(self.database_path, keep_current_as)
+            else:
+                self._quiesce_database()
+            os.replace(staged, self.database_path)
+        except (OSError, sqlite3.Error) as exc:
+            raise WorkspaceError(f"조사 데이터를 교체하지 못했습니다: {self.database_path}\n{exc}") from exc
+        finally:
+            self._remove_temporary(staged)
+        self._metadata_loaded = False
+
+    def restore(self, source: str | Path) -> None:
+        self.activate_restore(self.stage_restore(source))
+
+    def restore_latest_if_missing(self) -> bool:
+        """조사 데이터 DB가 없고 최신 백업이 있으면 백업으로 복원한다(재설치 후 자동 복구)."""
+        if self.database_path.exists() or not self.latest_backup_path.is_file():
+            return False
+        if any(
+            Path(str(self.database_path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")
+        ):
+            raise WorkspaceError(
+                "조사 데이터 DB 없이 보조 파일(-wal 등)만 남아 있어 자동 복원을 중단했습니다. "
+                f"{self.database_path.parent} 폴더를 확인해 주세요."
+            )
+        self.restore(self.latest_backup_path)
+        return True
 
     @staticmethod
     def _check_backup_destination(destination: Path) -> None:

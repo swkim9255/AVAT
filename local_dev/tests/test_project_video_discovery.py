@@ -146,7 +146,7 @@ def test_startup_relinks_unique_external_copy_before_opening_and_keeps_completed
     assert old not in discovery_window.opened_paths
     assert new in discovery_window.opened_paths
     assert CaseRepository(workspace).load()[0].to_dict() == after
-    assert list((workspace / "systems" / "backups").glob("영상경로변경전-*.db"))
+    assert (workspace / "systems" / "사용자데이터" / "백업" / "작업관리_백업.db").is_file()
 
 
 def test_startup_recursively_discovers_numbered_clips_without_creating_generic_accidents(discovery_window, tmp_path):
@@ -285,7 +285,8 @@ def test_startup_relinks_current_canonical_db_without_schema_conversion(
     assert after["workflow"] == original["workflow"]
     for key in ("markers_by_video", "rotation_by_video", "objects_by_video"):
         assert after[key][new] == original[key][old]
-    backup, = repository.backup_directory.glob("영상경로변경전-*.db")
+    backup = repository.latest_backup_path  # 최신 백업 1개만 유지한다.
+    assert backup.is_file()
     with repository._connection(backup, read_only=True) as connection:
         backed_up = repository._read_payload(connection)
     assert backed_up["schema_version"] == 4

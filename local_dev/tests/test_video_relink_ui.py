@@ -89,7 +89,8 @@ def test_relink_saves_relative_paths_preserves_annotations_order_and_original_ba
     raw = _disk_payload(window)["cases"][-1]
     assert raw["videos"] == ["영상폴더/21년 영상/영상1/전방영상.mp4"]
     assert set(raw["objects_by_video"]) == set(raw["videos"])
-    backup, = window.repository.backup_directory.glob("영상경로변경전-*.db")
+    backup = window.repository.latest_backup_path  # 최신 백업 1개만 유지한다.
+    assert backup.is_file()
     with window.repository._connection(backup, read_only=True) as connection:
         backup_payload = window.repository._read_payload(connection)
     assert backup_payload["cases"][-1]["videos"] != raw["videos"]

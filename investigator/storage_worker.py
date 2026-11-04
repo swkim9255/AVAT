@@ -15,6 +15,10 @@ class StorageWorker(QObject):
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="avat-storage")
         self._closed = False
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def submit(self, operation: Callable, *args: Any, **kwargs: Any) -> Future:
         return self._executor.submit(operation, *args, **kwargs)
 

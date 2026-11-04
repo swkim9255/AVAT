@@ -20,10 +20,28 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from investigator.user_data import QUARANTINE_DIRECTORY, SYSTEMS_DIRECTORY, USER_DATA_DIRECTORY
 from investigator.video_import import VIDEO_EXTENSIONS
 
-QUARANTINE_VIDEO_DIRECTORY = "systems/삭제사고"
+# 삭제한 영상도 사용자 데이터이므로 systems/사용자데이터 아래에 보관한다.
+QUARANTINE_VIDEO_DIRECTORY = f"{SYSTEMS_DIRECTORY}/{USER_DATA_DIRECTORY}/{QUARANTINE_DIRECTORY}"
 QUARANTINE_MANIFEST = "이동기록.json"
+# Windows 기본 설정(긴 경로 미사용)의 경로 최대 길이. 이동 전에 미리 검사한다.
+WINDOWS_MAX_PATH = 259
+
+
+def _long_paths_enabled() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        ) as key:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+    except OSError:
+        return False
 
 
 def _absolute(path: str | Path, *, relative_to: Path | None = None) -> Path:
@@ -206,7 +224,8 @@ class QuarantinedVideos:
                 for item in self.records
             ],
         }
-        temporary = manifest.with_name(f".이동기록-{uuid4().hex}.tmp")
+        # 임시 이름을 짧게 해 Windows 경로 길이 한도에 덜 걸리게 한다.
+        temporary = manifest.with_name(f".이동기록-{uuid4().hex[:8]}.tmp")
         try:
             with temporary.open("x", encoding="utf-8") as writer:
                 json.dump(payload, writer, ensure_ascii=False, indent=2)
@@ -306,11 +325,10 @@ def quarantine_videos(
     result = QuarantinedVideos(project, missing=tuple(missing), case_label=_safe_label(case_label))
     if not sources:
         return result
-    operation = quarantine / f"{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex}"
-    _check_no_links(operation)
-    operation.mkdir(parents=True, exist_ok=False)
-    result.operation_directory = operation
+    # 시각(초)+8자리 고유값이면 충분히 유일하고(이미 있으면 mkdir가 실패), 경로도 짧아진다.
+    operation = quarantine / f"{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
     destination_root = operation / result.case_label if result.case_label else operation
+    planned: list[tuple[Path, tuple[int, int, int, int], Path]] = []
     for source, fingerprint in sources:
         if source.is_relative_to(project):
             relative = source.relative_to(project)
@@ -318,7 +336,22 @@ def quarantine_videos(
             digest = hashlib.sha256(_key(source.parent).encode("utf-8")).hexdigest()[:12]
             parent_label = _safe_label(source.parent.name) or "외부"
             relative = Path("외부영상") / f"{parent_label}-{digest}" / source.name
-        target = destination_root / relative
+        planned.append((source, fingerprint, destination_root / relative))
+    # 파일을 하나도 옮기기 전에 경로 길이를 검사한다. 중간에 실패하면 되돌리기만 하고
+    # 사용자는 원인을 알 수 없으므로, 알기 쉬운 안내로 미리 막는다.
+    if not _long_paths_enabled():
+        manifest_temporary = operation / ".이동기록-00000000.tmp"
+        longest = max([manifest_temporary, *(target for _, _, target in planned)], key=lambda p: len(str(p)))
+        if len(str(longest)) > WINDOWS_MAX_PATH:
+            raise OSError(
+                f"삭제사고 폴더로 옮길 경로가 Windows 최대 길이({WINDOWS_MAX_PATH + 1}자)를 넘습니다. "
+                "작업 폴더를 더 짧은 경로(예: D:\\AVAT)로 옮긴 뒤 다시 시도해 주세요. "
+                f"가장 긴 경로({len(str(longest))}자): {longest}"
+            )
+    _check_no_links(operation)
+    operation.mkdir(parents=True, exist_ok=False)
+    result.operation_directory = operation
+    for source, fingerprint, target in planned:
         result._validate_destination(target)
         if target.exists():
             raise FileExistsError(target)

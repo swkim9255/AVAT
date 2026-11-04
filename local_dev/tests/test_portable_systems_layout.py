@@ -34,13 +34,16 @@ def test_frozen_workspace_and_support_paths(frozen_root):
     assert default_workspace() == frozen_root
     assert runtime_paths.application_root() == frozen_root
     assert runtime_paths.runtime_data_root() == frozen_root / "systems"
-    assert default_project_tabs_path() == frozen_root / "systems/workspace.json"
-    assert default_log_directory() == frozen_root / "systems/logs"
+    # 앱이 쓰는 설정·상태·로그는 프로그램 파일과 분리해 systems/사용자데이터에 모은다.
+    user_data = frozen_root / "systems/사용자데이터"
+    assert default_project_tabs_path() == user_data / "workspace.json"
+    assert default_log_directory() == user_data / "logs"
     settings = detection_settings_store()
-    assert Path(settings.fileName()) == frozen_root / "systems/settings.ini"
+    assert Path(settings.fileName()) == user_data / "settings.ini"
     DetectionSettings(model="local DINO model").save()
     settings.sync()
-    assert (frozen_root / "systems/settings.ini").is_file()
+    assert (user_data / "settings.ini").is_file()
+    assert not (frozen_root / "systems/settings.ini").exists()
     assert not (frozen_root / "settings.ini").exists()
 
 
@@ -50,7 +53,45 @@ def test_frozen_database_is_under_video_root_not_with_program_files(frozen_root)
     assert repository.database_path == frozen_root / "01_사고동영상/작업관리/작업관리.db"
     assert repository.database_path.is_file()
     assert not (frozen_root / "systems/작업관리.db").exists()
-    assert repository.backup_directory == frozen_root / "systems/backups"
+    assert repository.backup_directory == frozen_root / "systems/사용자데이터/백업"
+    assert repository.latest_backup_path == repository.backup_directory / "작업관리_백업.db"
+
+
+def test_legacy_systems_user_data_moves_into_single_user_data_folder(frozen_root):
+    from investigator.user_data import migrate_app_user_data, migrate_workspace_user_data
+
+    systems = frozen_root / "systems"
+    systems.mkdir(exist_ok=True)
+    (systems / "settings.ini").write_text("[detection]\n", encoding="utf-8")
+    (systems / "workspace.json").write_text("{}", encoding="utf-8")
+    (systems / "logs").mkdir()
+    (systems / "logs" / "avat.log").write_text("log", encoding="utf-8")
+    quarantine = systems / "삭제사고" / "20260101-000000-abc" / "이동기록.json"
+    quarantine.parent.mkdir(parents=True)
+    quarantine.write_text("{}", encoding="utf-8")
+    backups = systems / "backups"
+    backups.mkdir()
+    import os
+    for index, name in enumerate(("삭제전-a.db", "영상경로변경전-b.db", "삭제전-c.db")):
+        path = backups / name
+        path.write_bytes(name.encode("utf-8"))
+        os.utime(path, ns=(1_000_000_000 * (index + 1),) * 2)
+    manual = systems / "investigations_backup_수동.db"
+    manual.write_bytes(b"manual")
+
+    assert set(migrate_app_user_data()) == {"settings.ini", "workspace.json", "logs"}
+    assert set(migrate_workspace_user_data(frozen_root)) == {"삭제사고", "작업관리_백업.db"}
+    user_data = systems / "사용자데이터"
+    assert (user_data / "settings.ini").is_file() and not (systems / "settings.ini").exists()
+    assert (user_data / "logs" / "avat.log").read_text(encoding="utf-8") == "log"
+    assert (user_data / "삭제사고" / "20260101-000000-abc" / "이동기록.json").is_file()
+    # 최신 자동 백업 1개만 남기고 이전 버전의 자동 백업은 정리한다.
+    assert (user_data / "백업" / "작업관리_백업.db").read_bytes() == "삭제전-c.db".encode("utf-8")
+    assert not backups.exists()
+    # 사용자가 직접 만든 백업 파일은 건드리지 않는다.
+    assert manual.read_bytes() == b"manual"
+    # 다시 실행해도 아무것도 덮어쓰지 않는다.
+    assert migrate_app_user_data() == [] and migrate_workspace_user_data(frozen_root) == []
 
 
 def test_frozen_caches_are_redirected_without_creating_external_directories(frozen_root, monkeypatch):

@@ -9,6 +9,11 @@ from ctypes import WinDLL
 from pathlib import Path
 
 from investigator.diagnostics import configure_diagnostics, log_runtime_environment
+from investigator.user_data import migrate_app_user_data
+
+# 이전 EXE 배치(systems 바로 아래)의 설정·로그를 systems/사용자데이터로 옮긴다.
+# 로그 파일을 열기 전에 해야 Windows에서 사용 중인 파일 이동 오류가 나지 않는다.
+_migrated_app_data = migrate_app_user_data()
 
 # Install native/Python crash diagnostics before loading Qt or other native DLLs.
 configure_diagnostics()

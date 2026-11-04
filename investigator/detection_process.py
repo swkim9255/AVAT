@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QT
 
 from investigator.object_detection import worker_class_config
 from investigator.runtime_paths import is_frozen, runtime_data_root, worker_command
+from investigator.user_data import SETTINGS_FILENAME, app_user_data_directory
 
 REPOSITORY_ROOT = runtime_data_root()
 SETTINGS_PYTHON = "detection/python"
@@ -50,8 +51,10 @@ MISSING_RUNTIME_HINT = (
 
 
 def detection_settings_store() -> QSettings:
-    if is_frozen():
-        return QSettings(str(runtime_data_root() / "settings.ini"), QSettings.Format.IniFormat)
+    user_data = app_user_data_directory()
+    if user_data is not None:
+        # EXE: 검출 설정도 systems/사용자데이터에 보관해 앱 교체 시 함께 보존한다.
+        return QSettings(str(user_data / SETTINGS_FILENAME), QSettings.Format.IniFormat)
     return QSettings()
 
 

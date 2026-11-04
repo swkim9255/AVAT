@@ -9,12 +9,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile
 
-from investigator.runtime_paths import is_frozen, runtime_data_root
+from investigator.user_data import PROJECT_TABS_FILENAME, app_user_data_directory
 
 
 def default_project_tabs_path() -> Path:
-    if is_frozen():
-        return runtime_data_root() / "workspace.json"
+    user_data = app_user_data_directory()
+    if user_data is not None:
+        # EXE: 프로그램 파일과 분리된 systems/사용자데이터에 둔다.
+        return user_data / PROJECT_TABS_FILENAME
     base = os.environ.get("LOCALAPPDATA")
     return (Path(base) / "AVAT" if base else Path.home() / ".avat") / "project_tabs.json"
 
