@@ -19,6 +19,15 @@ for package in ("torch", "torchvision", "transformers", "safetensors", "tokenize
     binaries.extend(package_binaries)
     hiddenimports.extend(package_imports)
 
+# torch의 C++ 헤더(torch/include, 약 9,300개)는 확장 모듈을 컴파일할 때만 쓰이고 실행에는
+# 필요 없다. 배포본 파일 수의 절반이 넘고 경로가 길어 zip 압축·해제를 느리게 하므로 뺀다.
+def _without_torch_headers(entries):
+    return [entry for entry in entries if Path(entry[1]).parts[:2] != ("torch", "include")]
+
+
+datas = _without_torch_headers(datas)
+binaries = _without_torch_headers(binaries)
+
 model = root / "runtime" / "models" / "grounding-dino-base"
 if not model.is_dir():
     raise SystemExit("Missing local model: runtime/models/grounding-dino-base")
