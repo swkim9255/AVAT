@@ -33,7 +33,7 @@ SPEED_CSV_HEADERS = (
 # Export-only categories: do not change the explanatory UI/engine warnings.
 _WARNING_ORDER = (
     "FPS 미확인", "거리 미입력", "계산 지점 부족", "짧은 구간",
-    "범위 밖 추정", "속도 변화 큼", "속도 계산 불가", "기타 계산 경고",
+    "속도 계산 불가", "기타 계산 경고",
 )
 
 
@@ -47,14 +47,8 @@ def _warning_category(message: str) -> str:
         return "FPS 미확인"
     if "거리가 비어" in message:
         return "거리 미입력"
-    if "2개 지점" in message:
-        return "계산 지점 부족"
     if "1프레임" in message:
         return "짧은 구간"
-    if "범위" in message and ("밖" in message or "떨어" in message):
-        return "범위 밖 추정"
-    if "속도 변화" in message:
-        return "속도 변화 큼"
     if "계산할 수 없" in message or "추정할 수 없" in message:
         return "속도 계산 불가"
     return "기타 계산 경고"
@@ -200,9 +194,13 @@ def iter_speed_rows(
                 if fps is None:
                     warnings.append("FPS 미확인")
                 if event_type == "trigger":
+                    # T 시점 속도는 T가 들어 있는 두 지점의 구간 평균 속도다(계산 못 하면 빈 값).
                     row["trigger_speed_estimate_kph"] = _number(trigger_estimate.kph)
                     row["estimate_method"] = trigger_estimate.method or None
+                    if trigger_estimate.trigger_segment is None:
+                        warnings.append("계산 지점 부족")
                     if missing_distances:
+                        # T 구간 거리가 비면 여기에 포함된다(목록은 영상 전체 기준).
                         row["missing_distance_points"] = list(missing_distances)
                         warnings.append("거리 미입력")
                     if fps:

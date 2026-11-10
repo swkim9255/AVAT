@@ -20,30 +20,90 @@ def test_constant_speed_between_points():
     assert result.kph == pytest.approx(36.0)
     assert result.kph_low < 36.0 < result.kph_high
     assert result.label == "중속(30-60kph)"
-    assert result.method == "등가속도 근사"
+    assert result.method == "구간 평균 속도"
+    assert result.points_used == (30, 45)
+    assert result.velocity_line is None
     assert not result.warnings
 
 
-def test_constant_acceleration_is_recovered_at_trigger():
+def test_accelerating_vehicle_uses_only_the_segment_containing_t():
+    # 가속 중이어도 근사하지 않고 T가 들어 있는 구간(55→70)의 평균 속도만 쓴다.
     fps, v0, accel = 30.0, 5.0, 2.0  # m/s, m/s²
     frames = [0, 20, 38, 55, 70]
     pos = [v0 * (f / fps) + 0.5 * accel * (f / fps) ** 2 for f in frames]
     points = [SpeedPoint(frames[0])] + [
         SpeedPoint(f, pos[i] - pos[i - 1]) for i, f in enumerate(frames) if i
     ]
-    trigger = 62
-    result = estimate_speed(points, fps, trigger)
-    expected = (v0 + accel * trigger / fps) * 3.6
-    assert result.kph == pytest.approx(expected, rel=1e-6)
-    assert result.points_used == (20, 38, 55, 70)
+    result = estimate_speed(points, fps, 62)
+    expected = (pos[4] - pos[3]) / ((70 - 55) / fps) * 3.6
+    assert result.kph == pytest.approx(expected, rel=1e-9)
+    assert result.points_used == (55, 70)
+    assert result.trigger_segment == (55, 70)
 
 
-def test_two_points_use_segment_average_and_warn_when_far_outside():
+def test_t_outside_points_is_not_extrapolated():
     points = [SpeedPoint(100), SpeedPoint(130, 8.0)]
     result = estimate_speed(points, 30.0, trigger_frame=10)
-    assert result.kph == pytest.approx(8.0 / 1.0 * 3.6)
-    assert result.method == "인접 구간 평균 속도"
-    assert any("멀리" in w for w in result.warnings)
+    assert result.kph is None and result.label is None
+    assert result.trigger_segment is None
+    assert result.method == "" and result.points_used == ()
+    assert not result.warnings
+
+
+SPEC_POINTS = [SpeedPoint(100), SpeedPoint(130, 3.0), SpeedPoint(160, 5.0)]
+
+
+@pytest.mark.parametrize(
+    ("trigger", "kph", "segment"),
+    [
+        (100, 10.8, (100, 130)),  # T가 첫 지점이면 첫 구간
+        (130, 10.8, (100, 130)),  # T가 지점과 같으면 그 지점에서 끝나는 앞 구간
+        (145, 18.0, (130, 160)),
+        (160, 18.0, (130, 160)),
+        (99, None, None),
+        (161, None, None),
+    ],
+)
+def test_trigger_speed_is_the_average_of_the_segment_containing_t(trigger, kph, segment):
+    result = estimate_speed(SPEC_POINTS, 30.0, trigger)
+    assert result.trigger_segment == segment
+    if kph is None:
+        assert result.kph is None and result.points_used == ()
+    else:
+        assert result.kph == pytest.approx(kph)
+        assert result.points_used == segment
+        assert result.method == "구간 평균 속도"
+
+
+def test_trigger_range_is_the_segment_plus_minus_one_frame():
+    result = estimate_speed(SPEC_POINTS, 30.0, 100)
+    segment = result.segments[0]
+    assert (result.kph_low, result.kph_high) == (segment.kph_low, segment.kph_high)
+    assert round(result.kph_low, 2) == 10.45
+    assert round(result.kph_high, 2) == 11.17
+
+
+def test_missing_distance_of_t_segment_keeps_segment_but_no_speed():
+    points = [SpeedPoint(100), SpeedPoint(130, 3.0), SpeedPoint(160)]
+    result = estimate_speed(points, 30.0, 145)
+    assert result.kph is None and result.label is None
+    assert result.trigger_segment == (130, 160)
+    assert any("3번" in w for w in result.warnings)
+
+
+def test_many_points_still_use_only_two_points_for_t():
+    points = [SpeedPoint(0)] + [SpeedPoint(30 * i, 5.0 + i) for i in range(1, 5)]
+    result = estimate_speed(points, 30.0, 70)
+    assert len(points) == 5
+    assert result.points_used == (60, 90)
+    assert result.kph == pytest.approx(8.0 * 3.6)
+
+
+def test_unknown_fps_still_reports_t_segment():
+    result = estimate_speed(SPEC_POINTS, 0, 145)
+    assert result.kph is None
+    assert result.trigger_segment == (130, 160)
+    assert any("FPS" in w for w in result.warnings)
 
 
 def test_missing_distance_breaks_chain_and_is_reported():
@@ -83,11 +143,13 @@ def test_label_uncertain_near_boundary():
     assert result.label_uncertain
 
 
-def test_implausible_acceleration_falls_back():
+def test_large_speed_change_does_not_switch_to_another_calculation():
+    # 예전의 1g 초과 대체 계산은 없앴다. T 구간(30→36)의 평균 속도를 그대로 쓴다.
     points = [SpeedPoint(0), SpeedPoint(30, 1.0), SpeedPoint(36, 20.0)]
     result = estimate_speed(points, 30.0, trigger_frame=33)
-    assert result.method == "인접 구간 평균 속도"
-    assert any("g" in w for w in result.warnings)
+    assert result.method == "구간 평균 속도"
+    assert result.kph == pytest.approx(20.0 / (6 / 30.0) * 3.6)
+    assert not any("g)" in w or "속도 변화" in w for w in result.warnings)
 
 
 def test_points_from_json_skips_bad_values():
@@ -148,11 +210,11 @@ def test_single_frame_interval_has_unbounded_upper_sensitivity():
     assert result.warnings
 
 
-def test_negative_extrapolated_speed_is_not_reported_as_stationary():
+def test_t_before_first_point_is_not_reported_as_stationary():
     result = estimate_speed([SpeedPoint(100), SpeedPoint(130, 2), SpeedPoint(160, 4)], 30, 0)
     assert result.kph is None
     assert result.label is None
-    assert result.warnings
+    assert result.trigger_segment is None
 
 
 @pytest.mark.parametrize("distance", [0, -1, float('nan'), float('inf')])

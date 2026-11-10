@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -50,7 +50,7 @@ def _kph(value: float | None) -> str:
 
 
 class SpeedChart(QWidget):
-    """Speed over time: segment averages, the local fit, and the value at T."""
+    """Speed over time: segment averages and the T segment's average at T."""
 
     point_clicked = Signal(int)
 
@@ -172,23 +172,6 @@ class SpeedChart(QWidget):
             if math.isfinite(segment.kph):
                 painter.setPen(QPen(QColor(SPEED_POINT), 2))
                 painter.drawLine(QPointF(x0, y_of(segment.kph)), QPointF(x1, y_of(segment.kph)))
-
-        # Local fit used for T, drawn over the points it used and out to T.
-        if estimate.velocity_line is not None and estimate.points_used and estimate.trigger_frame is not None:
-            c0, c1 = estimate.velocity_line
-            used = [frame / fps for frame in estimate.points_used] + [estimate.trigger_frame / fps]
-            start, end = min(used), max(used)
-            path = QPainterPath()
-            steps = 24
-            for step in range(steps + 1):
-                seconds = start + (end - start) * step / steps
-                point = QPointF(x_of(seconds), y_of(c0 + c1 * seconds))
-                if step:
-                    path.lineTo(point)
-                else:
-                    path.moveTo(point)
-            painter.setPen(QPen(QColor(PRIMARY), 1.5, Qt.PenStyle.DashLine))
-            painter.drawPath(path)
 
         if estimate.trigger_frame is not None:
             x = x_of(estimate.trigger_frame / fps)
@@ -354,7 +337,11 @@ class SpeedPanel(QWidget):
         root.addWidget(self.warning_label)
         self.warning_label.setMinimumWidth(0)
         self.warning_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.sensitivity_note = QLabel("일정 FPS 가정의 참고용 추정 · 범위는 ±0.5프레임 배치 민감도이며 거리·모델 오차는 포함하지 않습니다.", self)
+        self.sensitivity_note = QLabel(
+            "T가 들어 있는 두 지점 사이의 평균 속도입니다(일정 FPS 가정). "
+            "범위는 ±0.5프레임 배치 민감도이며 거리 오차는 포함하지 않습니다.",
+            self,
+        )
         self.sensitivity_note.setToolTip("가변 FPS 영상에서는 프레임 간 시간이 일정하지 않아 결과가 달라질 수 있습니다. 실제 기준물 간 거리와 지점 배치를 확인하세요. 표시 범위는 통계적 신뢰구간이 아닙니다.")
         self.sensitivity_note.setWordWrap(True)
         self.sensitivity_note.setMinimumWidth(0)
@@ -465,18 +452,33 @@ class SpeedPanel(QWidget):
             return
         self.distance_changed.emit(int(frame), value if value > 0 else None)
 
+    def _point_number(self, frame: int) -> int:
+        """표에 보이는 지점 번호(1부터)."""
+        return next((row + 1 for row, point in enumerate(self._points) if point.frame == frame), 0)
+
     def _update_result(self) -> None:
         estimate = self._estimate
+        segment = estimate.trigger_segment
         if estimate.trigger_frame is None:
-            text = f"<span style='color:{MUTED}'>T 트리거를 지정하면 T 시점의 속도를 계산해요.</span>"
+            message = "T 트리거를 지정하면 T 시점의 속도를 계산해요."
+        elif segment is None:
+            message = "T 앞뒤에 지점을 하나씩 두면 T 시점 속도를 계산해요."
+        elif estimate.kph is None and not (math.isfinite(self._fps) and self._fps > 0):
+            message = "영상 FPS를 알 수 없어 T 시점 속도를 계산할 수 없어요."
         elif estimate.kph is None:
-            text = f"<span style='color:{MUTED}'>T 근처에 거리가 입력된 지점이 2개 이상 필요해요.</span>"
+            first, second = (self._point_number(frame) for frame in segment)
+            message = f"T가 들어 있는 구간({first}→{second}번 지점)의 거리를 입력하면 T 시점 속도를 계산해요."
         else:
+            message = None
+        if message is not None:
+            text = f"<span style='color:{MUTED}'>{message}</span>"
+        else:
+            first, second = (self._point_number(frame) for frame in estimate.points_used)
             label = estimate.label or ""
             text = (
                 f"T 시점 약 <b style='font-size:16px'>{_kph(estimate.kph)} km/h</b> "
                 f"<span style='color:{MUTED}'>({_kph(estimate.kph_low)}–{_kph(estimate.kph_high)} km/h · "
-                f"{estimate.method} · 지점 {len(estimate.points_used)}개)</span>"
+                f"{estimate.method} · {first}→{second}번 지점)</span>"
                 f" → <b style='color:{PRIMARY}'>{label}</b>"
             )
         self.result_label.setText(text)
@@ -484,7 +486,7 @@ class SpeedPanel(QWidget):
         if estimate.label_uncertain:
             warnings.insert(
                 0,
-                "추정 범위가 속도 구간 경계에 걸쳐 있어요. 영상을 다시 확인하거나 지점을 더 추가해 주세요.",
+                "T 시점 속도 범위가 속도 구간 경계에 걸쳐 있어요. T 앞뒤 지점의 위치와 거리를 다시 확인해 주세요.",
             )
         self.warning_label.setText("\n".join(f"· {warning}" for warning in warnings))
         self.warning_label.setVisible(bool(warnings))

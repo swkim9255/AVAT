@@ -63,8 +63,11 @@ def test_reference_measurement_shows_table_chart_and_manual_apply(speed_window):
     assert window.playback.timeline.speed_frames == [30, 55, 82, 111, 142]
     assert window.speed_panel.table.rowCount() == 5
     assert window.speed_panel.table.item(0, 1).text() == '31'
-    assert window.speed_panel._estimate.kph == pytest.approx(27.8309316187)
-    assert '28 km/h' in window.speed_panel.result_label.text()
+    # T(126)가 들어 있는 4→5번 지점(111→142, 31프레임) 구간의 평균 속도만 쓴다.
+    assert window.speed_panel._estimate.kph == pytest.approx(8 / (31 / 30) * 3.6)
+    text = window.speed_panel.result_label.text()
+    assert '28 km/h' in text
+    assert '구간 평균 속도 · 4→5번 지점' in text
     assert window.current_case.values.get('trigger_vehicle_speed') is None
     window.speed_panel.apply_button.click()
     assert window.current_case.values['trigger_vehicle_speed'] == '저속(10-30kph)'
@@ -209,15 +212,16 @@ def test_applying_over_edr_requires_confirmation_and_corrects_source(speed_windo
     assert window.current_case.values['trigger_vehicle_speed'] == '저속(10-30kph)'
 
 
-@pytest.mark.parametrize('trigger_frame,has_warnings', [(126, False), (0, True)])
+@pytest.mark.parametrize('clear_distance,has_warnings', [(False, False), (True, True)])
 def test_apply_dialog_only_mentions_warnings_when_present(
-    speed_window, monkeypatch, trigger_frame, has_warnings,
+    speed_window, monkeypatch, clear_distance, has_warnings,
 ):
     window = speed_window
     measure(window)
-    if window.current_case.trigger_frame != trigger_frame:
-        window.video_controller.seek(trigger_frame)
-        window.set_trigger_marker()
+    if clear_distance:
+        # T 구간(111→142)과 무관한 지점의 거리를 비워 경고만 생기게 한다.
+        window.set_speed_distance(55, None)
+    assert window.speed_panel._estimate.kph is not None
     assert bool(window.speed_panel._estimate.warnings) is has_warnings
     window._field_changed('trigger_vehicle_speed_source', 'EDR')
     messages = []

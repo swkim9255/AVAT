@@ -1,38 +1,28 @@
-"""Estimate the vehicle speed at the trigger moment from user-placed reference points.
+"""사용자가 찍은 기준 지점으로 구간별 평균 속도와 T(트리거) 시점 속도를 계산한다.
 
-The investigator steps through the video and adds a *speed point* every time the
-camera vehicle passes a reference feature on the road (the end of a lane dash,
-a crosswalk stripe, a pole …) and types the real distance between that feature
-and the previous one. Each consecutive pair of points is a segment with a known
-distance and a measured duration, i.e. an average speed.
+조사자는 영상을 넘기며 차량이 도로의 기준물(차선 끝, 횡단보도 줄, 기둥 등)을
+지날 때마다 *속도 지점*을 추가하고, 바로 앞 지점과의 실제 거리를 입력한다.
+연속한 두 지점은 거리와 걸린 시간을 아는 구간이므로 평균 속도를 구할 수 있다.
 
-The speed *at* the trigger frame is then estimated from the points nearest to
-it: with three or more points a constant-acceleration (quadratic) position
-model is fitted and differentiated at T; with two points the segment average is
-used. A ±0.5-frame placement assumption supplies a sensitivity range, not a
-statistical confidence interval or a guarantee of measurement accuracy. Real
-distance error, variable-frame-rate timing and model error are not covered.
+T 시점 속도는 추정하지 않는다. T가 들어 있는 두 지점(A.frame < T ≤ B.frame,
+T가 첫 지점과 같으면 첫 구간)의 거리가 입력된 경우에만 그 구간의 평균 속도를
+T 시점 속도로 쓴다. 지점을 여러 개 찍는 것은 구간별 속도 추세를 보기 위한 것이며,
+T 계산에는 항상 두 지점만 쓴다. 범위는 각 지점 ±0.5프레임 배치(구간 길이 ±1프레임)
+민감도이며 통계적 신뢰구간이나 거리 오차를 뜻하지 않는다.
 
-This module is pure Python so it can be unit-tested without Qt.
+Qt 없이 단위 테스트할 수 있도록 순수 Python으로 둔다.
 """
 
 from __future__ import annotations
 
-import itertools
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from investigator.schema import TRIGGER_VEHICLE_SPEED_CHOICES
 
 MS_TO_KPH = 3.6
-#: Points used around T for the local fit. More points smooth noise but blur
-#: genuine acceleration changes far from the trigger.
-FIT_WINDOW = 4
-#: Conservative fallback threshold for a fit, not a physical acceleration limit.
-MAX_PLAUSIBLE_ACCELERATION = 9.81
-#: Enumerate corner trials of a ±0.5-frame placement-sensitivity model.
-EXHAUSTIVE_BOUND_POINTS = 8
+TRIGGER_METHOD = "구간 평균 속도"
 
 STOPPED = TRIGGER_VEHICLE_SPEED_CHOICES[0].value
 CREEP = TRIGGER_VEHICLE_SPEED_CHOICES[1].value
@@ -84,8 +74,10 @@ class SpeedEstimate:
     kph_high: float | None = None
     method: str = ""
     points_used: tuple[int, ...] = ()
-    #: Coefficients of v(t) = c0 + c1·t in km/h around T, for plotting the fit.
+    #: 예전 근사 곡선용 필드. 이제는 항상 None이다(그래프 점선을 그리지 않음).
     velocity_line: tuple[float, float] | None = None
+    #: T가 들어 있는 구간의 두 지점 프레임. 거리가 비어 있어도 채우고, 구간이 없으면 None.
+    trigger_segment: tuple[int, int] | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -147,91 +139,21 @@ def _segment_kph(distance: float, seconds: float) -> float:
     return math.inf if seconds <= 0 else distance / seconds * MS_TO_KPH
 
 
-def _chains(points: Sequence[SpeedPoint]) -> list[list[tuple[int, float]]]:
-    """Split points into runs whose consecutive distances are all known.
+def _trigger_segment(ordered: list[SpeedPoint], trigger: int) -> tuple[SpeedPoint, SpeedPoint] | None:
+    """T가 들어 있는 인접 두 지점(A.frame < T ≤ B.frame)을 찾는다.
 
-    Each chain is a list of ``(frame, cumulative_metres)`` starting at 0.
+    T가 지점과 같은 프레임이면 그 지점에서 끝나는 앞 구간을 쓰고, T가 첫 지점과
+    같으면 첫 구간을 쓴다. 지점이 2개 미만이거나 T가 지점 범위 밖이면 None이다.
     """
 
-    chains: list[list[tuple[int, float]]] = []
-    current: list[tuple[int, float]] = []
-    for index, point in enumerate(points):
-        distance = _usable_distance(point) if index else None
-        if current and distance is not None and point.frame > current[-1][0]:
-            current.append((point.frame, current[-1][1] + distance))
-            continue
-        if len(current) >= 2:
-            chains.append(current)
-        current = [(point.frame, 0.0)]
-    if len(current) >= 2:
-        chains.append(current)
-    return chains
-
-
-def _fit_velocity(times: Sequence[float], positions: Sequence[float], at: float) -> tuple[float, float, float]:
-    """Return (velocity m/s at ``at``, slope c1 of v(t), acceleration) from a fit.
-
-    Two points: constant speed. Three or more: least-squares quadratic in time,
-    centred on ``at`` for numerical stability.
-    """
-
-    if len(times) == 2:
-        velocity = (positions[1] - positions[0]) / (times[1] - times[0])
-        return velocity, 0.0, 0.0
-    origin = times[len(times) // 2]
-    scale = max(times) - min(times)
-    if scale <= 0:
-        raise ZeroDivisionError("지점 시간이 너무 가까워 계산할 수 없습니다.")
-    xs = [(t - origin) / scale for t in times]
-    # Normal equations for s = a + b·x + c·x².
-    sums = [sum(x**power for x in xs) for power in range(5)]
-    rhs = [sum(s * x**power for s, x in zip(positions, xs, strict=True)) for power in range(3)]
-    matrix = [
-        [sums[0], sums[1], sums[2]],
-        [sums[1], sums[2], sums[3]],
-        [sums[2], sums[3], sums[4]],
-    ]
-    _, b, c = _solve3(matrix, rhs)
-    velocity = (b + 2 * c * ((at - origin) / scale)) / scale
-    acceleration = 2 * c / scale**2
-    return velocity, acceleration, acceleration
-
-
-def _solve3(matrix: list[list[float]], rhs: list[float]) -> tuple[float, float, float]:
-    """Solve a 3×3 linear system with Cramer's rule."""
-
-    def det(m: list[list[float]]) -> float:
-        return (
-            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
-        )
-
-    base = det(matrix)
-    if abs(base) < 1e-12:
-        raise ZeroDivisionError("지점 시간이 너무 가까워 계산할 수 없습니다.")
-    results = []
-    for column in range(3):
-        replaced = [row[:] for row in matrix]
-        for row in range(3):
-            replaced[row][column] = rhs[row]
-        results.append(det(replaced) / base)
-    return results[0], results[1], results[2]
-
-
-def _window(chain: list[tuple[int, float]], trigger: int) -> list[tuple[int, float]]:
-    """The ``FIT_WINDOW`` points nearest to T, kept in time order."""
-
-    if len(chain) <= FIT_WINDOW:
-        return chain
-    best_start = min(
-        range(len(chain) - FIT_WINDOW + 1),
-        key=lambda start: (
-            max(abs(frame - trigger) for frame, _ in chain[start : start + FIT_WINDOW]),
-            -start,
-        ),
-    )
-    return chain[best_start : best_start + FIT_WINDOW]
+    if len(ordered) < 2:
+        return None
+    if trigger == ordered[0].frame:
+        return ordered[0], ordered[1]
+    for start, end in zip(ordered, ordered[1:], strict=False):
+        if start.frame < trigger <= end.frame:
+            return start, end
+    return None
 
 
 def estimate_speed(
@@ -239,10 +161,13 @@ def estimate_speed(
     fps: float,
     trigger_frame: int | None,
 ) -> SpeedEstimate:
-    """Compute segment speeds and the speed at ``trigger_frame``."""
+    """Compute segment speeds and the average speed of the segment containing T."""
 
     ordered = normalize_points(points)
     estimate = SpeedEstimate(trigger_frame=trigger_frame)
+    trigger_pair = None if trigger_frame is None else _trigger_segment(ordered, trigger_frame)
+    if trigger_pair is not None:
+        estimate.trigger_segment = (trigger_pair[0].frame, trigger_pair[1].frame)
     if fps <= 0 or not math.isfinite(fps):
         if ordered:
             estimate.warnings.append("영상 FPS를 알 수 없어 속도를 계산할 수 없어요.")
@@ -276,117 +201,20 @@ def estimate_speed(
             "거리가 비어 있는 지점이 있어요: " + ", ".join(f"{number}번" for number in missing)
         )
 
-    if trigger_frame is None:
+    if trigger_pair is None:
         return estimate
-    chains = _chains(ordered)
-    if not chains:
-        if ordered:
-            estimate.warnings.append("거리가 입력된 구간이 2개 지점 이상 이어져야 T 속도를 계산해요.")
+    # T 구간의 거리(A→B)가 있으면 그 구간 평균 속도와 ±1프레임 범위를 그대로 쓴다.
+    segment = next(
+        (item for item in estimate.segments if item.end_frame == trigger_pair[1].frame), None
+    )
+    if segment is None:
         return estimate
-
-    def gap(chain: list[tuple[int, float]]) -> float:
-        first, last = chain[0][0], chain[-1][0]
-        return 0.0 if first <= trigger_frame <= last else min(abs(first - trigger_frame), abs(last - trigger_frame))
-
-    chain = min(chains, key=lambda item: (gap(item), -len(item)))
-    window = _window(chain, trigger_frame)
-    origin_frame = window[0][0]
-    times = [(frame - origin_frame) / fps for frame, _ in window]
-    positions = [position for _, position in window]
-    at = (trigger_frame - origin_frame) / fps
-
-    try:
-        velocity, slope, acceleration = _fit_velocity(times, positions, at)
-    except ZeroDivisionError as exc:
-        estimate.warnings.append(str(exc))
-        return estimate
-
-    span_first, span_last = window[0][0], window[-1][0]
-    inside = span_first <= trigger_frame <= span_last
-    if len(window) == 2:
-        estimate.method = "구간 평균 속도" if inside else "인접 구간 평균 속도"
-    else:
-        estimate.method = "등가속도 근사" + ("" if inside else " · 범위 밖 외삽")
-
-    if len(window) >= 3 and abs(acceleration) > MAX_PLAUSIBLE_ACCELERATION:
-        estimate.warnings.append(
-            f"지점 간 속도 변화가 커서(약 {abs(acceleration) / 9.81:.1f}g) 거리나 지점 위치를 확인해 주세요. "
-            "T와 가장 가까운 구간의 평균 속도로 대신 계산했어요."
-        )
-        nearest = min(
-            zip(window, window[1:], strict=False),
-            key=lambda pair: (
-                0 if pair[0][0] <= trigger_frame <= pair[1][0]
-                else min(abs(pair[0][0] - trigger_frame), abs(pair[1][0] - trigger_frame)),
-                abs((pair[0][0] + pair[1][0]) / 2 - trigger_frame),
-            ),
-        )
-        window = list(nearest)
-        origin_frame = window[0][0]
-        times = [(frame - origin_frame) / fps for frame, _ in window]
-        positions = [position for _, position in window]
-        at = (trigger_frame - origin_frame) / fps
-        velocity, slope, acceleration = _fit_velocity(times, positions, at)
-        estimate.method = "인접 구간 평균 속도"
-
-    span_first, span_last = window[0][0], window[-1][0]
-    inside = span_first <= trigger_frame <= span_last
-
-    if not inside:
-        span = max(1, span_last - span_first)
-        outside = min(abs(trigger_frame - span_first), abs(trigger_frame - span_last))
-        if outside > span:
-            estimate.warnings.append(
-                "T가 지점 범위에서 멀리 떨어져 있어요. T 앞뒤로 지점을 추가하면 더 정확해요."
-            )
-        else:
-            estimate.warnings.append("T가 지점 범위 밖이라 추정값이 외삽이에요.")
-
-    low, high = _bounds(window, fps, (trigger_frame - window[0][0]) / fps)
-    kph = velocity * MS_TO_KPH
-    if not math.isfinite(kph) or kph < 0:
-        estimate.warnings.append("속도를 유효하게 추정할 수 없어요. T 위치와 지점·거리를 확인해 주세요.")
-        return estimate
-    estimate.kph = kph
-    estimate.kph_low = max(0.0, min(low, kph))
-    estimate.kph_high = max(0.0, max(high, kph))
-    estimate.points_used = tuple(frame for frame, _ in window)
-    # v(t) in km/h with t in seconds: c0 + c1·t
-    c1 = slope * MS_TO_KPH
-    estimate.velocity_line = (kph - c1 * trigger_frame / fps, c1)
+    estimate.kph = segment.kph
+    estimate.kph_low = segment.kph_low
+    estimate.kph_high = segment.kph_high
+    estimate.method = TRIGGER_METHOD
+    estimate.points_used = (segment.start_frame, segment.end_frame)
     return estimate
-
-
-def _bounds(window: list[tuple[int, float]], fps: float, at: float) -> tuple[float, float]:
-    """Corner-trial placement sensitivity, not a statistical confidence interval.
-
-    ``at`` is seconds relative to the first point. Distance and model error are
-    not covered by these frame-only sensitivity bounds.
-    """
-
-    half = 0.5 / fps
-    count = len(window)
-    if count <= EXHAUSTIVE_BOUND_POINTS:
-        shifts: Iterable[tuple[int, ...]] = itertools.product((-1, 1), repeat=count)
-    else:
-        shifts = [tuple(1 if i % 2 else -1 for i in range(count)), tuple(-1 if i % 2 else 1 for i in range(count))]
-    values: list[float] = []
-    unbounded = False
-    positions = [position for _, position in window]
-    for signs in shifts:
-        times = [(frame - window[0][0]) / fps + sign * half for (frame, _), sign in zip(window, signs, strict=True)]
-        if any(later <= earlier for earlier, later in zip(times, times[1:], strict=False)):
-            unbounded = True
-            continue
-        try:
-            velocity, _, _ = _fit_velocity(times, positions, at)
-        except ZeroDivisionError:
-            continue
-        if math.isfinite(velocity):
-            values.append(velocity * MS_TO_KPH)
-    if not values:
-        return math.inf, math.inf
-    return min(values), math.inf if unbounded else max(values)
 
 
 def points_from_json(raw: object) -> list[SpeedPoint]:
@@ -428,6 +256,7 @@ def points_to_json(points: Iterable[SpeedPoint]) -> list[dict[str, object]]:
 __all__ = [
     "SPEED_BANDS",
     "SPEED_BAND_LIMITS",
+    "TRIGGER_METHOD",
     "SpeedEstimate",
     "SpeedPoint",
     "SpeedSegment",

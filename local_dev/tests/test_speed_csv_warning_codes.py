@@ -38,7 +38,8 @@ def test_missing_points_are_one_based_numeric_and_exclude_baseline():
     before = deepcopy(case.to_dict())
     rows = rows_for(case, video)
     trigger = next(row for row in rows if row["event_type"] == "trigger")
-    assert trigger["estimate_warnings"] == "거리 미입력 | 계산 지점 부족"
+    # T(15)는 0→30 구간 안에 있으므로 '계산 지점 부족'이 아니라 거리만 없다.
+    assert trigger["estimate_warnings"] == "거리 미입력"
     assert trigger["missing_distance_points"] == [2, 3]
     assert all(type(index) is int for index in trigger["missing_distance_points"])
     points = [row for row in rows if row["event_type"] == "speed_point"]
@@ -86,15 +87,16 @@ def test_missing_fps_is_short_and_does_not_hide_missing_distance_indices():
     [
         ([(0, None)], 0, "계산 지점 부족"),
         ([(0, None), (1, 1)], 0, "짧은 구간"),
-        ([(100, None), (130, 8)], 10, "범위 밖 추정"),
-        ([(0, None), (30, 1), (36, 20)], 33, "속도 변화 큼"),
-        ([(100, None), (130, 2), (160, 4)], 0, "범위 밖 추정 | 속도 계산 불가"),
+        ([(100, None), (130, 8)], 10, "계산 지점 부족"),
+        ([(100, None), (130, 2), (160, 4)], 0, "계산 지점 부족"),
+        ([(100, None), (130, 2), (160, 4)], 161, "계산 지점 부족"),
+        ([(100, None), (130, None)], 115, "거리 미입력"),
     ],
 )
 def test_real_estimation_warning_categories_are_compact(points, trigger, expected):
+    # T 구간이 없으면 '계산 지점 부족', T 구간 거리가 없으면 '거리 미입력'이다.
     case, video = case_with_points(points, trigger=trigger, collision=None)
     engine_before = estimate_speed(case.speed_points, 30, trigger).warnings
-    assert engine_before
     row = next(row for row in rows_for(case, video) if row["event_type"] == "trigger")
     assert row["estimate_warnings"] == expected
     assert "번" not in row["estimate_warnings"]
@@ -121,7 +123,7 @@ def test_unknown_engine_warnings_remain_visible_without_exporting_full_prose(mon
     ]
 
     def fake_estimate(_points, _fps, frame):
-        return SpeedEstimate(trigger_frame=frame, warnings=messages)
+        return SpeedEstimate(trigger_frame=frame, trigger_segment=(0, 30), warnings=messages)
 
     monkeypatch.setattr(speed_csv, "estimate_speed", fake_estimate)
     trigger = next(row for row in rows_for(case, video) if row["event_type"] == "trigger")
@@ -134,16 +136,15 @@ def test_unknown_engine_warnings_remain_visible_without_exporting_full_prose(mon
 def test_warning_categories_are_deduplicated_with_fixed_order(monkeypatch):
     case, video = case_with_points([(0, None), (30, None)])
     messages = [
-        "T가 지점 범위 밖이라 추정값이 외삽이에요.",
+        "1프레임 이하로 짧은 구간이 있어요. 더 멀리 떨어진 기준 지점을 쓰면 정확해져요.",
         "거리가 비어 있는 지점이 있어요: 2번",
-        "T가 지점 범위에서 멀리 떨어져 있어요.",
-        "거리가 입력된 구간이 2개 지점 이상 이어져야 T 속도를 계산해요.",
+        "거리가 비어 있는 지점이 있어요: 2번",
     ]
     monkeypatch.setattr(speed_csv, "estimate_speed", lambda _points, _fps, frame: SpeedEstimate(
         trigger_frame=frame, warnings=messages,
     ))
     trigger = next(row for row in rows_for(case, video) if row["event_type"] == "trigger")
-    assert trigger["estimate_warnings"] == "거리 미입력 | 계산 지점 부족 | 범위 밖 추정"
+    assert trigger["estimate_warnings"] == "거리 미입력 | 계산 지점 부족 | 짧은 구간"
     assert trigger["missing_distance_points"] == [2]
 
 
@@ -160,7 +161,7 @@ def test_csv_appends_twentieth_column_with_json_integer_arrays_and_nulls(monkeyp
     trigger = next(row for row in rows if row["event_type"] == "trigger")
     assert trigger["missing_distance_points"] == "[2,3]"
     assert json.loads(trigger["missing_distance_points"]) == [2, 3]
-    assert trigger["estimate_warnings"] == "거리 미입력 | 계산 지점 부족"
+    assert trigger["estimate_warnings"] == "거리 미입력"
     points = [row for row in rows if row["event_type"] == "speed_point"]
     assert [row["missing_distance_points"] for row in points] == ["null", "[2]", "[3]"]
     collision = next(row for row in rows if row["event_type"] == "collision")

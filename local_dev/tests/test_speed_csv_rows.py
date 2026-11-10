@@ -49,7 +49,7 @@ def test_constant_speed_rows_match_preceding_segments_and_trigger_estimate():
     assert trigger["segment_speed_kph"] is None
     assert trigger["time_seconds"] == pytest.approx(40 / 30, abs=1e-6)
     assert trigger["timecode"] == "00:00:01.333"
-    assert trigger["estimate_method"] == "등가속도 근사"
+    assert trigger["estimate_method"] == "구간 평균 속도"
     collision = next(row for row in rows if row["event_type"] == "collision")
     assert collision["time_seconds"] == 2
     assert collision["timecode"] == "00:00:02.000"
@@ -58,7 +58,8 @@ def test_constant_speed_rows_match_preceding_segments_and_trigger_estimate():
     assert collision["point_index"] is None
 
 
-def test_acceleration_distinguishes_point_average_from_instantaneous_trigger_speed():
+def test_trigger_speed_is_the_average_of_the_segment_containing_t():
+    # T가 지점(30)과 같으면 그 지점에서 끝나는 앞 구간(0→30)의 평균 속도를 쓴다.
     video = "acceleration.mp4"
     case = make_case([video])
     case.markers_by_video[video] = marker(
@@ -69,8 +70,40 @@ def test_acceleration_distinguishes_point_average_from_instantaneous_trigger_spe
     assert [row["segment_speed_kph"] for row in points] == [None, 21.6, 28.8]
     assert all(row["trigger_speed_estimate_kph"] is None for row in points)
     trigger = next(row for row in rows if row["event_type"] == "trigger")
-    assert trigger["trigger_speed_estimate_kph"] == pytest.approx(25.2)
+    assert trigger["trigger_speed_estimate_kph"] == pytest.approx(21.6)
+    assert trigger["estimate_method"] == "구간 평균 속도"
+    assert trigger["estimate_warnings"] is None
     assert trigger["distance_from_previous_m"] is None
+
+
+@pytest.mark.parametrize(
+    ("trigger", "kph", "warnings"),
+    [
+        (100, 10.8, None), (130, 10.8, None), (145, 18.0, None), (160, 18.0, None),
+        (99, None, "계산 지점 부족"), (161, None, "계산 지점 부족"),
+    ],
+)
+def test_trigger_row_follows_t_segment_rule(trigger, kph, warnings):
+    video = "spec.mp4"
+    case = make_case([video])
+    case.markers_by_video[video] = marker(trigger=trigger, points=[(100, None), (130, 3.0), (160, 5.0)])
+    row = next(row for row in iter_speed_rows([case], fps_by_video={video: 30}) if row["event_type"] == "trigger")
+    if kph is None:
+        assert row["trigger_speed_estimate_kph"] is None and row["estimate_method"] is None
+    else:
+        assert row["trigger_speed_estimate_kph"] == pytest.approx(kph)
+        assert row["estimate_method"] == "구간 평균 속도"
+    assert row["estimate_warnings"] == warnings
+
+
+def test_trigger_row_without_t_segment_distance_reports_missing_distance():
+    video = "spec.mp4"
+    case = make_case([video])
+    case.markers_by_video[video] = marker(trigger=145, points=[(100, None), (130, 3.0), (160, None)])
+    row = next(row for row in iter_speed_rows([case], fps_by_video={video: 30}) if row["event_type"] == "trigger")
+    assert row["trigger_speed_estimate_kph"] is None and row["estimate_method"] is None
+    assert row["estimate_warnings"] == "거리 미입력"
+    assert row["missing_distance_points"] == [3]
 
 
 @pytest.mark.parametrize("fps", [None, 0, -30, float("nan"), float("inf"), "bad"])
