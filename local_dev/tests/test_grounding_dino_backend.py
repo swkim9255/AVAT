@@ -126,7 +126,12 @@ class FakeProcessor:
 
 
 @pytest.fixture
-def fake_modules(monkeypatch):
+def fake_modules(monkeypatch, tmp_path):
+    # 모델을 지정하지 않으면 번들 Base 폴더를 쓰므로, 가짜 로컬 모델 폴더로 바꿔 둔다.
+    bundled = tmp_path / "bundled" / "grounding-dino-base"
+    bundled.mkdir(parents=True)
+    (bundled / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(backend, "default_dino_model_path", lambda: bundled)
     processor = FakeProcessor()
     calls = {"processor_load": [], "model_load": [], "model_inputs": [], "model_to": [],
              "autocast": []}
@@ -182,7 +187,7 @@ def test_predict_calls_model_once_per_chunk_and_keeps_separate_thresholds(fake_m
     assert all(call[2:] == (.31, .22, [(12, 20)]) for call in processor.post_calls)
     assert all(inputs["pixel_values"].moves == ["float16"] for inputs in processor.inputs)
     assert all(inputs["input_ids"].moves == [] for inputs in processor.inputs)
-    assert calls["model_load"][0][1] == {"torch_dtype": "float16"}
+    assert calls["model_load"][0][1] == {"torch_dtype": "float16", "local_files_only": True}
     assert calls["autocast"] == [{"device_type": "cuda", "dtype": "float16"}]
     assert list(result) == ["Car", "person"]
     assert result["Car"][0].mask is None
@@ -193,6 +198,17 @@ def test_predict_calls_model_once_per_chunk_and_keeps_separate_thresholds(fake_m
         "chunk_size": 1, "chunks": [["Car"], ["person"]], "box_threshold": .31,
         "text_threshold": .22, "precision": "float16", "supports_segmentation": False,
     }
+
+
+@pytest.mark.parametrize("model_id", [
+    "IDEA-Research/grounding-dino-base", "IDEA-Research/grounding-dino-tiny", "missing-folder",
+])
+def test_model_ids_and_missing_folders_are_rejected_without_download(fake_modules, model_id):
+    # Hugging Face 모델 ID(다운로드)는 받지 않고, 로컬 모델 폴더만 쓴다.
+    _, calls = fake_modules
+    with pytest.raises(ValueError, match="Grounding DINO Base 모델 폴더가 없습니다"):
+        GroundingDinoBackend(model_id, "cpu")
+    assert calls["processor_load"] == [] and calls["model_load"] == []
 
 
 def test_local_tiny_folder_stays_offline_and_cpu_uses_fp32(fake_modules, tmp_path):

@@ -37,6 +37,14 @@ def runtime_data_root() -> Path:
             else root / "systems")
 
 
+DINO_MODEL_FOLDER = "grounding-dino-base"
+
+
+def default_dino_model_path() -> Path:
+    """배포에 포함된 Grounding DINO Base 모델 폴더(EXE는 systems/models, 소스는 runtime/models)."""
+    return runtime_data_root() / ("models" if is_frozen() else "runtime/models") / DINO_MODEL_FOLDER
+
+
 def configure_runtime_environment() -> None:
     """Keep model/library caches out of the portable distribution's top level."""
     if not is_frozen():

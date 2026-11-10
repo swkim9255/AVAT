@@ -66,16 +66,17 @@ def test_empty_python_and_stale_legacy_values_do_not_override_native_defaults(ru
     assert settings.model != "old/model"
 
 
-def test_explicit_user_runtime_wins_and_inherits_offline_if_unspecified(runtime):
-    _, _, _, store = runtime
+def test_user_python_and_device_win_but_model_and_offline_stay_bundled(runtime):
+    root, _, _, store = runtime
     DetectionSettings(python=sys.executable, model="other/model", device="cpu").save(store)
     settings = DetectionSettings.load(store)
     assert settings.python == sys.executable
-    assert settings.model == "other/model"
     assert settings.device == "cpu"
+    # 모델은 고를 수 없다. 매니페스트(번들)의 모델 경로를 그대로 쓴다.
+    assert settings.model == str(root / "runtime" / "models" / "sam3")
     assert settings.offline is True
     DetectionSettings(python=sys.executable, offline=False).save(store)
-    assert DetectionSettings.load(store).offline is False
+    assert DetectionSettings.load(store).offline is True
 
 
 def test_invalid_unused_manifest_does_not_block_explicit_user_runtime(runtime):
@@ -98,7 +99,6 @@ def test_invalid_unused_manifest_does_not_block_explicit_user_runtime(runtime):
         ("model", "", "model 경로"),
         ("device", "metal", "device"),
         ("device", {}, "device"),
-        ("offline", "false", "offline"),
     ],
 )
 def test_invalid_manifest_reports_exact_config_error(runtime, key, value, expected):
@@ -123,31 +123,53 @@ def test_utf8_bom_manifest_supported(runtime):
     assert not DetectionSettings.load(store).config_error
 
 
-def test_missing_manifest_keeps_legacy_fallback(tmp_path, monkeypatch):
+def test_missing_manifest_uses_bundled_base_model_offline(tmp_path, monkeypatch, bundled_dino_model):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     settings = DetectionSettings.load(store)
     assert settings.executable == sys.executable
-    assert settings.model == process.DEFAULT_MODEL
+    assert settings.model == str(bundled_dino_model)
     assert settings.device == "auto"
-    assert settings.offline is None
+    assert settings.offline is True
     assert not settings.config_error
 
 
-@pytest.mark.parametrize("value", [True, "true", "1", False, "false", "0"])
-def test_qsettings_offline_boolean_roundtrip(runtime, value):
-    _, _, _, store = runtime
+@pytest.mark.parametrize("with_manifest", [True, False])
+@pytest.mark.parametrize("offline", [True, "true", "1", False, "false", "0"])
+def test_old_tiny_or_online_settings_are_ignored(runtime, monkeypatch, bundled_dino_model, with_manifest, offline):
+    root, manifest, _, store = runtime
+    if not with_manifest:
+        manifest.unlink()
     store.setValue(process.SETTINGS_PYTHON, sys.executable)
     store.setValue(process.SETTINGS_BACKEND, "grounding_dino")
-    store.setValue(process.SETTINGS_OFFLINE, value)
-    assert DetectionSettings.load(store).offline is (str(value).lower() in {"true", "1"})
+    store.setValue(process.SETTINGS_MODEL, "IDEA-Research/grounding-dino-tiny")
+    store.setValue(process.SETTINGS_OFFLINE, offline)
+    settings = DetectionSettings.load(store)
+    expected = root / "runtime" / "models" / "sam3" if with_manifest else bundled_dino_model
+    assert settings.model == str(expected)
+    assert settings.offline is True
+    assert not settings.config_error
 
 
-def test_saving_old_style_settings_preserves_existing_offline(runtime):
+@pytest.mark.parametrize("value", [False, "false", "yes", 3])
+def test_manifest_offline_key_is_ignored(runtime, value):
+    _, manifest, data, store = runtime
+    data["offline"] = value
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    settings = DetectionSettings.load(store)
+    assert not settings.config_error
+    assert settings.offline is True
+
+
+def test_save_removes_old_model_and_offline_keys(runtime):
     _, _, _, store = runtime
-    store.setValue(process.SETTINGS_OFFLINE, True)
-    DetectionSettings(python=sys.executable).save(store)
-    assert store.value(process.SETTINGS_OFFLINE, type=bool) is True
+    store.setValue(process.SETTINGS_MODEL, "IDEA-Research/grounding-dino-tiny")
+    store.setValue(process.SETTINGS_OFFLINE, False)
+    DetectionSettings(python=sys.executable, model="other/model", offline=False).save(store)
+    store.sync()
+    assert not store.contains(process.SETTINGS_MODEL)
+    assert not store.contains(process.SETTINGS_OFFLINE)
+    assert store.contains(process.SETTINGS_PYTHON)
 
 
 def _job(tmp_path: Path, settings: DetectionSettings) -> DetectionJob:
@@ -156,8 +178,8 @@ def _job(tmp_path: Path, settings: DetectionSettings) -> DetectionJob:
     )
 
 
-@pytest.mark.parametrize("offline", [True, False, None])
-def test_offline_environment_is_applied_only_when_enabled(qtbot, tmp_path, monkeypatch, offline):
+@pytest.mark.parametrize("offline", [True, False])
+def test_offline_environment_is_always_applied(qtbot, tmp_path, monkeypatch, offline):
     names = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY")
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -168,9 +190,8 @@ def test_offline_environment_is_applied_only_when_enabled(qtbot, tmp_path, monke
     monkeypatch.setattr(job._process, "start", lambda: None)
     job.start()
     env = job._process.processEnvironment()
-    assert all(env.value(name) == "1" for name in names) if offline else all(
-        not env.contains(name) for name in names
-    )
+    # 설정 값과 관계없이 모델 다운로드를 막는 환경 변수를 항상 넣는다.
+    assert all(env.value(name) == "1" for name in names)
     assert env.value("PYTHONIOENCODING") == "utf-8"
     job.kill()
 

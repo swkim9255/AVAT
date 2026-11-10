@@ -145,6 +145,7 @@ def test_cancel_wins_over_completed_result(qtbot, tmp_path):
     assert not job._temp_dir.exists()
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_real_qprocess_with_fake_protocol(qtbot, tmp_path, monkeypatch):
     job = make_job(tmp_path)
     code = (
@@ -164,6 +165,7 @@ def test_real_qprocess_with_fake_protocol(qtbot, tmp_path, monkeypatch):
     assert not job._temp_dir.exists()
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_real_qprocess_missing_python_reports_error(qtbot, tmp_path):
     job = make_job(tmp_path)
     job.settings.python = str(tmp_path / "missing-python.exe")
@@ -173,6 +175,7 @@ def test_real_qprocess_missing_python_reports_error(qtbot, tmp_path):
     assert not job._temp_dir.exists()
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_real_qprocess_cancel_preserves_no_result(qtbot, tmp_path, monkeypatch):
     job = make_job(tmp_path)
     code = (

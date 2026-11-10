@@ -34,12 +34,9 @@ from PySide6.QtWidgets import (
 )
 
 from investigator.detection_process import (
-    DEFAULT_MODEL,
-    DINO_BASE_MODEL,
-    DINO_TINY_MODEL,
-    REPOSITORY_ROOT,
+    DEFAULT_BACKEND,
     DetectionSettings,
-    default_model,
+    bundled_model_path,
     detection_settings_store,
 )
 from investigator.detection_taxonomy import (
@@ -65,7 +62,6 @@ from investigator.object_detection import (
     object_display_text,
     object_subtypes,
 )
-from investigator.runtime_paths import is_frozen
 from investigator.theme import DANGER, MUTED, PRIMARY, material_icon
 from investigator.widgets.scroll_safe_combo import ScrollSafeComboBox
 
@@ -149,8 +145,7 @@ class DetectionSettingsDialog(QDialog):
         self.setMinimumWidth(520)
         root = QVBoxLayout(self)
         note = QLabel(
-            "Grounding DINO 전용 검출 환경입니다. 박스만 검출하며 Base/Tiny를 선택할 수 있습니다. "
-            "AVAT 본체와 같은 환경을 사용할 수 있습니다. "
+            "Grounding DINO Base 모델(박스 전용)을 오프라인으로 실행합니다. "
             "별도 지정이 없으면 작업 공간의 detection-runtime.json을 사용하고, "
             "해당 파일도 없으면 AVAT를 실행한 Python을 사용합니다.",
             self,
@@ -159,12 +154,9 @@ class DetectionSettingsDialog(QDialog):
         note.setStyleSheet(f"color: {MUTED};")
         root.addWidget(note)
         form = QFormLayout()
-        if settings.backend != "grounding_dino":
-            settings = DetectionSettings(device=settings.device, offline=settings.offline)
-        self.backend_combo = ScrollSafeComboBox(self)
-        self.backend_combo.addItem("Grounding DINO (박스 전용)", "grounding_dino")
-        self.backend_combo.setEnabled(False)
-        form.addRow("검출 모델", self.backend_combo)
+        if settings.backend != DEFAULT_BACKEND:
+            settings = DetectionSettings(device=settings.device)
+        # 모델·연결 방식은 고정(번들 Base, 오프라인)이라 고르는 항목을 두지 않는다.
         python_row = QHBoxLayout()
         self.python_edit = QLineEdit(settings.python, self)
         self.python_edit.setPlaceholderText("미지정 시 AVAT의 실행 환경 사용")
@@ -173,25 +165,13 @@ class DetectionSettingsDialog(QDialog):
         python_row.addWidget(self.python_edit, 1)
         python_row.addWidget(browse)
         form.addRow("검출용 Python", python_row)
-        self.model_edit = QLineEdit(settings.model, self)
-        self.model_edit.setPlaceholderText(DEFAULT_MODEL)
-        form.addRow("모델 (파일·폴더 또는 ID)", self.model_edit)
         self.device_combo = ScrollSafeComboBox(self)
         for label, value in (("자동 (GPU 우선)", "auto"), ("GPU (CUDA)", "cuda"), ("CPU", "cpu")):
             self.device_combo.addItem(label, value)
         self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(settings.device)))
         form.addRow("장치", self.device_combo)
-        self.offline_check = QCheckBox("오프라인 실행 (로컬 모델만 사용)", self)
-        self.offline_check.setChecked(bool(settings.offline))
-        self.offline_check.setToolTip("인터넷 다운로드를 사용하지 않습니다. 완전한 로컬 모델 폴더를 지정해 주세요.")
-        form.addRow("모델 연결", self.offline_check)
         self.dino_options_widget = QGroupBox("Grounding DINO 설정", self)
         dino_form = QFormLayout(self.dino_options_widget)
-        self.dino_model_combo = ScrollSafeComboBox(self.dino_options_widget)
-        self.dino_model_combo.addItem("Base (기본)", DINO_BASE_MODEL)
-        self.dino_model_combo.addItem("Tiny", DINO_TINY_MODEL)
-        self.dino_model_combo.addItem("직접 지정 (위 모델 경로·ID 사용)", "")
-        dino_form.addRow("모델 크기", self.dino_model_combo)
         self.dino_chunk_spin = QSpinBox(self.dino_options_widget)
         self.dino_chunk_spin.setRange(1, 10000)
         self.dino_chunk_spin.setToolTip("한 번에 처리할 프롬프트 수입니다. 같은 대분류는 나누지 않아 이 수를 초과할 수 있습니다.")
@@ -211,9 +191,6 @@ class DetectionSettingsDialog(QDialog):
         dino_form.addRow("정밀도", self.dino_fp16_check)
         self._set_dino_options(settings)
         form.addRow(self.dino_options_widget)
-        self.dino_model_combo.currentIndexChanged.connect(self._dino_model_changed)
-        self.model_edit.textChanged.connect(self._sync_dino_model_selection)
-        self._sync_dino_model_selection()
         root.addLayout(form)
         if settings.config_error:
             error = QLabel(settings.config_error, self)
@@ -238,26 +215,14 @@ class DetectionSettingsDialog(QDialog):
         self.dino_text_spin.setValue(settings.dino_text_threshold)
         self.dino_fp16_check.setChecked(settings.dino_fp16)
 
-    def _sync_dino_model_selection(self) -> None:
-        model = self.model_edit.text().strip() or default_model(str(self.backend_combo.currentData()))
-        variant = next((model_id for model_id in (DINO_BASE_MODEL, DINO_TINY_MODEL)
-                        if model.replace("\\", "/").rstrip("/").split("/")[-1] == model_id.split("/")[-1]), "")
-        with QSignalBlocker(self.dino_model_combo):
-            self.dino_model_combo.setCurrentIndex(max(0, self.dino_model_combo.findData(variant)))
-
-    def _dino_model_changed(self) -> None:
-        model_id = self.dino_model_combo.currentData()
-        if model_id:
-            local = REPOSITORY_ROOT / ("models" if is_frozen() else "runtime/models") / str(model_id).split("/")[-1]
-            self.model_edit.setText(str(local) if local.is_dir() else str(model_id))
-
     def settings(self) -> DetectionSettings:
+        # 모델은 번들 Base, 연결 방식은 오프라인, 백엔드는 Grounding DINO로 고정한다.
         return DetectionSettings(
             python=self.python_edit.text().strip(),
-            model=self.model_edit.text().strip() or default_model(str(self.backend_combo.currentData())),
+            model=bundled_model_path(),
             device=str(self.device_combo.currentData()),
-            offline=self.offline_check.isChecked(),
-            backend=str(self.backend_combo.currentData()),
+            offline=True,
+            backend=DEFAULT_BACKEND,
             dino_chunk_size=self.dino_chunk_spin.value(),
             dino_box_threshold=self.dino_box_spin.value(),
             dino_text_threshold=self.dino_text_spin.value(),
@@ -321,7 +286,7 @@ class DetectionPanel(QWidget):
         heading_actions.addWidget(self.classes_button)
         self.settings_button = QToolButton(self)
         self.settings_button.setIcon(material_icon("settings", PRIMARY))
-        self.settings_button.setToolTip("객체 검출 환경 (검출용 Python·모델·장치)")
+        self.settings_button.setToolTip("객체 검출 환경 (검출용 Python·장치·임계값)")
         self.settings_button.setAccessibleName("객체 검출 환경")
         heading_actions.addWidget(self.settings_button)
         heading.addWidget(heading_widget)

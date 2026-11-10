@@ -43,7 +43,8 @@ def portable_fake_worker(monkeypatch):
 
     def arguments(job):
         args = original(job)
-        if job.settings.model == "fake/grounding-dino":
+        # 모델은 항상 번들 폴더이므로, 가짜 번들 모델(fixture)을 쓰는 실행만 가짜 워커로 바꾼다.
+        if Path(job.settings.model).parent.name == "bundled-models":
             return [str(HERE / "fake_detection_worker.py"), *args]
         return args
 
@@ -121,8 +122,9 @@ def test_canvas_maps_boxes_through_rotation(qtbot):  # type: ignore[no-untyped-d
     assert canvas.box_at(canvas.source_to_widget(30.0, 30.0)) == "a"
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_range_detection_labels_and_form(window, qtbot, tmp_path):  # type: ignore[no-untyped-def]
-    DetectionSettings(python=_fake_python(tmp_path), model="fake/grounding-dino", device="cpu", backend="grounding_dino").save()
+    DetectionSettings(python=_fake_python(tmp_path), device="cpu", backend="grounding_dino").save()
     window.playback.detection_panel_button.setChecked(True)
     panel = window.detection_panel
     assert window.detection_scroll.isVisible()
@@ -187,6 +189,7 @@ def test_range_detection_labels_and_form(window, qtbot, tmp_path):  # type: igno
     assert saved.video_objects().find(tree.uid).role == ROLE_BOTH
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_manual_box_and_failed_worker(window, qtbot, tmp_path):  # type: ignore[no-untyped-def]
     window.playback.detection_panel_button.setChecked(True)
     window._canvas_box_drawn((10.0, 10.0, 40.0, 30.0))
@@ -279,9 +282,10 @@ def test_optional_object_edit_keeps_completed_case_presentation(window):
     case.status = "draft"
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_result_stays_with_requested_case_after_selection_changes(window, qtbot, tmp_path):
     case = window.current_case
-    DetectionSettings(python=sys.executable, model="fake/grounding-dino", device="cpu", backend="grounding_dino").save()
+    DetectionSettings(python=sys.executable, device="cpu", backend="grounding_dino").save()
     window.playback.detection_panel_button.setChecked(True)
     window.detection_panel._class_keys = ["vehicle"]
     window.run_detection()
@@ -294,8 +298,9 @@ def test_result_stays_with_requested_case_after_selection_changes(window, qtbot,
     assert next_case.objects_by_video == {}
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_shutdown_stops_active_detection_without_saving_partial_result(window):
-    DetectionSettings(python=sys.executable, model="fake/grounding-dino", device="cpu", backend="grounding_dino").save()
+    DetectionSettings(python=sys.executable, device="cpu", backend="grounding_dino").save()
     window.playback.detection_panel_button.setChecked(True)
     window.run_detection()
     job = window._detection_job

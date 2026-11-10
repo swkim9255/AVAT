@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QProcess
 
 import investigator.detection_process as process
@@ -66,6 +67,7 @@ def test_marker_failure_terminates_instead_of_raising(qtbot, tmp_path, monkeypat
     job.kill()
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_real_qprocess_cancels_during_model_loading_without_stdin(qtbot, tmp_path, monkeypatch):
     job = _job(tmp_path)
     code = (
@@ -89,6 +91,7 @@ def test_real_qprocess_cancels_during_model_loading_without_stdin(qtbot, tmp_pat
     assert not job._temp_dir.exists()
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_real_qprocess_late_success_after_cancel_is_discarded(qtbot, tmp_path, monkeypatch):
     job = _job(tmp_path)
     code = (
@@ -111,6 +114,7 @@ def test_real_qprocess_late_success_after_cancel_is_discarded(qtbot, tmp_path, m
     assert not job._temp_dir.exists()
 
 
+@pytest.mark.usefixtures("bundled_dino_model")
 def test_real_qprocess_uncooperative_model_is_killed_after_grace(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(process, "CANCEL_GRACE_MS", 30)
     job = _job(tmp_path)

@@ -157,10 +157,12 @@ def test_cli_uses_dino_specific_precision_default_and_forwards_new_options(
     })]
 
 
-@pytest.mark.parametrize(("backend_name", "model_id"), [
-    ("grounding_dino", "IDEA-Research/grounding-dino-base"),
-])
-def test_cli_default_model_id_is_backend_specific(tmp_path, monkeypatch, backend_name, model_id):
+@pytest.mark.parametrize("backend_name", ["grounding_dino"])
+def test_cli_default_model_is_the_bundled_base_folder(tmp_path, monkeypatch, backend_name):
+    from investigator.runtime_paths import default_dino_model_path
+
+    # 모델 ID를 내려받지 않고 배포에 포함된 Base 폴더를 쓴다.
+    model_id = str(default_dino_model_path())
     from investigator.detection_worker import backend as factory_module
 
     clip = tmp_path / "clip.mp4"

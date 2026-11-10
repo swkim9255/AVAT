@@ -17,11 +17,11 @@ from pathlib import Path
 
 import numpy as np
 
+from investigator.runtime_paths import default_dino_model_path
+
 from .backend import RawInstance, _pick_device
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-base"
-TINY_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 
 
 def _tokens(text: str) -> tuple[str, ...]:
@@ -123,16 +123,18 @@ def _threshold(value: float, name: str) -> float:
 
 
 def _model_source(model_id: str) -> tuple[str, dict]:
+    """로컬 모델 폴더만 허용한다. Hugging Face 모델 ID(다운로드)는 쓰지 않는다."""
     if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("Grounding DINO 모델 ID 또는 로컬 모델 폴더를 지정해 주세요.")
+        raise ValueError("Grounding DINO 로컬 모델 폴더를 지정해 주세요.")
     path = Path(model_id).expanduser()
-    if path.is_dir():
-        if not (path / "config.json").is_file():
-            raise ValueError("Grounding DINO 로컬 모델 폴더에 config.json이 없습니다.")
-        return str(path.resolve()), {"local_files_only": True}
-    if path.is_file() or path.is_absolute() or model_id.startswith((".", "~")) or "\\" in model_id:
-        raise ValueError("Grounding DINO의 Hugging Face 모델 폴더를 지정해 주세요.")
-    return model_id, {}
+    if not path.is_dir():
+        raise ValueError(
+            f"Grounding DINO Base 모델 폴더가 없습니다: {path}\n"
+            "프로그램 폴더의 systems\\models\\grounding-dino-base를 확인해 주세요."
+        )
+    if not (path / "config.json").is_file():
+        raise ValueError("Grounding DINO 로컬 모델 폴더에 config.json이 없습니다.")
+    return str(path.resolve()), {"local_files_only": True}
 
 
 def _as_numpy(value) -> np.ndarray:
@@ -145,9 +147,12 @@ class GroundingDinoBackend:
     supports_prompt_groups = True
 
     def __init__(
-        self, model_id: str = DEFAULT_MODEL_ID, device: str = "auto", half: bool = True,
+        self, model_id: str | None = None, device: str = "auto", half: bool = True,
         *, chunk_size: int = 8, box_threshold: float = 0.3, text_threshold: float = 0.25,
     ):
+        # 모델을 지정하지 않으면 배포에 포함된 Base 모델 폴더를 쓴다.
+        if model_id is None:
+            model_id = str(default_dino_model_path())
         # Reject invalid configuration before loading optional libraries/weights.
         if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
             raise ValueError("Grounding DINO 청크 크기는 1 이상의 정수여야 합니다.")

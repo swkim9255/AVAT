@@ -20,11 +20,17 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QTimer, Signal
 
 from investigator.object_detection import worker_class_config
-from investigator.runtime_paths import is_frozen, runtime_data_root, worker_command
+from investigator.runtime_paths import (
+    default_dino_model_path,
+    is_frozen,
+    runtime_data_root,
+    worker_command,
+)
 from investigator.user_data import SETTINGS_FILENAME, app_user_data_directory
 
 REPOSITORY_ROOT = runtime_data_root()
 SETTINGS_PYTHON = "detection/python"
+# 예전 버전이 저장한 모델·연결 방식 키. 이제는 읽지 않고, 저장할 때 지운다.
 SETTINGS_MODEL = "detection/model"
 SETTINGS_DEVICE = "detection/device"
 SETTINGS_OFFLINE = "detection/offline"
@@ -35,13 +41,6 @@ SETTINGS_DINO_TEXT_THRESHOLD = "detection/dino_text_threshold"
 SETTINGS_DINO_FP16 = "detection/dino_fp16"
 RUNTIME_MANIFEST = "detection-runtime.json"
 DEFAULT_BACKEND = "grounding_dino"
-DINO_BASE_MODEL = "IDEA-Research/grounding-dino-base"
-DINO_TINY_MODEL = "IDEA-Research/grounding-dino-tiny"
-DEFAULT_MODEL = DINO_BASE_MODEL
-
-
-def default_model(backend: str) -> str:
-    return DINO_BASE_MODEL if backend == DEFAULT_BACKEND else ""
 CANCEL_GRACE_MS = 15_000
 MAX_EVENT_BUFFER = 256 * 1024
 MISSING_RUNTIME_HINT = (
@@ -58,12 +57,23 @@ def detection_settings_store() -> QSettings:
     return QSettings()
 
 
+def bundled_model_path() -> str:
+    """검출에 쓰는 Grounding DINO Base 모델 폴더.
+
+    detection-runtime.json에 model이 있으면 그 경로, 없으면 배포에 포함된 기본 경로다.
+    모델은 사용자가 바꿀 수 없고, 항상 이 로컬 폴더를 오프라인으로 읽는다.
+    """
+    native, _ = _load_runtime_manifest(REPOSITORY_ROOT / RUNTIME_MANIFEST)
+    return native.model if native is not None else str(default_dino_model_path())
+
+
 @dataclass(slots=True)
 class DetectionSettings:
     python: str = ""
-    model: str = DEFAULT_MODEL
+    model: str = field(default_factory=lambda: str(default_dino_model_path()))
     device: str = "auto"
-    offline: bool | None = None
+    # 검출은 항상 오프라인이다(예전 설정의 offline=false는 무시).
+    offline: bool = True
     config_error: str = ""
     backend: str = DEFAULT_BACKEND
     dino_chunk_size: int = 8
@@ -86,9 +96,8 @@ class DetectionSettings:
             return base if native else cls(config_error=manifest_error)
         python = str(store.value(SETTINGS_PYTHON, base.python) or "").strip()
         device = str(store.value(SETTINGS_DEVICE, base.device) or base.device)
-        offline = base.offline
-        if store.contains(SETTINGS_OFFLINE):
-            offline = _setting_bool(store.value(SETTINGS_OFFLINE), bool(offline))
+        # detection/model·detection/offline은 읽지 않는다. 예전 설정에 Tiny·모델 ID·
+        # offline=false가 남아 있어도 번들 Base 모델을 오프라인으로 쓴다.
         dino_options, dino_error = {}, ""
         try:
             dino_options = _dino_options({
@@ -101,9 +110,9 @@ class DetectionSettings:
             dino_error = str(exc)
         return cls(
             python=python,
-            model=str(store.value(SETTINGS_MODEL, base.model) or base.model),
+            model=base.model,
             device=device if device in {"auto", "cuda", "cpu"} else "auto",
-            offline=offline,
+            offline=True,
             config_error=(manifest_error if not python else "") or dino_error,
             backend=DEFAULT_BACKEND,
             **dino_options,
@@ -114,15 +123,15 @@ class DetectionSettings:
             raise ValueError("Grounding DINO 설정만 저장할 수 있습니다.")
         store = settings if settings is not None else detection_settings_store()
         store.setValue(SETTINGS_PYTHON, self.python.strip())
-        store.setValue(SETTINGS_MODEL, self.model.strip() or default_model(self.backend))
+        # 모델·연결 방식은 고정이므로 저장하지 않고, 예전 키가 남아 있으면 지운다.
+        store.remove(SETTINGS_MODEL)
+        store.remove(SETTINGS_OFFLINE)
         store.setValue(SETTINGS_DEVICE, self.device)
         store.setValue(SETTINGS_BACKEND, self.backend)
         store.setValue(SETTINGS_DINO_CHUNK_SIZE, self.dino_chunk_size)
         store.setValue(SETTINGS_DINO_BOX_THRESHOLD, self.dino_box_threshold)
         store.setValue(SETTINGS_DINO_TEXT_THRESHOLD, self.dino_text_threshold)
         store.setValue(SETTINGS_DINO_FP16, self.dino_fp16)
-        if self.offline is not None:
-            store.setValue(SETTINGS_OFFLINE, self.offline)
 
 
 def _setting_bool(value: object, default: bool = False) -> bool:
@@ -160,17 +169,14 @@ def _dino_options(data: dict, *, from_settings: bool = False) -> dict:
     return options
 
 
-def _validate_dino_model(model: str, *, offline: bool = False) -> None:
-    """Reject mistaken local folders before starting the native worker."""
+def _validate_dino_model(model: str) -> None:
+    """검출 프로세스를 띄우기 전에 번들 모델 폴더를 확인한다(로컬 폴더만 허용)."""
     path = Path(model).expanduser()
-    local = (path.exists() or path.is_absolute() or model.startswith((".", "~"))
-             or "\\" in model or model.count("/") != 1)
-    if not local:
-        if offline:
-            raise ValueError("오프라인 Grounding DINO 실행에는 로컬 모델 폴더를 지정해 주세요.")
-        return
-    if not path.is_dir():
-        raise ValueError("Grounding DINO 로컬 모델 폴더가 없습니다.")
+    if not model.strip() or not path.is_dir():
+        raise ValueError(
+            f"Grounding DINO Base 모델 폴더가 없습니다: {path}\n"
+            "프로그램 폴더의 systems\\models\\grounding-dino-base를 확인해 주세요."
+        )
     try:
         config = json.loads((path / "config.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
@@ -194,9 +200,7 @@ def _load_runtime_manifest(path: Path) -> tuple[DetectionSettings | None, str]:
         device = data.get("device", "auto")
         if not isinstance(device, str) or device not in {"auto", "cuda", "cpu"}:
             raise ValueError("device는 auto, cuda, cpu 중 하나여야 합니다.")
-        offline = data.get("offline", False)
-        if not isinstance(offline, bool):
-            raise ValueError("offline은 true 또는 false여야 합니다.")
+        # offline 키는 무시한다. 검출은 항상 오프라인으로 실행한다.
         backend = data.get("backend", DEFAULT_BACKEND)
         if backend != DEFAULT_BACKEND:
             raise ValueError("Grounding DINO 설정만 지원합니다. backend를 grounding_dino로 지정해 주세요.")
@@ -219,13 +223,13 @@ def _load_runtime_manifest(path: Path) -> tuple[DetectionSettings | None, str]:
         if not paths["model"].is_dir():
             raise ValueError(f"로컬 모델 폴더가 없습니다: {paths['model']}")
         if backend == "grounding_dino":
-            _validate_dino_model(str(paths["model"]), offline=True)
+            _validate_dino_model(str(paths["model"]))
         dino_options = _dino_options(data) if backend == "grounding_dino" else {}
         return DetectionSettings(
             python=str(paths.get("python", "")),
             model=str(paths["model"]),
             device=device,
-            offline=offline,
+            offline=True,
             backend=backend,
             **dino_options,
         ), ""
@@ -350,7 +354,7 @@ class DetectionJob(QObject):
             "--frame-step",
             str(max(1, request.frame_step)),
             "--model",
-            self.settings.model or default_model(self.settings.backend),
+            self.settings.model,
             "--device",
             self.settings.device,
             "--backend",
@@ -369,7 +373,7 @@ class DetectionJob(QObject):
                 raise ValueError(self.settings.config_error)
             if self.settings.backend != DEFAULT_BACKEND:
                 raise ValueError("Grounding DINO만 실행할 수 있습니다.")
-            _validate_dino_model(self.settings.model or DINO_BASE_MODEL, offline=bool(self.settings.offline))
+            _validate_dino_model(self.settings.model)
             if self.request.start_frame < 0 or self.request.end_frame < self.request.start_frame:
                 raise ValueError("검출 시작·끝 프레임을 확인해 주세요.")
             if self.request.frame_step <= 0:
@@ -391,10 +395,10 @@ class DetectionJob(QObject):
         environment.insert("PYTHONUNBUFFERED", "1")
         environment.insert("YOLO_AUTOINSTALL", "false")
         environment.insert("YOLO_CONFIG_DIR", str(self._temp_dir / "ultralytics"))
-        if self.settings.offline:
-            environment.insert("HF_HUB_OFFLINE", "1")
-            environment.insert("TRANSFORMERS_OFFLINE", "1")
-            environment.insert("HF_HUB_DISABLE_TELEMETRY", "1")
+        # 모델 다운로드·원격 확인을 하지 않도록 항상 오프라인으로 실행한다.
+        environment.insert("HF_HUB_OFFLINE", "1")
+        environment.insert("TRANSFORMERS_OFFLINE", "1")
+        environment.insert("HF_HUB_DISABLE_TELEMETRY", "1")
         self._process.setProcessEnvironment(environment)
         self._process.setWorkingDirectory(str(REPOSITORY_ROOT))
         try:
@@ -537,4 +541,4 @@ class DetectionJob(QObject):
         shutil.rmtree(self._temp_dir, ignore_errors=True)
 
 
-__all__ = ["DetectionJob", "DetectionRequest", "DetectionSettings", "default_model", "friendly_error"]
+__all__ = ["DetectionJob", "DetectionRequest", "DetectionSettings", "bundled_model_path", "friendly_error"]

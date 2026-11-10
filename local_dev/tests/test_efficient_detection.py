@@ -74,7 +74,8 @@ def test_backend_factory_defaults_to_grounding_dino(monkeypatch):
         create_backend("x", backend="unsupported")
 
 
-def test_removed_efficient_settings_cannot_be_saved_and_are_not_restored(qtbot, tmp_path, monkeypatch):
+def test_removed_efficient_settings_cannot_be_saved_and_are_not_restored(qtbot, tmp_path, monkeypatch,
+                                                                          bundled_dino_model):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     settings = DetectionSettings(python=sys.executable, model="efficient-model", backend="efficientsam3", offline=True)
@@ -87,7 +88,7 @@ def test_removed_efficient_settings_cannot_be_saved_and_are_not_restored(qtbot, 
     job = DetectionJob(DetectionRequest(tmp_path / "clip.mp4", 0, 0, 1, ["passenger"], "trigger"), restored)
     args = job.arguments()
     assert args[args.index("--backend") + 1] == "grounding_dino"
-    assert args[args.index("--model") + 1] == process.DINO_BASE_MODEL
+    assert args[args.index("--model") + 1] == str(bundled_dino_model)
     job.kill()
 
 
@@ -101,17 +102,15 @@ def test_efficient_profile_manifest_is_opt_in_and_local(tmp_path):
     assert settings is None and "Grounding DINO" in error
 
 
-def test_settings_dialog_has_no_previous_model_switch(qtbot, monkeypatch, tmp_path):
-    import investigator.widgets.detection_panel as panel
-
-    monkeypatch.setattr(panel, "REPOSITORY_ROOT", tmp_path)
+def test_settings_dialog_has_no_previous_model_switch(qtbot, monkeypatch, tmp_path, bundled_dino_model):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     original = DetectionSettings(python="original.exe", model="original-model", offline=True, backend="sam3")
     dialog = DetectionSettingsDialog(original)
     qtbot.addWidget(dialog)
-    assert dialog.backend_combo.findData("efficientsam3") == -1
-    assert dialog.backend_combo.findData("sam3") == -1
+    assert not hasattr(dialog, "backend_combo")
+    assert dialog.settings().backend == "grounding_dino"
     assert dialog.settings().python == ""
-    assert dialog.settings().model == process.DINO_BASE_MODEL
+    assert dialog.settings().model == str(bundled_dino_model)
 
 
 def test_empty_efficient_model_fails_without_starting_process(qtbot, tmp_path, monkeypatch):
@@ -125,10 +124,8 @@ def test_empty_efficient_model_fails_without_starting_process(qtbot, tmp_path, m
     assert not started
 
 
-def test_previous_workspace_presets_are_not_selected(qtbot, monkeypatch, tmp_path):
-    import investigator.widgets.detection_panel as panel
-
-    monkeypatch.setattr(panel, "REPOSITORY_ROOT", tmp_path)
+def test_previous_workspace_presets_are_not_selected(qtbot, monkeypatch, tmp_path, bundled_dino_model):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     (tmp_path / "efficient.exe").touch()
     (tmp_path / "model").mkdir()
     (tmp_path / "detection-runtime.efficientsam3.json").write_text(json.dumps({
@@ -136,9 +133,9 @@ def test_previous_workspace_presets_are_not_selected(qtbot, monkeypatch, tmp_pat
     }), encoding="utf-8")
     dialog = DetectionSettingsDialog(DetectionSettings(python="original.exe", model="original-model", backend="sam3"))
     qtbot.addWidget(dialog)
-    assert dialog.backend_combo.findData("efficientsam3") == -1
+    assert dialog.settings().backend == "grounding_dino"
     assert dialog.settings().python == ""
-    assert dialog.settings().model == process.DINO_BASE_MODEL
+    assert dialog.settings().model == str(bundled_dino_model)
 
 
 def test_benchmark_separates_frame_times_from_startup_and_marks_agreement_not_accuracy():

@@ -9,7 +9,6 @@ import pytest
 from PySide6.QtCore import QSettings
 
 import investigator.detection_process as process
-import investigator.widgets.detection_panel as panel
 from investigator.detection_process import DetectionJob, DetectionRequest, DetectionSettings
 from investigator.widgets.detection_panel import DetectionSettingsDialog
 
@@ -32,13 +31,15 @@ def test_new_fields_preserve_old_positional_constructor_and_configured_default()
     assert legacy.dino_text_threshold == 0.25
     assert legacy.dino_fp16 is True
     assert DetectionSettings().backend == process.DEFAULT_BACKEND
-    assert process.default_model("grounding_dino") == process.DINO_BASE_MODEL
+    # 기본 모델은 배포에 포함된 Base 폴더이고, 항상 오프라인이다.
+    assert DetectionSettings().model == str(process.default_dino_model_path())
+    assert DetectionSettings().offline is True
 
 
-def test_dino_qsettings_roundtrip(qtbot, tmp_path, monkeypatch):
+def test_dino_qsettings_roundtrip(qtbot, tmp_path, monkeypatch, bundled_dino_model):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     store = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
-    configured = DetectionSettings(sys.executable, process.DINO_TINY_MODEL, "cuda", False,
+    configured = DetectionSettings(sys.executable, str(bundled_dino_model), "cuda", True,
                                    backend="grounding_dino", dino_chunk_size=6,
                                    dino_box_threshold=0.21, dino_text_threshold=0.17, dino_fp16=False)
     configured.save(store)
@@ -96,7 +97,8 @@ def test_wrong_architecture_local_model_is_rejected(manifest):
 
 @pytest.mark.parametrize("fp16", [True, False])
 def test_worker_arguments_include_dino_thresholds_and_explicit_precision(qtbot, tmp_path, fp16):
-    job = job_for(tmp_path, DetectionSettings(backend="grounding_dino", model=process.DINO_BASE_MODEL,
+    model = dino_folder(tmp_path / "grounding-dino-base")
+    job = job_for(tmp_path, DetectionSettings(backend="grounding_dino", model=str(model),
                                             dino_chunk_size=5, dino_box_threshold=0.23,
                                             dino_text_threshold=0.19, dino_fp16=fp16))
     try:
@@ -107,6 +109,7 @@ def test_worker_arguments_include_dino_thresholds_and_explicit_precision(qtbot, 
         assert ("--half" in arguments) is fp16
         assert ("--no-half" in arguments) is not fp16
         assert arguments[arguments.index("--backend") + 1] == "grounding_dino"
+        assert arguments[arguments.index("--model") + 1] == str(model)
     finally:
         job.kill()
 
@@ -135,55 +138,45 @@ def test_bad_dino_local_folder_fails_before_process_start(qtbot, tmp_path, monke
     assert not job._temp_dir.exists()
 
 
-def test_offline_dino_rejects_remote_id_before_process_start(qtbot, tmp_path, monkeypatch):
-    job = job_for(tmp_path, DetectionSettings(model=process.DINO_BASE_MODEL, backend="grounding_dino", offline=True))
+def test_remote_model_id_is_rejected_before_process_start(qtbot, tmp_path, monkeypatch):
+    # Hugging Face 모델 ID는 다운로드가 필요하므로 받지 않는다(로컬 폴더만 허용).
+    job = job_for(tmp_path, DetectionSettings(model="IDEA-Research/grounding-dino-base", backend="grounding_dino"))
     called = []
     monkeypatch.setattr(job._process, "start", lambda: called.append(True))
     with qtbot.waitSignal(job.failed) as signal:
         job.start()
-    assert "로컬 모델 폴더" in signal.args[0]
+    assert signal.args[0].startswith("Grounding DINO Base 모델 폴더가 없습니다: ")
+    assert signal.args[0].endswith(
+        "\n프로그램 폴더의 systems\\models\\grounding-dino-base를 확인해 주세요."
+    )
     assert not called
 
 
-def test_dino_controls_always_show_and_preserve_custom_values(qtbot, tmp_path, monkeypatch):
-    monkeypatch.setattr(panel, "REPOSITORY_ROOT", tmp_path)
+def test_dino_controls_always_show_and_preserve_custom_values(qtbot, tmp_path, monkeypatch, bundled_dino_model):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     dialog = DetectionSettingsDialog(DetectionSettings(backend="sam3", model="original-sam"))
     qtbot.addWidget(dialog)
     assert not dialog.dino_options_widget.isHidden()
-    assert dialog.settings().model == process.DINO_BASE_MODEL
-    dialog.model_edit.setText("custom-dino-model")
+    assert dialog.settings().model == str(bundled_dino_model)
     dialog.dino_chunk_spin.setValue(6)
     dialog.dino_box_spin.setValue(0.24)
     dialog.dino_text_spin.setValue(0.18)
     dialog.dino_fp16_check.setChecked(False)
-    assert dialog.dino_model_combo.currentData() == ""
-    assert dialog.backend_combo.findData("sam3") == -1
     result = dialog.settings()
-    assert result.model == "custom-dino-model"
+    assert result.model == str(bundled_dino_model)
+    assert result.backend == "grounding_dino" and result.offline is True
     assert result.dino_chunk_size == 6
     assert result.dino_box_threshold == 0.24
     assert result.dino_text_threshold == 0.18
     assert result.dino_fp16 is False
 
 
-def test_base_tiny_selector_preserves_free_model_edit(qtbot, tmp_path, monkeypatch):
-    monkeypatch.setattr(panel, "REPOSITORY_ROOT", tmp_path)
-    local_tiny = dino_folder(tmp_path / "runtime/models/grounding-dino-tiny")
-    dialog = DetectionSettingsDialog(DetectionSettings(backend="grounding_dino", model=process.DINO_BASE_MODEL))
-    qtbot.addWidget(dialog)
-    assert dialog.dino_model_combo.currentData() == process.DINO_BASE_MODEL
-    dialog.dino_model_combo.setCurrentIndex(dialog.dino_model_combo.findData(process.DINO_TINY_MODEL))
-    assert dialog.model_edit.text() == str(local_tiny)
-    dialog.dino_model_combo.setCurrentIndex(dialog.dino_model_combo.findData(process.DINO_BASE_MODEL))
-    assert dialog.model_edit.text() == process.DINO_BASE_MODEL
-    dialog.model_edit.setText("another-custom-dino")
-    assert dialog.settings().model == "another-custom-dino"
-
-
 def test_dino_dialog_preserves_passed_preset_without_a_model_switch(qtbot, manifest, monkeypatch):
     path, data = manifest
+    path = path.with_name(process.RUNTIME_MANIFEST)
     path.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setattr(panel, "REPOSITORY_ROOT", path.parent)
+    # 설정 창의 모델은 작업 공간 매니페스트(번들)의 모델 경로로 고정된다.
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", path.parent)
     settings, error = process._load_runtime_manifest(path)
     assert not error
     dialog = DetectionSettingsDialog(settings)
@@ -193,4 +186,4 @@ def test_dino_dialog_preserves_passed_preset_without_a_model_switch(qtbot, manif
     assert dialog.settings().offline is True
     assert dialog.settings().dino_chunk_size == 7
     assert dialog.settings().dino_fp16 is False
-    assert dialog.backend_combo.findData("yoloe") == -1
+    assert dialog.settings().backend == "grounding_dino"

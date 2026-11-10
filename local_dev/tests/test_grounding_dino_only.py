@@ -16,7 +16,7 @@ from investigator.widgets.detection_panel import DetectionSettingsDialog
 
 
 @pytest.mark.parametrize("old_backend", [None, "sam3", "efficientsam3", "yoloe"])
-def test_previous_settings_never_select_an_old_model(tmp_path, monkeypatch, old_backend):
+def test_previous_settings_never_select_an_old_model(tmp_path, monkeypatch, old_backend, bundled_dino_model):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     settings = QSettings(str(tmp_path / "old.ini"), QSettings.Format.IniFormat)
     settings.setValue(process.SETTINGS_PYTHON, "old-model-python.exe")
@@ -26,18 +26,23 @@ def test_previous_settings_never_select_an_old_model(tmp_path, monkeypatch, old_
     before = {key: settings.value(key) for key in settings.allKeys()}
     loaded = DetectionSettings.load(settings)
     assert loaded.backend == "grounding_dino"
-    assert loaded.model == process.DINO_BASE_MODEL
+    assert loaded.model == str(bundled_dino_model)
+    assert loaded.offline is True
     assert loaded.python == ""
     assert {key: settings.value(key) for key in settings.allKeys()} == before
 
 
-def test_dino_settings_roundtrip_including_tiny_and_thresholds(tmp_path, monkeypatch):
+def test_dino_settings_roundtrip_keeps_thresholds_but_never_tiny_or_online(tmp_path, monkeypatch, bundled_dino_model):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
     store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    configured = DetectionSettings(model=process.DINO_TINY_MODEL, device="cpu", offline=False,
+    configured = DetectionSettings(model="IDEA-Research/grounding-dino-tiny", device="cpu", offline=False,
                                    dino_chunk_size=5, dino_box_threshold=.4, dino_text_threshold=.2)
     configured.save(store)
-    assert DetectionSettings.load(store) == configured
+    loaded = DetectionSettings.load(store)
+    assert (loaded.device, loaded.dino_chunk_size, loaded.dino_box_threshold, loaded.dino_text_threshold) == (
+        "cpu", 5, .4, .2)
+    assert loaded.model == str(bundled_dino_model)
+    assert loaded.offline is True
 
 
 @pytest.mark.parametrize("old_backend", ["sam3", "efficientsam3", "yoloe"])
@@ -55,16 +60,13 @@ def test_old_models_are_not_executable_or_saveable(qtbot, tmp_path, old_backend)
     job.deleteLater()
 
 
-def test_settings_dialog_only_offers_dino_base_and_tiny(qtbot):
-    dialog = DetectionSettingsDialog(DetectionSettings(model=process.DINO_TINY_MODEL))
+def test_settings_dialog_always_uses_bundled_base(qtbot, tmp_path, monkeypatch, bundled_dino_model):
+    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
+    dialog = DetectionSettingsDialog(DetectionSettings(model="IDEA-Research/grounding-dino-tiny", offline=False))
     qtbot.addWidget(dialog)
-    assert dialog.backend_combo.count() == 1
-    assert dialog.backend_combo.currentData() == "grounding_dino"
-    assert not dialog.backend_combo.isEnabled()
-    assert dialog.dino_model_combo.findData(process.DINO_BASE_MODEL) >= 0
-    assert dialog.dino_model_combo.findData(process.DINO_TINY_MODEL) >= 0
     assert dialog.settings().backend == "grounding_dino"
-    assert dialog.settings().model == process.DINO_TINY_MODEL
+    assert dialog.settings().model == str(bundled_dino_model)
+    assert dialog.settings().offline is True
 
 
 def test_worker_defaults_to_dino_and_rejects_previous_models():

@@ -104,22 +104,25 @@ def test_frozen_caches_are_redirected_without_creating_external_directories(froz
         assert Path(os.environ[name]).is_relative_to(frozen_root / "systems")
 
 
-def test_portable_explicit_dino_model_setting_overrides_bundled_default(frozen_root, monkeypatch):
+def test_portable_saved_model_never_overrides_bundled_base(frozen_root, monkeypatch):
     native = DetectionSettings(backend="grounding_dino", model="bundled DINO", offline=True)
     monkeypatch.setattr(process, "_load_runtime_manifest", lambda path: (native, ""))
-    DetectionSettings(model="saved DINO Tiny", offline=True).save()
+    DetectionSettings(model="saved DINO Tiny", offline=False).save()
     restored = DetectionSettings.load()
     assert restored.backend == "grounding_dino"
-    assert restored.model == "saved DINO Tiny"
+    assert restored.model == "bundled DINO"
+    assert restored.offline is True
     assert restored.executable == sys.executable
 
 
-def test_portable_saved_backend_still_loads_without_a_manifest(frozen_root, monkeypatch):
+def test_portable_without_manifest_uses_systems_models_base(frozen_root, monkeypatch):
     monkeypatch.setattr(process, "_load_runtime_manifest", lambda path: (None, ""))
     DetectionSettings(model="saved local DINO").save()
     restored = DetectionSettings.load()
     assert restored.backend == "grounding_dino"
-    assert restored.model == "saved local DINO"
+    # EXE에서는 systems/models/grounding-dino-base가 번들 Base 모델이다.
+    assert restored.model == str(frozen_root / "systems" / "models" / "grounding-dino-base")
+    assert restored.offline is True
 
 
 def test_spec_and_manifest_use_matching_systems_model_layout():

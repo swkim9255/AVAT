@@ -36,7 +36,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--start-frame", type=int, default=0)
     p.add_argument("--end-frame", type=int, default=None, help="이 프레임은 포함하지 않음")
     p.add_argument("--mask-threshold", type=float, default=0.5)
-    p.add_argument("--model", default=None, help="모델 ID 또는 로컬 모델 경로")
+    p.add_argument("--model", default=None, help="로컬 모델 폴더(생략하면 번들 Grounding DINO Base)")
     p.add_argument("--backend", choices=["grounding_dino"], default="grounding_dino")
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     precision = p.add_mutually_exclusive_group()
@@ -92,7 +92,10 @@ def main(argv: list[str] | None = None, backend=None) -> int:
         device_note = None
         if backend is None:
             if args.model is None:
-                args.model = "IDEA-Research/grounding-dino-base"
+                # 모델을 지정하지 않으면 배포에 포함된 Base 모델 폴더를 쓴다(다운로드하지 않음).
+                from investigator.runtime_paths import default_dino_model_path
+
+                args.model = str(default_dino_model_path())
             if not args.model:
                 raise ValueError("검출 모델의 로컬 경로를 지정해 주세요.")
             events.emit("loading_model", model_id=args.model)
