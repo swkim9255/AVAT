@@ -138,7 +138,7 @@ class MainWindow(DetectionMixin, QMainWindow):
         super().__init__(parent)
         self.setObjectName("mainWindow")
         self.setWindowTitle("AVAT")
-        self.setWindowIcon(material_icon("car_crash", PRIMARY))
+        # 창 아이콘은 app.py가 지정한 프로그램 아이콘(theme.app_icon)을 그대로 쓴다.
         self.setMinimumSize(1180, 760)
         self.resize(1660, 940)
 

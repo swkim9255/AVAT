@@ -38,9 +38,13 @@ a = Analysis([str(root / "main.py")], pathex=[str(root)], binaries=binaries,
              datas=datas, hiddenimports=hiddenimports, hookspath=[],
              runtime_hooks=[], excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", *legacy_modules])
 pyz = PYZ(a.pure)
+# EXE 파일 아이콘. 창·작업표시줄 아이콘도 같은 파일을 쓴다(investigator/theme.py의 APP_ICON_PATH).
+app_icon = root / "investigator" / "assets" / "app_icon" / "avat.ico"
+if not app_icon.is_file():
+    raise SystemExit("Missing app icon: investigator/assets/app_icon/avat.ico")
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="AVAT",
           debug=False, strip=False, upx=False, console=False,
-          contents_directory=".")
+          icon=str(app_icon), contents_directory=".")
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="AVAT")
 
 # COLLECT의 name은 마지막 경로명만 사용하므로 먼저 평면 배포본을 만든 뒤 함께 이동한다.

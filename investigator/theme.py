@@ -45,6 +45,13 @@ _ASSET_DIR = Path(__file__).resolve().parent / "assets" / "material_symbols"
 _FONT_PATH = _ASSET_DIR / "MaterialSymbolsOutlined[FILL,GRAD,opsz,wght].ttf"
 _CODEPOINTS_PATH = _ASSET_DIR / "MaterialSymbolsOutlined[FILL,GRAD,opsz,wght].codepoints"
 _FONT_FAMILY: str | None = None
+# 프로그램 아이콘(EXE 파일·창 제목줄·작업표시줄). EXE 파일 아이콘은 AVAT.spec이 같은 파일을 넣는다.
+APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon" / "avat.ico"
+
+
+def app_icon() -> QIcon:
+    """프로그램 아이콘. 파일이 없으면 빈 아이콘을 돌려줘 예전처럼 아이콘 없이 실행된다."""
+    return QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.is_file() else QIcon()
 
 
 @lru_cache(maxsize=1)

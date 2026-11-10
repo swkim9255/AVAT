@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from ctypes import WinDLL
+from contextlib import suppress
+from ctypes import WinDLL, windll
 from pathlib import Path
 
 from investigator.diagnostics import configure_diagnostics, log_runtime_environment
+from investigator.runtime_paths import is_frozen
 from investigator.user_data import migrate_app_user_data
 
 # 이전 EXE 배치(systems 바로 아래)의 설정·로그를 systems/사용자데이터로 옮긴다.
@@ -41,7 +43,21 @@ from investigator.audio_playback import disable_qt_hardware_decoding  # noqa: E4
 from investigator.ffmpeg_logging import restore_qt_ffmpeg_log_level  # noqa: E402
 from investigator.main_window import MainWindow  # noqa: E402
 from investigator.qt_font_setup import configure_text_rendering  # noqa: E402
-from investigator.theme import apply_theme  # noqa: E402
+from investigator.theme import app_icon, apply_theme  # noqa: E402
+
+APP_USER_MODEL_ID = "AVAT.AccidentVideoAnalysisTool"
+
+
+def _use_own_taskbar_group() -> None:
+    """소스 실행(python main.py)에서도 작업표시줄에 python 대신 AVAT 아이콘이 보이게 한다.
+
+    QApplication을 만들기 전에 불러야 한다. EXE는 실행 파일에 넣은 아이콘을 그대로 쓰므로
+    ID를 바꾸지 않는다(바꾸면 예전에 작업표시줄에 고정한 AVAT.exe와 따로 묶인다).
+    """
+    if sys.platform != "win32" or is_frozen():
+        return
+    with suppress(AttributeError, OSError):
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
 
 
 def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
@@ -55,11 +71,14 @@ def main(arguments: list[str] | None = None) -> int:
     qt_arguments = [sys.argv[0]] if arguments is not None else sys.argv
     configure_text_rendering(qt_arguments)
     disable_qt_hardware_decoding()
+    _use_own_taskbar_group()
     app = QApplication(qt_arguments)
     log_runtime_environment()
     app.setApplicationName("AVAT")
     app.setApplicationDisplayName("AVAT")
     app.setOrganizationName("AVAT")
+    # 창 제목줄·작업표시줄·Alt+Tab 아이콘. 파일이 없으면 빈 아이콘이라 아무것도 바뀌지 않는다.
+    app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
     apply_theme(app)
     window = MainWindow(args.workspace)

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>AVAT</title>
+  <rect width="256" height="256" rx="56" fill="#1F5FBF"/>
+  <path d="M52 214L128 46L204 214" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M78 158H178" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="106" cy="158" r="15" fill="#FFFFFF" stroke="#1F5FBF" stroke-width="6"/>
+  <circle cx="152" cy="158" r="15" fill="#FF7A45" stroke="#1F5FBF" stroke-width="6"/>
+  <rect x="124" y="180" width="8" height="14" rx="3" fill="#FFFFFF" fill-opacity="0.85"/>
+  <rect x="123" y="202" width="10" height="14" rx="3" fill="#FFFFFF" fill-opacity="0.85"/>
+</svg>

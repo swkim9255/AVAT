@@ -18,7 +18,7 @@ AVAT/
     ├── 사용자데이터/              # 업데이트할 때 이 폴더만 보존
     │   ├── 백업/작업관리_백업.db  # 작업 폴더당 최신 백업 1개
     │   ├── 삭제사고/              # 삭제한 영상과 이동기록
-    │   ├── settings.ini           # EXE 검출 설정
+    │   ├── settings.ini           # 검출 클래스 선택 등 화면 설정
     │   ├── workspace.json         # 영상 탭 순서·선택
     │   └── logs/
     └── Python·Qt·추론 라이브러리 및 앱 리소스
@@ -60,6 +60,9 @@ CSV·속도 CSV·명세서는 `02_csv내보내기`, Word 보고서는
 ```powershell
 python -m PyInstaller --distpath dist/windows-systems --workpath runtime/builds/windows-systems packaging/AVAT.spec
 ```
+
+프로그램 아이콘은 `investigator/assets/app_icon/avat.ico`입니다. spec이 이 파일을 EXE 파일
+아이콘으로 넣고, 앱은 같은 파일을 창 제목줄·작업표시줄 아이콘으로 씁니다.
 
 `systems/AVAT.exe`를 실행합니다. 작업 폴더의 기준은 `systems`의 상위 폴더입니다.
 `contents_directory="."`로 EXE 옆에서 라이브러리를 읽도록 빌드하고, EXE와 지원
