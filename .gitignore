@@ -17,11 +17,18 @@ htmlcov/
 venv/
 dist/
 build/
+# 저장소 루트에 날짜별로 만드는 배포본(dist-20261110-3 등)과 빌드·시험 작업 폴더
+/dist-*/
+/runtime/builds/
+/runtime/tests/
 node_modules/
 *.whl
 
 # Runtime workspace and temporary files
 workspace/
+# 테스트·시연용 사고 데이터(영상·조사 DB 포함, 폴더와 압축 파일 모두)
+/AVAT-테스트데이터-*
+/AVAT-시연데이터*
 *.tmp
 .tmp/
 .DS_Store
