@@ -166,7 +166,7 @@ class GroundingDinoBackend:
         except ImportError as exc:
             raise RuntimeError(
                 "Grounding DINO 실행 환경(torch·transformers)을 찾지 못했습니다. "
-                "검출용 Python 설정을 확인해 주세요."
+                "프로그램 폴더(systems)가 빠짐없이 복사되었는지 확인해 주세요."
             ) from exc
         self._torch = torch
         self.model_id = model_id

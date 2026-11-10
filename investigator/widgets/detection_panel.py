@@ -14,31 +14,22 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from investigator.detection_process import (
-    DEFAULT_BACKEND,
-    DetectionSettings,
-    bundled_model_path,
-    detection_settings_store,
-)
+from investigator.detection_process import detection_settings_store
 from investigator.detection_taxonomy import (
     SPECIAL_VEHICLE_TYPES,
     SUBTYPES,
@@ -138,102 +129,9 @@ class ClassPickerDialog(QDialog):
         return [key for key, checkbox in self.checkboxes.items() if checkbox.isChecked()]
 
 
-class DetectionSettingsDialog(QDialog):
-    def __init__(self, settings: DetectionSettings, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("객체 검출 환경")
-        self.setMinimumWidth(520)
-        root = QVBoxLayout(self)
-        note = QLabel(
-            "Grounding DINO Base 모델(박스 전용)을 오프라인으로 실행합니다. "
-            "별도 지정이 없으면 작업 공간의 detection-runtime.json을 사용하고, "
-            "해당 파일도 없으면 AVAT를 실행한 Python을 사용합니다.",
-            self,
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color: {MUTED};")
-        root.addWidget(note)
-        form = QFormLayout()
-        if settings.backend != DEFAULT_BACKEND:
-            settings = DetectionSettings(device=settings.device)
-        # 모델·연결 방식은 고정(번들 Base, 오프라인)이라 고르는 항목을 두지 않는다.
-        python_row = QHBoxLayout()
-        self.python_edit = QLineEdit(settings.python, self)
-        self.python_edit.setPlaceholderText("미지정 시 AVAT의 실행 환경 사용")
-        browse = QPushButton("찾기…", self)
-        browse.clicked.connect(self._browse)
-        python_row.addWidget(self.python_edit, 1)
-        python_row.addWidget(browse)
-        form.addRow("검출용 Python", python_row)
-        self.device_combo = ScrollSafeComboBox(self)
-        for label, value in (("자동 (GPU 우선)", "auto"), ("GPU (CUDA)", "cuda"), ("CPU", "cpu")):
-            self.device_combo.addItem(label, value)
-        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(settings.device)))
-        form.addRow("장치", self.device_combo)
-        self.dino_options_widget = QGroupBox("Grounding DINO 설정", self)
-        dino_form = QFormLayout(self.dino_options_widget)
-        self.dino_chunk_spin = QSpinBox(self.dino_options_widget)
-        self.dino_chunk_spin.setRange(1, 10000)
-        self.dino_chunk_spin.setToolTip("한 번에 처리할 프롬프트 수입니다. 같은 대분류는 나누지 않아 이 수를 초과할 수 있습니다.")
-        dino_form.addRow("프롬프트 청크 크기", self.dino_chunk_spin)
-        self.dino_box_spin = QDoubleSpinBox(self.dino_options_widget)
-        self.dino_text_spin = QDoubleSpinBox(self.dino_options_widget)
-        for spin in (self.dino_box_spin, self.dino_text_spin):
-            spin.setRange(0, 1)
-            spin.setDecimals(3)
-            spin.setSingleStep(0.05)
-        self.dino_box_spin.setToolTip("모델 박스 임계값입니다. 이후 기존 클래스별 임계값도 적용됩니다.")
-        self.dino_text_spin.setToolTip("검출 박스의 출력 텍스트를 선택할 토큰 임계값입니다.")
-        dino_form.addRow("박스 임계값", self.dino_box_spin)
-        dino_form.addRow("텍스트 임계값", self.dino_text_spin)
-        self.dino_fp16_check = QCheckBox("GPU에서 FP16 사용", self.dino_options_widget)
-        self.dino_fp16_check.setToolTip("CPU 실행 시 FP32를 사용합니다.")
-        dino_form.addRow("정밀도", self.dino_fp16_check)
-        self._set_dino_options(settings)
-        form.addRow(self.dino_options_widget)
-        root.addLayout(form)
-        if settings.config_error:
-            error = QLabel(settings.config_error, self)
-            error.setWordWrap(True)
-            error.setStyleSheet(f"color: {DANGER};")
-            root.addWidget(error)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-    def _browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "검출용 Python 선택", self.python_edit.text())
-        if path:
-            self.python_edit.setText(path)
-
-    def _set_dino_options(self, settings: DetectionSettings) -> None:
-        self.dino_chunk_spin.setValue(settings.dino_chunk_size)
-        self.dino_box_spin.setValue(settings.dino_box_threshold)
-        self.dino_text_spin.setValue(settings.dino_text_threshold)
-        self.dino_fp16_check.setChecked(settings.dino_fp16)
-
-    def settings(self) -> DetectionSettings:
-        # 모델은 번들 Base, 연결 방식은 오프라인, 백엔드는 Grounding DINO로 고정한다.
-        return DetectionSettings(
-            python=self.python_edit.text().strip(),
-            model=bundled_model_path(),
-            device=str(self.device_combo.currentData()),
-            offline=True,
-            backend=DEFAULT_BACKEND,
-            dino_chunk_size=self.dino_chunk_spin.value(),
-            dino_box_threshold=self.dino_box_spin.value(),
-            dino_text_threshold=self.dino_text_spin.value(),
-            dino_fp16=self.dino_fp16_check.isChecked(),
-        )
-
-
 class DetectionPanel(QWidget):
     run_requested = Signal()
     cancel_requested = Signal()
-    settings_requested = Signal()
     range_changed = Signal(int, int)  # zero-based, inclusive
     seek_requested = Signal(int)
     selection_changed = Signal(list)
@@ -273,7 +171,7 @@ class DetectionPanel(QWidget):
         root.setContentsMargins(16, 8, 16, 8)
         root.setSpacing(6)
 
-        # -- heading: title, classes, settings --------------------------------------
+        # -- heading: title, classes --------------------------------------
         heading = QBoxLayout(QBoxLayout.Direction.TopToBottom)
         self._responsive_rows.append((heading, 570))
         title = QLabel("객체 검출 · 라벨링", self)
@@ -284,11 +182,6 @@ class DetectionPanel(QWidget):
         self.classes_button = QPushButton(self)
         self.classes_button.setIcon(material_icon("category", PRIMARY))
         heading_actions.addWidget(self.classes_button)
-        self.settings_button = QToolButton(self)
-        self.settings_button.setIcon(material_icon("settings", PRIMARY))
-        self.settings_button.setToolTip("객체 검출 환경 (검출용 Python·장치·임계값)")
-        self.settings_button.setAccessibleName("객체 검출 환경")
-        heading_actions.addWidget(self.settings_button)
         heading.addWidget(heading_widget)
         root.addLayout(heading)
 
@@ -505,7 +398,6 @@ class DetectionPanel(QWidget):
         root.addLayout(edit_rows)
         root.addStretch(1)
 
-        self.settings_button.clicked.connect(self.settings_requested)
         self.start_spin.valueChanged.connect(self._range_edited)
         self.end_spin.valueChanged.connect(self._range_edited)
         self.step_spin.valueChanged.connect(self._update_summary)
@@ -633,11 +525,7 @@ class DetectionPanel(QWidget):
     def set_running(self, running: bool) -> None:
         self._running = running
         self.cancel_button.setEnabled(running)
-        for widget in (
-            self.classes_button,
-            self.settings_button,
-        ):
-            widget.setEnabled(not running)
+        self.classes_button.setEnabled(not running)
         if running:
             self.progress.setRange(0, 0)
         else:
@@ -1026,7 +914,6 @@ class DetectionPanel(QWidget):
 __all__ = [
     "ClassPickerDialog",
     "DetectionPanel",
-    "DetectionSettingsDialog",
     "ROLE_COLORS",
     "selected_class_keys",
 ]

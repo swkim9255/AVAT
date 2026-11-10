@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings
 
 import investigator.detection_process as process
 import investigator.runtime_paths as runtime_paths
@@ -161,22 +160,18 @@ def test_manifest_without_python_uses_running_app(tmp_path, monkeypatch, options
     assert settings.offline is True
 
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
-    store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    loaded = DetectionSettings.load(store)
+    loaded = DetectionSettings.load()
     assert not loaded.config_error
     assert loaded.executable == sys.executable
-    assert not store.allKeys()
 
 
 def test_frozen_manifest_without_python_uses_exe(frozen_exe, tmp_path, monkeypatch):
     _manifest(frozen_exe.parent)
     monkeypatch.setattr(process, "REPOSITORY_ROOT", runtime_paths.application_root())
-    store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    loaded = DetectionSettings.load(store)
+    loaded = DetectionSettings.load()
     assert not loaded.config_error
     assert loaded.python == ""
     assert loaded.executable == str(frozen_exe)
-    assert not store.allKeys()
 
 
 def test_manifest_keeps_explicit_relative_python(frozen_exe, tmp_path):

@@ -467,9 +467,6 @@ class MainWindow(DetectionMixin, QMainWindow):
         self.edit_form_action = QAction("조사 항목 편집…", self)
         self.edit_form_action.triggered.connect(self.edit_form)
         settings_menu.addAction(self.edit_form_action)
-        self.detection_settings_action = QAction("객체 검출 환경…", self)
-        self.detection_settings_action.triggered.connect(self.edit_detection_settings)
-        settings_menu.addAction(self.detection_settings_action)
 
         help_menu = self.menuBar().addMenu("도움말")
         shortcuts_action = QAction("재생 단축키", self)

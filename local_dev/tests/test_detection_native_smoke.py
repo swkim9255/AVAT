@@ -34,11 +34,9 @@ def test_real_window_detection_overlay_and_save(qtbot, tmp_path, monkeypatch):
     assert settings.offline and not settings.config_error
     same_environment = os.environ.get("AVAT_NATIVE_SAME_ENV") == "1"
     if same_environment:
-        # QSettings is isolated by detection_test_isolation, never the real user.
-        DetectionSettings(
-            python=sys.executable, model=settings.model,
-            device=settings.device, offline=settings.offline,
-        ).save()
+        # 저장하는 검출 설정이 없으므로, 이 실행에서만 같은 Python을 쓰도록 바꿔 끼운다.
+        fixed = DetectionSettings(python=sys.executable, model=settings.model, device=settings.device)
+        monkeypatch.setattr(DetectionSettings, "load", classmethod(lambda cls: fixed))
     errors = []
     monkeypatch.setattr(QMessageBox, "warning", lambda _parent, title, text, *args: errors.append((title, text)))
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)

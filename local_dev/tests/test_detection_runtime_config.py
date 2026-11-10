@@ -1,4 +1,4 @@
-"""Workspace-local native runtime selection without altering user preferences."""
+"""작업 공간(배포)의 detection-runtime.json으로 검출 실행 환경을 정한다(사용자 설정 없음)."""
 
 from __future__ import annotations
 
@@ -31,61 +31,25 @@ def runtime(tmp_path, monkeypatch):
     }
     manifest = tmp_path / process.RUNTIME_MANIFEST
     manifest.write_text(json.dumps(data), encoding="utf-8")
-    store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    return tmp_path, manifest, data, store
+    return tmp_path, manifest, data
 
 
-def test_manifest_uses_native_paths_and_does_not_save_preferences(runtime):
-    root, _, _, store = runtime
-    settings = DetectionSettings.load(store)
+def test_manifest_uses_native_paths(runtime):
+    root, _, _ = runtime
+    settings = DetectionSettings.load()
     assert settings.executable == str(root / ".venv-sam3" / "Scripts" / "python.exe")
     assert settings.model == str(root / "runtime" / "models" / "sam3")
     assert settings.offline is True
     assert settings.device == "auto"
     assert not settings.config_error
-    assert not store.allKeys()
 
 
 def test_manifest_relative_paths_do_not_depend_on_cwd(runtime, monkeypatch, tmp_path):
-    root, _, _, store = runtime
+    root, _, _ = runtime
     elsewhere = tmp_path / "unrelated"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
-    assert DetectionSettings.load(store).model == str(root / "runtime" / "models" / "sam3")
-
-
-def test_empty_python_and_stale_legacy_values_do_not_override_native_defaults(runtime):
-    _, _, _, store = runtime
-    store.setValue(process.SETTINGS_PYTHON, "  ")
-    store.setValue(process.SETTINGS_MODEL, "old/model")
-    store.setValue(process.SETTINGS_DEVICE, "cpu")
-    store.setValue(process.SETTINGS_OFFLINE, False)
-    settings = DetectionSettings.load(store)
-    assert settings.device == "auto"
-    assert settings.offline is True
-    assert settings.model != "old/model"
-
-
-def test_user_python_and_device_win_but_model_and_offline_stay_bundled(runtime):
-    root, _, _, store = runtime
-    DetectionSettings(python=sys.executable, model="other/model", device="cpu").save(store)
-    settings = DetectionSettings.load(store)
-    assert settings.python == sys.executable
-    assert settings.device == "cpu"
-    # 모델은 고를 수 없다. 매니페스트(번들)의 모델 경로를 그대로 쓴다.
-    assert settings.model == str(root / "runtime" / "models" / "sam3")
-    assert settings.offline is True
-    DetectionSettings(python=sys.executable, offline=False).save(store)
-    assert DetectionSettings.load(store).offline is True
-
-
-def test_invalid_unused_manifest_does_not_block_explicit_user_runtime(runtime):
-    _, manifest, _, store = runtime
-    manifest.write_text("broken", encoding="utf-8")
-    DetectionSettings(python=sys.executable, model="other/model").save(store)
-    settings = DetectionSettings.load(store)
-    assert settings.python == sys.executable
-    assert not settings.config_error
+    assert DetectionSettings.load().model == str(root / "runtime" / "models" / "sam3")
 
 
 @pytest.mark.parametrize(
@@ -102,31 +66,33 @@ def test_invalid_unused_manifest_does_not_block_explicit_user_runtime(runtime):
     ],
 )
 def test_invalid_manifest_reports_exact_config_error(runtime, key, value, expected):
-    _, manifest, data, store = runtime
+    _, manifest, data = runtime
     data[key] = value
     manifest.write_text(json.dumps(data), encoding="utf-8")
-    settings = DetectionSettings.load(store)
+    settings = DetectionSettings.load()
     assert str(manifest) in settings.config_error
     assert expected in settings.config_error
 
 
-@pytest.mark.parametrize("content", ["[]", "null", "{not-json}", "\ufeff{broken}"])
+@pytest.mark.parametrize("content", ["[]", "null", "{not-json}", "﻿{broken}"])
 def test_invalid_json_is_not_silently_replaced_with_gui_python(runtime, content):
-    _, manifest, _, store = runtime
+    _, manifest, _ = runtime
     manifest.write_text(content, encoding="utf-8")
-    assert "객체 검출 실행 설정을 읽을 수 없습니다" in DetectionSettings.load(store).config_error
+    error = DetectionSettings.load().config_error
+    assert "객체 검출 실행 설정을 읽을 수 없습니다" in error
+    # 설정 창이 없으므로 없는 메뉴를 안내하지 않는다.
+    assert "객체 검출 환경" not in error
 
 
 def test_utf8_bom_manifest_supported(runtime):
-    _, manifest, data, store = runtime
+    _, manifest, data = runtime
     manifest.write_text(json.dumps(data), encoding="utf-8-sig")
-    assert not DetectionSettings.load(store).config_error
+    assert not DetectionSettings.load().config_error
 
 
 def test_missing_manifest_uses_bundled_base_model_offline(tmp_path, monkeypatch, bundled_dino_model):
     monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
-    store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    settings = DetectionSettings.load(store)
+    settings = DetectionSettings.load()
     assert settings.executable == sys.executable
     assert settings.model == str(bundled_dino_model)
     assert settings.device == "auto"
@@ -137,39 +103,33 @@ def test_missing_manifest_uses_bundled_base_model_offline(tmp_path, monkeypatch,
 @pytest.mark.parametrize("with_manifest", [True, False])
 @pytest.mark.parametrize("offline", [True, "true", "1", False, "false", "0"])
 def test_old_tiny_or_online_settings_are_ignored(runtime, monkeypatch, bundled_dino_model, with_manifest, offline):
-    root, manifest, _, store = runtime
+    root, manifest, _ = runtime
     if not with_manifest:
         manifest.unlink()
-    store.setValue(process.SETTINGS_PYTHON, sys.executable)
-    store.setValue(process.SETTINGS_BACKEND, "grounding_dino")
-    store.setValue(process.SETTINGS_MODEL, "IDEA-Research/grounding-dino-tiny")
-    store.setValue(process.SETTINGS_OFFLINE, offline)
-    settings = DetectionSettings.load(store)
+    # 예전 버전의 설정 창이 settings.ini에 남긴 값
+    store = QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat)
+    store.setValue("detection/python", sys.executable)
+    store.setValue("detection/backend", "grounding_dino")
+    store.setValue("detection/model", "IDEA-Research/grounding-dino-tiny")
+    store.setValue("detection/offline", offline)
+    store.setValue("detection/device", "cpu")
+    monkeypatch.setattr(process, "detection_settings_store", lambda: store)
+    settings = DetectionSettings.load()
     expected = root / "runtime" / "models" / "sam3" if with_manifest else bundled_dino_model
     assert settings.model == str(expected)
     assert settings.offline is True
+    assert settings.device == "auto"
     assert not settings.config_error
 
 
 @pytest.mark.parametrize("value", [False, "false", "yes", 3])
 def test_manifest_offline_key_is_ignored(runtime, value):
-    _, manifest, data, store = runtime
+    _, manifest, data = runtime
     data["offline"] = value
     manifest.write_text(json.dumps(data), encoding="utf-8")
-    settings = DetectionSettings.load(store)
+    settings = DetectionSettings.load()
     assert not settings.config_error
     assert settings.offline is True
-
-
-def test_save_removes_old_model_and_offline_keys(runtime):
-    _, _, _, store = runtime
-    store.setValue(process.SETTINGS_MODEL, "IDEA-Research/grounding-dino-tiny")
-    store.setValue(process.SETTINGS_OFFLINE, False)
-    DetectionSettings(python=sys.executable, model="other/model", offline=False).save(store)
-    store.sync()
-    assert not store.contains(process.SETTINGS_MODEL)
-    assert not store.contains(process.SETTINGS_OFFLINE)
-    assert store.contains(process.SETTINGS_PYTHON)
 
 
 def _job(tmp_path: Path, settings: DetectionSettings) -> DetectionJob:
@@ -197,9 +157,9 @@ def test_offline_environment_is_always_applied(qtbot, tmp_path, monkeypatch, off
 
 
 def test_manifest_error_fails_before_start_and_cleans_temporary_files(qtbot, runtime):
-    root, manifest, _, store = runtime
+    root, manifest, _ = runtime
     manifest.write_text("broken", encoding="utf-8")
-    settings = DetectionSettings.load(store)
+    settings = DetectionSettings.load()
     job = _job(root, settings)
     with qtbot.waitSignal(job.failed, timeout=1000) as blocker:
         job.start()

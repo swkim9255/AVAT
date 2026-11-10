@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -31,10 +30,6 @@ def isolated_settings(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     )
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     yield
-
-
-def _fake_python(tmp_path: Path) -> str:
-    return sys.executable
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +119,6 @@ def test_canvas_maps_boxes_through_rotation(qtbot):  # type: ignore[no-untyped-d
 
 @pytest.mark.usefixtures("bundled_dino_model")
 def test_range_detection_labels_and_form(window, qtbot, tmp_path):  # type: ignore[no-untyped-def]
-    DetectionSettings(python=_fake_python(tmp_path), device="cpu", backend="grounding_dino").save()
     window.playback.detection_panel_button.setChecked(True)
     panel = window.detection_panel
     assert window.detection_scroll.isVisible()
@@ -190,18 +184,34 @@ def test_range_detection_labels_and_form(window, qtbot, tmp_path):  # type: igno
 
 
 @pytest.mark.usefixtures("bundled_dino_model")
-def test_manual_box_and_failed_worker(window, qtbot, tmp_path):  # type: ignore[no-untyped-def]
+def test_manual_box_and_failed_worker(window, qtbot, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     window.playback.detection_panel_button.setChecked(True)
     window._canvas_box_drawn((10.0, 10.0, 40.0, 30.0))
     objects = window.current_case.video_objects().objects
     assert len(objects) == 1 and objects[0].object_id == "U001" and objects[0].label is None
     assert window.detection_panel.selected_uids() == [objects[0].uid]
 
-    DetectionSettings(python=str(tmp_path / "missing-python"), device="cpu").save()
+    # 실행 값을 저장하는 설정이 없으므로, 없는 실행 파일을 쓰는 값으로 바꿔 끼운다.
+    missing = DetectionSettings(python=str(tmp_path / "missing-python"))
+    monkeypatch.setattr(DetectionSettings, "load", classmethod(lambda cls: missing))
     window.detection_panel.run_button.click()
     qtbot.waitUntil(lambda: window._detection_job is None, timeout=10000)
-    assert "검출용 Python" in window.detection_panel.status_label.text()
+    assert "검출 프로그램을 실행할 수 없습니다" in window.detection_panel.status_label.text()
     assert len(window.current_case.video_objects().objects) == 1
+
+
+def test_detection_settings_are_not_in_menu_or_panel(window):  # type: ignore[no-untyped-def]
+    # 객체 검출 설정 기능은 없다. 설정 메뉴에는 조사 항목 편집만 남는다.
+    texts = [
+        action.text()
+        for menu_action in window.menuBar().actions() if menu_action.menu() is not None
+        for action in menu_action.menu().actions()
+    ]
+    assert "조사 항목 편집…" in texts
+    assert not any("객체 검출 환경" in text for text in texts)
+    assert not hasattr(window, "detection_settings_action")
+    assert not hasattr(window, "edit_detection_settings")
+    assert not hasattr(window.detection_panel, "settings_button")
 
 
 def test_speed_and_detection_panels_replace_each_other(window):  # type: ignore[no-untyped-def]
@@ -285,7 +295,6 @@ def test_optional_object_edit_keeps_completed_case_presentation(window):
 @pytest.mark.usefixtures("bundled_dino_model")
 def test_result_stays_with_requested_case_after_selection_changes(window, qtbot, tmp_path):
     case = window.current_case
-    DetectionSettings(python=sys.executable, device="cpu", backend="grounding_dino").save()
     window.playback.detection_panel_button.setChecked(True)
     window.detection_panel._class_keys = ["vehicle"]
     window.run_detection()
@@ -300,7 +309,6 @@ def test_result_stays_with_requested_case_after_selection_changes(window, qtbot,
 
 @pytest.mark.usefixtures("bundled_dino_model")
 def test_shutdown_stops_active_detection_without_saving_partial_result(window):
-    DetectionSettings(python=sys.executable, device="cpu", backend="grounding_dino").save()
     window.playback.detection_panel_button.setChecked(True)
     window.run_detection()
     job = window._detection_job

@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import json
-import sys
 
 import pytest
-from PySide6.QtCore import QSettings
 
 import investigator.detection_process as process
 from investigator.detection_process import DetectionJob, DetectionRequest, DetectionSettings
-from investigator.widgets.detection_panel import DetectionSettingsDialog
 
 
 def dino_folder(path):
@@ -34,17 +31,6 @@ def test_new_fields_preserve_old_positional_constructor_and_configured_default()
     # 기본 모델은 배포에 포함된 Base 폴더이고, 항상 오프라인이다.
     assert DetectionSettings().model == str(process.default_dino_model_path())
     assert DetectionSettings().offline is True
-
-
-def test_dino_qsettings_roundtrip(qtbot, tmp_path, monkeypatch, bundled_dino_model):
-    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
-    store = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
-    configured = DetectionSettings(sys.executable, str(bundled_dino_model), "cuda", True,
-                                   backend="grounding_dino", dino_chunk_size=6,
-                                   dino_box_threshold=0.21, dino_text_threshold=0.17, dino_fp16=False)
-    configured.save(store)
-    restored = DetectionSettings.load(store)
-    assert restored == configured
 
 
 @pytest.fixture
@@ -152,38 +138,18 @@ def test_remote_model_id_is_rejected_before_process_start(qtbot, tmp_path, monke
     assert not called
 
 
-def test_dino_controls_always_show_and_preserve_custom_values(qtbot, tmp_path, monkeypatch, bundled_dino_model):
-    monkeypatch.setattr(process, "REPOSITORY_ROOT", tmp_path)
-    dialog = DetectionSettingsDialog(DetectionSettings(backend="sam3", model="original-sam"))
-    qtbot.addWidget(dialog)
-    assert not dialog.dino_options_widget.isHidden()
-    assert dialog.settings().model == str(bundled_dino_model)
-    dialog.dino_chunk_spin.setValue(6)
-    dialog.dino_box_spin.setValue(0.24)
-    dialog.dino_text_spin.setValue(0.18)
-    dialog.dino_fp16_check.setChecked(False)
-    result = dialog.settings()
-    assert result.model == str(bundled_dino_model)
-    assert result.backend == "grounding_dino" and result.offline is True
-    assert result.dino_chunk_size == 6
-    assert result.dino_box_threshold == 0.24
-    assert result.dino_text_threshold == 0.18
-    assert result.dino_fp16 is False
-
-
-def test_dino_dialog_preserves_passed_preset_without_a_model_switch(qtbot, manifest, monkeypatch):
+def test_workspace_manifest_values_are_loaded(manifest, monkeypatch):
     path, data = manifest
     path = path.with_name(process.RUNTIME_MANIFEST)
     path.write_text(json.dumps(data), encoding="utf-8")
-    # 설정 창의 모델은 작업 공간 매니페스트(번들)의 모델 경로로 고정된다.
+    # 배포의 detection-runtime.json이 있으면 그 값을 그대로 쓴다(사용자 설정 없음).
     monkeypatch.setattr(process, "REPOSITORY_ROOT", path.parent)
-    settings, error = process._load_runtime_manifest(path)
-    assert not error
-    dialog = DetectionSettingsDialog(settings)
-    qtbot.addWidget(dialog)
-    assert dialog.settings().python == str(path.parent / "python.exe")
-    assert dialog.settings().model == str(path.parent / "model")
-    assert dialog.settings().offline is True
-    assert dialog.settings().dino_chunk_size == 7
-    assert dialog.settings().dino_fp16 is False
-    assert dialog.settings().backend == "grounding_dino"
+    settings = DetectionSettings.load()
+    assert not settings.config_error
+    assert settings.python == str(path.parent / "python.exe")
+    assert settings.model == str(path.parent / "model")
+    assert settings.device == "cuda"
+    assert settings.offline is True
+    assert settings.dino_chunk_size == 7
+    assert settings.dino_fp16 is False
+    assert settings.backend == "grounding_dino"

@@ -52,11 +52,7 @@ from investigator.object_detection import (
 )
 from investigator.object_history import ObjectEditHistory
 from investigator.theme import MUTED
-from investigator.widgets.detection_panel import (
-    ROLE_COLORS,
-    DetectionPanel,
-    DetectionSettingsDialog,
-)
+from investigator.widgets.detection_panel import ROLE_COLORS, DetectionPanel
 from investigator.widgets.video_player import OverlayBox
 
 
@@ -111,7 +107,6 @@ class DetectionMixin:
         panel.range_changed.connect(self._detection_range_changed)
         panel.run_requested.connect(self.run_detection)
         panel.cancel_requested.connect(self.cancel_detection)
-        panel.settings_requested.connect(self.edit_detection_settings)
         panel.seek_requested.connect(self._seek_video)
         panel.selection_changed.connect(self._object_selection_changed)
         panel.confidence_threshold_changed.connect(lambda _value: self._update_overlay())
@@ -367,11 +362,6 @@ class DetectionMixin:
         self.playback.set_selection_range(start, end)
 
     # -- running ---------------------------------------------------------------
-
-    def edit_detection_settings(self) -> None:
-        dialog = DetectionSettingsDialog(DetectionSettings.load(), self)
-        if dialog.exec():
-            dialog.settings().save()
 
     def run_detection(self) -> None:
         if self._detection_job is not None:

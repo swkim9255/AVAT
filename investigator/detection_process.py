@@ -1,9 +1,10 @@
-"""Run the Grounding DINO detection worker in a separate process (QProcess).
+"""Grounding DINO 검출 워커를 별도 프로세스(QProcess)로 실행한다.
 
-The worker can use the same Python environment as AVAT, or an explicitly
-configured interpreter. It reports JSONL events on stdout and writes the
-result document only on success, so a cancelled or failed run leaves nothing
-behind for the GUI to merge.
+검출 실행 값(검출용 Python·장치·청크·임계값·정밀도)은 사용자가 바꾸지 않는다.
+배포에 들어 있는 detection-runtime.json이 있으면 그 값을, 없으면 DetectionSettings의
+기본값을 쓴다. python이 비어 있으면 AVAT를 실행한 Python(EXE에서는 AVAT.exe 자신)이
+워커가 된다. 워커는 stdout으로 JSONL 이벤트를 보내고 성공했을 때만 결과 문서를 쓰므로,
+취소·실패한 실행은 GUI에 병합할 것을 남기지 않는다.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ import math
 import shutil
 import sys
 import tempfile
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,50 +29,34 @@ from investigator.runtime_paths import (
 from investigator.user_data import SETTINGS_FILENAME, app_user_data_directory
 
 REPOSITORY_ROOT = runtime_data_root()
-SETTINGS_PYTHON = "detection/python"
-# 예전 버전이 저장한 모델·연결 방식 키. 이제는 읽지 않고, 저장할 때 지운다.
-SETTINGS_MODEL = "detection/model"
-SETTINGS_DEVICE = "detection/device"
-SETTINGS_OFFLINE = "detection/offline"
-SETTINGS_BACKEND = "detection/backend"
-SETTINGS_DINO_CHUNK_SIZE = "detection/dino_chunk_size"
-SETTINGS_DINO_BOX_THRESHOLD = "detection/dino_box_threshold"
-SETTINGS_DINO_TEXT_THRESHOLD = "detection/dino_text_threshold"
-SETTINGS_DINO_FP16 = "detection/dino_fp16"
 RUNTIME_MANIFEST = "detection-runtime.json"
 DEFAULT_BACKEND = "grounding_dino"
 CANCEL_GRACE_MS = 15_000
 MAX_EVENT_BUFFER = 256 * 1024
+# 실행 환경을 고를 설정 창이 없으므로, 프로그램 폴더가 온전한지 확인하도록 안내한다.
+INSTALL_CHECK_HINT = "프로그램 폴더(systems)가 빠짐없이 복사되었는지 확인해 주세요."
 MISSING_RUNTIME_HINT = (
-    "Grounding DINO 실행 환경(torch·torchvision·transformers)을 찾지 못했습니다. "
-    "설정 → 객체 검출 환경에서 검출용 Python을 지정해 주세요."
+    "Grounding DINO 실행 환경(torch·torchvision·transformers)을 찾지 못했습니다. " + INSTALL_CHECK_HINT
 )
 
 
 def detection_settings_store() -> QSettings:
     user_data = app_user_data_directory()
     if user_data is not None:
-        # EXE: 검출 설정도 systems/사용자데이터에 보관해 앱 교체 시 함께 보존한다.
+        # EXE: 검출 패널의 클래스 선택·표시 신뢰도도 systems/사용자데이터에 보관해
+        # 앱 교체 시 함께 보존한다.
         return QSettings(str(user_data / SETTINGS_FILENAME), QSettings.Format.IniFormat)
     return QSettings()
 
 
-def bundled_model_path() -> str:
-    """검출에 쓰는 Grounding DINO Base 모델 폴더.
-
-    detection-runtime.json에 model이 있으면 그 경로, 없으면 배포에 포함된 기본 경로다.
-    모델은 사용자가 바꿀 수 없고, 항상 이 로컬 폴더를 오프라인으로 읽는다.
-    """
-    native, _ = _load_runtime_manifest(REPOSITORY_ROOT / RUNTIME_MANIFEST)
-    return native.model if native is not None else str(default_dino_model_path())
-
-
 @dataclass(slots=True)
 class DetectionSettings:
+    """검출 실행 값. 설정 창이 없으므로 사용자가 바꾸지 않고 기본값으로 고정한다."""
+
     python: str = ""
     model: str = field(default_factory=lambda: str(default_dino_model_path()))
     device: str = "auto"
-    # 검출은 항상 오프라인이다(예전 설정의 offline=false는 무시).
+    # 검출은 항상 오프라인이다.
     offline: bool = True
     config_error: str = ""
     backend: str = DEFAULT_BACKEND
@@ -86,78 +70,23 @@ class DetectionSettings:
         return self.python.strip() or sys.executable
 
     @classmethod
-    def load(cls, settings: QSettings | None = None) -> DetectionSettings:
-        store = settings if settings is not None else detection_settings_store()
+    def load(cls) -> DetectionSettings:
+        """배포의 detection-runtime.json 값을, 파일이 없으면 기본값을 돌려준다.
+
+        예전 버전이 settings.ini에 저장한 검출 설정(detection/python·device·model·
+        offline·dino_* 등)은 읽지 않는다.
+        """
         native, manifest_error = _load_runtime_manifest(REPOSITORY_ROOT / RUNTIME_MANIFEST)
-        base = native or cls()
-        # Only explicitly saved DINO settings are read. Older backend-less or
-        # other-model settings do not select a legacy model or interpreter.
-        if store.value(SETTINGS_BACKEND, "") != DEFAULT_BACKEND:
-            return base if native else cls(config_error=manifest_error)
-        python = str(store.value(SETTINGS_PYTHON, base.python) or "").strip()
-        device = str(store.value(SETTINGS_DEVICE, base.device) or base.device)
-        # detection/model·detection/offline은 읽지 않는다. 예전 설정에 Tiny·모델 ID·
-        # offline=false가 남아 있어도 번들 Base 모델을 오프라인으로 쓴다.
-        dino_options, dino_error = {}, ""
-        try:
-            dino_options = _dino_options({
-                "dino_chunk_size": store.value(SETTINGS_DINO_CHUNK_SIZE, base.dino_chunk_size),
-                "dino_box_threshold": store.value(SETTINGS_DINO_BOX_THRESHOLD, base.dino_box_threshold),
-                "dino_text_threshold": store.value(SETTINGS_DINO_TEXT_THRESHOLD, base.dino_text_threshold),
-                "dino_fp16": _setting_bool(store.value(SETTINGS_DINO_FP16, base.dino_fp16), base.dino_fp16),
-            }, from_settings=True)
-        except ValueError as exc:
-            dino_error = str(exc)
-        return cls(
-            python=python,
-            model=base.model,
-            device=device if device in {"auto", "cuda", "cpu"} else "auto",
-            offline=True,
-            config_error=(manifest_error if not python else "") or dino_error,
-            backend=DEFAULT_BACKEND,
-            **dino_options,
-        )
-
-    def save(self, settings: QSettings | None = None) -> None:
-        if self.backend != DEFAULT_BACKEND:
-            raise ValueError("Grounding DINO 설정만 저장할 수 있습니다.")
-        store = settings if settings is not None else detection_settings_store()
-        store.setValue(SETTINGS_PYTHON, self.python.strip())
-        # 모델·연결 방식은 고정이므로 저장하지 않고, 예전 키가 남아 있으면 지운다.
-        store.remove(SETTINGS_MODEL)
-        store.remove(SETTINGS_OFFLINE)
-        store.setValue(SETTINGS_DEVICE, self.device)
-        store.setValue(SETTINGS_BACKEND, self.backend)
-        store.setValue(SETTINGS_DINO_CHUNK_SIZE, self.dino_chunk_size)
-        store.setValue(SETTINGS_DINO_BOX_THRESHOLD, self.dino_box_threshold)
-        store.setValue(SETTINGS_DINO_TEXT_THRESHOLD, self.dino_text_threshold)
-        store.setValue(SETTINGS_DINO_FP16, self.dino_fp16)
+        return native if native is not None else cls(config_error=manifest_error)
 
 
-def _setting_bool(value: object, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"true", "1"}:
-        return True
-    if text in {"false", "0"}:
-        return False
-    return default
-
-
-def _dino_options(data: dict, *, from_settings: bool = False) -> dict:
+def _dino_options(data: dict) -> dict:
     chunk = data.get("dino_chunk_size", 8)
-    if from_settings and isinstance(chunk, str):
-        with suppress(ValueError):
-            chunk = int(chunk)
     if isinstance(chunk, bool) or not isinstance(chunk, int) or chunk < 1:
         raise ValueError("Grounding DINO 청크 크기는 1 이상의 정수여야 합니다.")
     options = {"dino_chunk_size": chunk}
     for key, default in (("dino_box_threshold", 0.3), ("dino_text_threshold", 0.25)):
         value = data.get(key, default)
-        if from_settings and isinstance(value, str):
-            with suppress(ValueError):
-                value = float(value)
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not 0 <= value <= 1 or not math.isfinite(value)):
             raise ValueError(f"Grounding DINO {key}는 0~1의 유한한 숫자여야 합니다.")
@@ -236,8 +165,7 @@ def _load_runtime_manifest(path: Path) -> tuple[DetectionSettings | None, str]:
     except (OSError, ValueError, TypeError, RecursionError) as exc:
         return None, (
             f"객체 검출 실행 설정을 읽을 수 없습니다: {path}\n{exc}\n"
-            "설정 파일의 경로·형식을 확인하거나 설정 → 객체 검출 환경에서 "
-            "검출용 Python을 지정해 주세요."
+            "설정 파일의 경로·형식을 확인해 주세요."
         )
 
 
@@ -261,7 +189,7 @@ class DetectionRequest:
 def friendly_error(message: str) -> str:
     text = message.strip()
     if "No module named 'ultralytics'" in text:
-        return "YOLOE 실행 환경(ultralytics)을 찾지 못했습니다. 설정 → 객체 검출 환경에서 YOLOE용 Python을 지정해 주세요."
+        return "YOLOE 실행 환경(ultralytics)을 찾지 못했습니다."
     if any(f"No module named '{module}'" in text for module in ("torch", "torchvision", "transformers")):
         return MISSING_RUNTIME_HINT
     if "Sam3" in text and ("cannot import" in text or "has no attribute" in text):
@@ -271,7 +199,7 @@ def friendly_error(message: str) -> str:
             "SAM 3 모델에 접근할 수 없습니다. Hugging Face 사용 동의와 로그인 상태를 확인해 주세요."
         )
     if "out of memory" in text.casefold():
-        return "GPU 메모리가 부족합니다. 검출 클래스를 줄이거나 CPU 장치를 선택해 주세요."
+        return "GPU 메모리가 부족합니다. 검출 클래스를 줄이거나 다른 프로그램을 닫은 뒤 다시 실행해 주세요."
     return text or "객체 검출 중 알 수 없는 오류가 발생했습니다."
 
 
@@ -494,8 +422,7 @@ class DetectionJob(QObject):
     def _process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.ProcessError.FailedToStart and not self._done:
             self._finish_failed(
-                f"검출용 Python을 실행할 수 없습니다: {self.settings.executable}\n"
-                "설정 → 객체 검출 환경에서 경로를 확인해 주세요."
+                f"검출 프로그램을 실행할 수 없습니다: {self.settings.executable}\n" + INSTALL_CHECK_HINT
             )
 
     def _process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
@@ -541,4 +468,4 @@ class DetectionJob(QObject):
         shutil.rmtree(self._temp_dir, ignore_errors=True)
 
 
-__all__ = ["DetectionJob", "DetectionRequest", "DetectionSettings", "bundled_model_path", "friendly_error"]
+__all__ = ["DetectionJob", "DetectionRequest", "DetectionSettings", "friendly_error"]

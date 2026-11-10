@@ -171,7 +171,7 @@ def test_real_qprocess_missing_python_reports_error(qtbot, tmp_path):
     job.settings.python = str(tmp_path / "missing-python.exe")
     with qtbot.waitSignal(job.failed, timeout=10000) as blocker:
         job.start()
-    assert "검출용 Python" in blocker.args[0]
+    assert "검출 프로그램을 실행할 수 없습니다" in blocker.args[0]
     assert not job._temp_dir.exists()
 
 

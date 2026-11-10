@@ -15,7 +15,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -62,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     sys.path.insert(0, str(ROOT))
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QSettings, QTimer
+    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
     from investigator.detection_process import (
@@ -88,122 +87,119 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(["avat-native-detection-smoke"])
     app.setQuitOnLastWindowClosed(False)
     started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="avat-native-smoke-") as directory:
-        # Explicitly isolated settings make the manifest authoritative without
-        # clearing, reading, or changing the real GUI user's chosen interpreter.
-        store = QSettings(str(Path(directory) / "settings.ini"), QSettings.Format.IniFormat)
-        if args.runtime_manifest.resolve() == (ROOT / "detection-runtime.json").resolve():
-            settings = DetectionSettings.load(store)
-        else:
-            settings, error = _load_runtime_manifest(args.runtime_manifest.resolve())
-            if settings is None:
-                _emit("failed", message=error)
-                return 2
-        if settings.config_error:
-            _emit("failed", message=settings.config_error)
+    # 검출 실행 값은 저장하지 않으므로 매니페스트(또는 기본값)가 그대로 쓰인다.
+    if args.runtime_manifest.resolve() == (ROOT / "detection-runtime.json").resolve():
+        settings = DetectionSettings.load()
+    else:
+        settings, error = _load_runtime_manifest(args.runtime_manifest.resolve())
+        if settings is None:
+            _emit("failed", message=error)
             return 2
-        _emit(
-            "runtime",
-            python=settings.executable,
-            model=settings.model,
-            device=settings.device,
-            offline=settings.offline,
-            backend=settings.backend,
-        )
-        request = DetectionRequest(
-            video_path=args.video,
-            start_frame=args.start_frame,
-            end_frame=args.end_frame,
-            frame_step=args.frame_step,
-            classes=args.classes,
-            role=ROLE_TRIGGER,
-        )
-        job = DetectionJob(request, settings)
-        watchdog = QTimer()
-        watchdog.setSingleShot(True)
-        state = {"exit_code": 1, "done": False}
+    if settings.config_error:
+        _emit("failed", message=settings.config_error)
+        return 2
+    _emit(
+        "runtime",
+        python=settings.executable,
+        model=settings.model,
+        device=settings.device,
+        offline=settings.offline,
+        backend=settings.backend,
+    )
+    request = DetectionRequest(
+        video_path=args.video,
+        start_frame=args.start_frame,
+        end_frame=args.end_frame,
+        frame_step=args.frame_step,
+        classes=args.classes,
+        role=ROLE_TRIGGER,
+    )
+    job = DetectionJob(request, settings)
+    watchdog = QTimer()
+    watchdog.setSingleShot(True)
+    state = {"exit_code": 1, "done": False}
 
-        def finish(code: int) -> None:
-            if state["done"]:
-                return
-            state["done"] = True
-            state["exit_code"] = code
-            watchdog.stop()
-            app.exit(code)
+    def finish(code: int) -> None:
+        if state["done"]:
+            return
+        state["done"] = True
+        state["exit_code"] = code
+        watchdog.stop()
+        app.exit(code)
 
-        def failed(message: str) -> None:
-            _emit("failed", message=message, elapsed_seconds=round(time.perf_counter() - started, 3))
-            finish(1)
+    def failed(message: str) -> None:
+        _emit("failed", message=message, elapsed_seconds=round(time.perf_counter() - started, 3))
+        finish(1)
 
-        def completed(document: dict[str, Any]) -> None:
-            try:
-                initial = VideoObjects()
-                before = initial.to_dict()
-                merged, added, replaced = merge_detection_result(
-                    initial,
-                    document,
-                    role=request.role,
-                    definition=FormDefinition.default(),
-                    start_frame=request.start_frame,
-                    end_frame=request.end_frame,
-                    frame_step=request.frame_step,
-                    classes=request.classes,
-                )
-                domain = merged.to_dict()
-                if VideoObjects.from_dict(domain).to_dict() != domain:
-                    raise ValueError("Domain serialization round-trip changed the result")
-                if initial.to_dict() != before or replaced:
-                    raise ValueError("Domain merge unexpectedly changed initial data")
-                if len(merged.runs) != 1:
-                    raise ValueError("Expected exactly one domain detection run")
-                summary = {
-                    "device": document.get("provenance", {}).get("device"),
-                    "processed_frames": document.get("sampling", {}).get("processed_frames"),
-                    "detections": len(document["detections"]),
-                    "objects": len(merged.objects),
-                    "added": added,
-                    "domain_roundtrip": "passed",
-                    "elapsed_seconds": round(time.perf_counter() - started, 3),
-                }
-                if args.output:
-                    artifact = {"summary": summary, "worker_result": document, "domain": domain}
-                    args.output.parent.mkdir(parents=True, exist_ok=True)
-                    with args.output.open("x", encoding="utf-8") as handle:
-                        json.dump(artifact, handle, ensure_ascii=False, indent=2, allow_nan=False)
-                    summary["artifact"] = str(args.output)
-                _emit("completed", **summary)
-                finish(0)
-            except (OSError, TypeError, ValueError, KeyError) as exc:
-                failed(f"Result/domain validation failed: {exc}")
-
-        def cancelled() -> None:
-            _emit("cancelled")
-            finish(2)
-
-        def timed_out() -> None:
-            _emit("failed", message="Real detection exceeded the 120-second watchdog")
-            finish(124)
-            job.kill()
-
-        job.status.connect(lambda message: _emit("status", message=message))
-        job.started.connect(lambda count: _emit("started", frames=count))
-        job.progress.connect(
-            lambda done, total, frame: _emit("progress", processed=done, total=total, frame=frame)
-        )
-        job.finished.connect(completed)
-        job.failed.connect(failed)
-        job.cancelled.connect(cancelled)
-        watchdog.timeout.connect(timed_out)
-        watchdog.start(WATCHDOG_MS)
-        # Defer startup until the event loop is active, including synchronous
-        # configuration/argument failures emitted before QProcess starts.
-        QTimer.singleShot(0, job.start)
+    def completed(document: dict[str, Any]) -> None:
         try:
-            app.exec()
-        finally:
-            watchdog.stop()
-            job.kill()
-        return state["exit_code"]
+            initial = VideoObjects()
+            before = initial.to_dict()
+            merged, added, replaced = merge_detection_result(
+                initial,
+                document,
+                role=request.role,
+                definition=FormDefinition.default(),
+                start_frame=request.start_frame,
+                end_frame=request.end_frame,
+                frame_step=request.frame_step,
+                classes=request.classes,
+            )
+            domain = merged.to_dict()
+            if VideoObjects.from_dict(domain).to_dict() != domain:
+                raise ValueError("Domain serialization round-trip changed the result")
+            if initial.to_dict() != before or replaced:
+                raise ValueError("Domain merge unexpectedly changed initial data")
+            if len(merged.runs) != 1:
+                raise ValueError("Expected exactly one domain detection run")
+            summary = {
+                "device": document.get("provenance", {}).get("device"),
+                "processed_frames": document.get("sampling", {}).get("processed_frames"),
+                "detections": len(document["detections"]),
+                "objects": len(merged.objects),
+                "added": added,
+                "domain_roundtrip": "passed",
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+            }
+            if args.output:
+                artifact = {"summary": summary, "worker_result": document, "domain": domain}
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                with args.output.open("x", encoding="utf-8") as handle:
+                    json.dump(artifact, handle, ensure_ascii=False, indent=2, allow_nan=False)
+                summary["artifact"] = str(args.output)
+            _emit("completed", **summary)
+            finish(0)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            failed(f"Result/domain validation failed: {exc}")
+
+    def cancelled() -> None:
+        _emit("cancelled")
+        finish(2)
+
+    def timed_out() -> None:
+        _emit("failed", message="Real detection exceeded the 120-second watchdog")
+        finish(124)
+        job.kill()
+
+    job.status.connect(lambda message: _emit("status", message=message))
+    job.started.connect(lambda count: _emit("started", frames=count))
+    job.progress.connect(
+        lambda done, total, frame: _emit("progress", processed=done, total=total, frame=frame)
+    )
+    job.finished.connect(completed)
+    job.failed.connect(failed)
+    job.cancelled.connect(cancelled)
+    watchdog.timeout.connect(timed_out)
+    watchdog.start(WATCHDOG_MS)
+    # Defer startup until the event loop is active, including synchronous
+    # configuration/argument failures emitted before QProcess starts.
+    QTimer.singleShot(0, job.start)
+    try:
+        app.exec()
+    finally:
+        watchdog.stop()
+        job.kill()
+    return state["exit_code"]
 
 
 if __name__ == "__main__":

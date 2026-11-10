@@ -40,7 +40,7 @@ def test_frozen_workspace_and_support_paths(frozen_root):
     assert default_log_directory() == user_data / "logs"
     settings = detection_settings_store()
     assert Path(settings.fileName()) == user_data / "settings.ini"
-    DetectionSettings(model="local DINO model").save()
+    settings.setValue("detection/classes", ["vehicle"])
     settings.sync()
     assert (user_data / "settings.ini").is_file()
     assert not (frozen_root / "systems/settings.ini").exists()
@@ -107,7 +107,13 @@ def test_frozen_caches_are_redirected_without_creating_external_directories(froz
 def test_portable_saved_model_never_overrides_bundled_base(frozen_root, monkeypatch):
     native = DetectionSettings(backend="grounding_dino", model="bundled DINO", offline=True)
     monkeypatch.setattr(process, "_load_runtime_manifest", lambda path: (native, ""))
-    DetectionSettings(model="saved DINO Tiny", offline=False).save()
+    # 예전 버전이 저장한 검출 설정이 남아 있어도 읽지 않는다.
+    store = detection_settings_store()
+    store.setValue("detection/backend", "grounding_dino")
+    store.setValue("detection/model", "saved DINO Tiny")
+    store.setValue("detection/offline", False)
+    store.setValue("detection/python", "saved-python.exe")
+    store.sync()
     restored = DetectionSettings.load()
     assert restored.backend == "grounding_dino"
     assert restored.model == "bundled DINO"
@@ -117,7 +123,10 @@ def test_portable_saved_model_never_overrides_bundled_base(frozen_root, monkeypa
 
 def test_portable_without_manifest_uses_systems_models_base(frozen_root, monkeypatch):
     monkeypatch.setattr(process, "_load_runtime_manifest", lambda path: (None, ""))
-    DetectionSettings(model="saved local DINO").save()
+    store = detection_settings_store()
+    store.setValue("detection/backend", "grounding_dino")
+    store.setValue("detection/model", "saved local DINO")
+    store.sync()
     restored = DetectionSettings.load()
     assert restored.backend == "grounding_dino"
     # EXE에서는 systems/models/grounding-dino-base가 번들 Base 모델이다.
